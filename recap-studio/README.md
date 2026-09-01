@@ -15,34 +15,45 @@ and **inline HTML/CSS/JS** for the UI — no npm, no build step, no extra web de
 
 ## What it looks like
 
-Dashboard-style panel (modeled on the reference screenshot):
-- Top stats row: **Clips Made**, **Runs**, **Storage**, **Accounts**.
-- Tabs for **EN clip**, **ZH clip**, **Settings**.
-- Per-tab Run buttons; a **Settings** panel for movie path, voice/subtitle language,
-  auto-recap toggle, and the **Ollama + Qwen** LLM config.
-- A live **Console** streaming pipeline logs.
+Dashboard-style panel:
+- Top stats row: **Clips Made**, **Runs**, **Storage**, **Tracks**.
+- Tabs for **EN clip**, **ZH clip**, **Script editor**, **Settings**.
+- Per-tab Run buttons, a **Generate both clips** button, a **Stop run** button and a
+  **Close Studio** button (shuts the server down from the browser).
+- Per-clip output table with **open** / **download** links (the server streams the
+  mp4 with HTTP Range support, so it also plays inline).
+- A live **Console** streaming the real pipeline log.
 
 ---
 
 ## Install / run
 
-Dependencies for the pipeline (installed via pip):
+### Windows — one click
+
+| File | Does |
+|------|------|
+| `setup_ui.bat` | **Opens** Recap Studio: finds Python, installs missing deps, checks ffmpeg, starts the panel and opens it in your browser. If it is already running it just opens the browser again. |
+| `stop_ui.bat` | **Closes** it: asks the panel to shut down (cancelling any render), waits for the port to be released, then closes its own window. |
+
+You can also close it from the panel (**Close Studio**) or with `Ctrl+C` in the
+launcher window. Both batch files honour a `PORT` environment variable
+(default `8080`).
+
+### Any OS — from the command line
 
 ```bash
-pip install PyYAML pysubs2 edge-tts static-ffmpeg
-```
+pip install PyYAML pysubs2 edge-tts static-ffmpeg openai
 
-Start the control panel:
-
-```bash
-cd /home/user/recap-studio
-python3 app.py          # listens on 0.0.0.0:8080
+python recap-studio/app.py                      # listens on 0.0.0.0:8080
+python recap-studio/app.py --port 9000 --open-browser
 ```
 
 Open <http://localhost:8080>.
 
-> Server uses only the stdlib, so nothing to install for the UI itself. `ffmpeg` is
-> resolved automatically through `static-ffmpeg`.
+> The server itself is stdlib-only, so nothing to install for the UI. `ffmpeg` is
+> resolved automatically through `static-ffmpeg` (it downloads its binaries on
+> first use). `recap-studio/runner.py` still works as an entry point and simply
+> forwards to the same server.
 
 ---
 
@@ -51,20 +62,32 @@ Open <http://localhost:8080>.
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/` | GET | Control panel UI |
-| `/api/status` | GET | config + job state + outputs + env health |
-| `/api/config` | POST | save/update persisted settings (JSON body) |
-| `/api/run` | POST | start background run, body `{"langs":["en","zh"]}` |
-| `/api/logs` | GET | recent pipeline log lines (`?n=200`) |
+| `/api/status` | GET | config + job state + outputs + env health + script paths |
+| `/api/logs?n=200` | GET | recent pipeline log lines |
+| `/api/scripts?lang=en\|zh` | GET | narration script for one language |
+| `/output/<file>.mp4` | GET | stream a rendered clip (supports `Range`) |
 | `/healthz` | GET | liveness check |
+| `/api/config` | POST | save/update persisted settings (JSON body) |
+| `/api/run` | POST | start a background run, body `{"langs":["en","zh"]}` |
+| `/api/generate` | POST | the **Generate** button: run both clips |
+| `/api/render` | POST | save edited scripts, then re-render (never calls the LLM) |
+| `/api/stop_run` | POST | cancel the running job; the server stays up |
+| `/api/stop` | POST | cancel any run and shut the server down |
+
+A run in progress makes `/api/run`, `/api/generate` and `/api/render` return
+`409`; `/api/render` still saves your scripts in that case.
 
 ### Examples
 
 ```bash
 curl -X POST localhost:8080/api/config -H "Content-Type: application/json" \
-  -d '{"movie_path":"/home/user/my_movie.mp4","storyboard":false}'
+  -d '{"movie_path":"C:\\Movies\\my_movie.mp4","storyboard":false}'
 
 curl -X POST localhost:8080/api/run -H "Content-Type: application/json" \
   -d '{"langs":["en","zh"]}'
+
+curl "localhost:8080/api/scripts?lang=en"
+curl -X POST localhost:8080/api/stop          # shut the panel down
 ```
 
 ---
@@ -91,12 +114,18 @@ Stored in `config.json` (next to the code). Key fields:
 |-------|---------|
 | `movie_path` | path to an owned movie file (empty → placeholder scenes) |
 | `storyboard` | use placeholder scenes when no movie is set |
+| `duration` | target clip length in seconds (shapes the LLM prompt in auto mode) |
 | `auto` | write the narration from the movie's dialogue (needs movie + LLM) |
 | `auto_subtitle` | optional explicit `.srt`; blank = look next to the movie, else Whisper |
 | `whisper_model` | Whisper model size used when no subtitle exists (default `small`) |
 | `voice_en` / `voice_zh` | narrator voices (edge-tts) |
 | `subtitle_lang_en` / `subtitle_lang_zh` | subtitle languages (default `en` / `zh`) |
-| `llm_base_url` / `llm_api_key` / `llm_model` | LLM (default Ollama + Qwen, no key) |
+| `llm_provider` / `llm_base_url` / `llm_api_key` / `llm_model` | LLM used for auto scripting (default Ollama + Qwen, no key) |
+
+Everything in this table is applied to the pipeline by `runner.recap_cfg()` —
+including the LLM fields, which are pushed into both the recap config and the
+environment (`OLLAMA_BASE_URL`, `OPENAI_API_KEY`, …) that `recap/llm.py` reads.
+
 
 ---
 

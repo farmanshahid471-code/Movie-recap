@@ -1,1 +1,7 @@
 samplemovie/ 
+
+# local virtualenvs / caches
+.venv/
+venv/
+__pycache__/
+*.pyc
