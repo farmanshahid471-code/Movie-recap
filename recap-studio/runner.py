@@ -17,6 +17,10 @@ import threading
 import time
 from contextlib import redirect_stdout
 from pathlib import Path
+from urllib.parse import urlparse
+import json
+
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BOT_DIR = Path(__file__).resolve().parent.parent / "movie-recap-bot"
 if str(BOT_DIR) not in sys.path:
@@ -59,6 +63,31 @@ def _log(msg: str) -> None:
         LOG_BUFFER.append(msg)
         if len(LOG_BUFFER) > MAX_LOG_LINES:
             del LOG_BUFFER[: len(LOG_BUFFER) - MAX_LOG_LINES]
+
+
+def _which(name: str) -> str | None:
+    import shutil
+
+    p = shutil.which(name)
+    if p:
+        return p
+    # static-ffmpeg binaries (used by the recap pipeline) aren't on PATH; resolve them.
+    try:
+        import static_ffmpeg  # type: ignore
+
+        static_ffmpeg.add_paths()
+        p = shutil.which(name)
+        if p:
+            return p
+    except Exception:
+        pass
+    return None
+
+
+def _have(mod: str) -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec(mod) is not None
 
 
 def load_config() -> dict:
@@ -106,7 +135,7 @@ def _ensure_scripts(workdir: Path) -> tuple[Path, Path]:
 def _load_recap(
     cfg: dict,
     lang: str,
-) -> "dict":
+) -> dict:
     """Build a recap config for a single-language run."""
     from recap.config import load_config
 
@@ -208,6 +237,41 @@ def list_outputs() -> list[dict]:
 
 
 # --------------------------------------------------------------------------
+# Helper: write edited scripts into the pipeline workdir
+# --------------------------------------------------------------------------
+def _write_scripts(en_script: str, zh_script: str) -> None:
+    """Write the edited EN + ZH scripts into the pipeline workdir script/ folder.
+
+    The recap pipeline reads its narration scripts from <workdir>/script/script_en.txt
+    and script_zh.txt, so we place them there so the next pipeline run uses them.
+    """
+    from recap.config import work_dir as _work_dir
+
+    wd = _work_dir({})
+    sdir = wd / "script"
+    sdir.mkdir(parents=True, exist_ok=True)
+    (sdir / "script_en.txt").write_text(en_script, encoding="utf-8")
+    (sdir / "script_zh.txt").write_text(zh_script, encoding="utf-8")
+
+
+# --------------------------------------------------------------------------
+# Helper: read a script file for the given language
+# --------------------------------------------------------------------------
+def _scripts_endpoint(lang: str) -> dict:
+    """Read the script file for the given language from the pipeline workdir."""
+    from recap.config import work_dir as _work_dir
+    wd = _work_dir({})
+    sdir = wd / "script"
+    if lang == "en":
+        p = sdir / "script_en.txt"
+    else:
+        p = sdir / "script_zh.txt"
+    if p.exists():
+        return {"script": p.read_text(encoding="utf-8")}
+    return {"script": ""}
+
+
+# --------------------------------------------------------------------------
 # Background run manager (non-blocking so the UI stays responsive)
 # --------------------------------------------------------------------------
 def start_run(langs: list[str], cfg: dict | None = None) -> bool:
@@ -248,6 +312,149 @@ def overall_cfg() -> dict:
     return load_config()
 
 
+# --------------------------------------------------------------------------
+# HTTP control panel server (Python stdlib only)
+# --------------------------------------------------------------------------
+class Handler(BaseHTTPRequestHandler):
+    """HTTP request handler for the Recap Studio control panel."""
+
+    def log_message(self, fmt, *args):  # silence default request logging
+        pass
+
+    def _send(self, code: int, body: bytes, ctype: str) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, code: int, obj) -> None:
+        self._send(code, json.dumps(obj, ensure_ascii=False).encode(), "application/json")
+
+    def _read_body(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {}
+
+    # ---- routes -----------------------------------------------------------
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path in ("/", "/index.html"):
+            return self._index()
+        if path == "/api/status":
+            return self._json(200, self._status())
+        if path == "/api/logs":
+            n = int(self._query("n", "200"))
+            return self._json(200, {"logs": log_tail(n)})
+        if path == "/healthz":
+            return self._send(200, b"ok", "text/plain")
+        if path == "/api/scripts":
+            lang = self._query("lang", "en")
+            return self._json(200, _scripts_endpoint(lang))
+        if path == "/api/generate":
+            ok = start_run(["en", "zh"])
+            return self._json(200 if ok else 409, {"ok": ok})
+        return self._json(404, {"error": "not found"})
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        if path == "/api/config":
+            cfg = self._read_body()
+            merged = load_config()
+            merged.update(cfg)
+            save_config(merged)
+            # make Zhipu key available to the pipeline environment
+            if merged.get("llm_api_key"):
+                os.environ.setdefault("LLM_API_KEY", merged["llm_api_key"])
+            return self._json(200, {"ok": True, "config": merged})
+        if path == "/api/run":
+            body = self._read_body()
+            langs = [l for l in body.get("langs", ["en", "zh"]) if l in ("en", "zh")]
+            ok = start_run(langs, load_config())
+            return self._json(ok and 200 or 409, {"ok": ok, "running": ok})
+        if path == "/api/render":
+            body = self._read_body()
+            en_script = body.get("en_script", "")
+            zh_script = body.get("zh_script", "")
+            _write_scripts(en_script, zh_script)
+            # Start render run with auto=false so the pipeline uses the existing scripts
+            start_run(["en", "zh"], cfg={"auto": False})
+            return self._json(200, {"ok": True})
+        if path == "/api/scripts":
+            # POST to update scripts (optional; GET /api/scripts?lang=en reads them)
+            body = self._read_body()
+            return self._json(200, {"ok": True})
+        return self._json(404, {"error": "not found"})
+
+    def _query(self, key, default):
+        q = urlparse(self.path).query
+        for pair in q.split("&"):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                if k == key:
+                    return v
+        return default
+
+    def _index(self):
+        html = (STUDIO_DIR / "static" / "index.html").read_text(encoding="utf-8")
+        self._send(200, html.encode(), "text/html; charset=utf-8")
+
+    def _status(self) -> dict:
+        cfg = load_config()
+        clips = []
+        mp = cfg.get("movie_path", "").strip()
+        if mp:
+            clips.append({"path": mp, "exists": os.path.exists(mp), "size_mb": _mb(mp)})
+        return {
+            "engine": cfg.get("engine", "recap"),
+            "config": cfg,
+            "job": status(),
+            "outputs": list_outputs(),
+            "clips": clips,
+            "env": {
+                "ffmpeg": bool(_which("ffmpeg")),
+                "scene_detect": _have("scenedetect"),
+                "llm_provider": cfg.get("llm_provider", "none"),
+                "llm_key_set": bool(cfg.get("llm_api_key")),
+                "llm_ready": _llm_ready(cfg),
+                "movie_set": bool(mp),
+                "movie_exists": bool(mp and os.path.exists(mp)),
+                "edge_tts": bool(_have("edge_tts")),
+            }
+        }
+
+    @staticmethod
+    def _mb(path: str) -> float:
+        try:
+            return round(os.path.getsize(path) / 1e6, 2)
+        except Exception:
+            return 0.0
+
+    def _llm_ready(self, cfg: dict) -> bool:
+        """Whether the LLM is usable: Ollama is key-free + configured; others need a key."""
+        prov = (cfg.get("llm_provider") or "none").lower()
+        if prov == "ollama":
+            return True  # no key required; reachability is checked at run time
+        if prov == "none":
+            return False
+        return bool(cfg.get("llm_api_key"))
+
+
+def main(host: str = "0.0.0.0", port: int = 8080):
+    server = ThreadingHTTPServer((host, port), Handler)
+    print(f"Recap Studio control panel listening on http://{host}:{port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
 if __name__ == "__main__":
-    # quick manual test: run both languages
-    print(run_language("en"))
+    port = int(os.environ.get("PORT", "8080"))
+    main(port=port)
