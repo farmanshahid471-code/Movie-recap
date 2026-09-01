@@ -39,7 +39,8 @@ h1{font-size:20px;font-weight:700;letter-spacing:.2px}
 fieldset{border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:16px}
 legend{font-size:12px;color:var(--muted);padding:0 8px}
 label{display:block;font-size:12px;color:var(--muted);margin:10px 0 5px}
-input[type=text],input[type=number],textarea{width:100%;background:#0e1420;border:1px solid var(--border);border-radius:8px;color:var(--text);padding:9px 12px;font-size:13px}
+input[type=text],input[type=number],textarea,select{width:100%;background:#0e1420;border:1px solid var(--border);border-radius:8px;color:var(--text);padding:9px 12px;font-size:13px}
+select{appearance:none;cursor:pointer}
 textarea{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;line-height:1.5;resize:vertical}
 input:focus,textarea:focus{outline:2px solid rgba(59,130,246,.4);border-color:transparent}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
@@ -253,12 +254,15 @@ function settingsCard(cfg, s){
 
     '<fieldset><legend>LLM — Ollama + Qwen (free, local, no key)</legend>' +
       '<div class="grid2">' +
-        '<div><label>Provider</label><input type="text" id="llm_provider" value="' + esc(cfg.llm_provider) + '" placeholder="ollama / openai / deepseek / anthropic / none"></div>' +
+        '<div><label>Provider</label><select id="llm_provider">' +
+          ['ollama','deepseek','openai','anthropic','none'].map(p =>
+            '<option value="' + p + '"' + ((cfg.llm_provider || 'ollama') === p ? ' selected' : '') + '>' + p + '</option>').join('') +
+        '</select></div>' +
         '<div><label>Model</label><input type="text" id="llm_model" value="' + esc(cfg.llm_model) + '"></div>' +
         '<div><label>Base URL</label><input type="text" id="llm_base_url" value="' + esc(cfg.llm_base_url) + '"></div>' +
         '<div><label>API key</label><input type="text" id="llm_api_key" value="' + esc(cfg.llm_api_key) + '" placeholder="not required for Ollama"></div>' +
       '</div>' +
-      '<div class="desc mt">Free &amp; fully local. On your machine run <b>ollama serve</b>, then <b>ollama pull qwen2.5</b>. The recap script and its Chinese translation are then written automatically.</div>' +
+      '<div class="desc mt" id="llmNote"></div>' +
       '<div class="btnrow"><button class="btn primary" id="saveCfg">Save settings</button></div>' +
     '</fieldset>' +
 
@@ -272,6 +276,28 @@ function settingsCard(cfg, s){
     ['python ' + (env.python || '?'), true]
   ];
   card.querySelector('#envTags').innerHTML = items.map(([n, ok]) => '<span class="pill">' + dot(ok) + ' ' + esc(n) + '</span>').join('');
+
+  // Switching provider also fills in that provider's endpoint + model, so you
+  // cannot end up asking DeepSeek for "qwen2.5".
+  const PRESETS = {
+    ollama:    { model:'qwen2.5',                  base:'http://localhost:11434/v1',   key:false, note:'Free and fully local. Run <b>ollama serve</b>, then <b>ollama pull qwen2.5</b>. No key. Nothing leaves your machine.' },
+    deepseek:  { model:'deepseek-chat',            base:'https://api.deepseek.com/v1', key:true,  note:'Cheap and strong, especially for the 简体中文 translation. Needs a key from platform.deepseek.com and sends your transcript to their API.' },
+    openai:    { model:'gpt-4o-mini',              base:'https://api.openai.com/v1',   key:true,  note:'Needs an OpenAI key. Works with any OpenAI-compatible endpoint by changing the base URL.' },
+    anthropic: { model:'claude-3-5-sonnet-latest', base:'',                            key:true,  note:'Needs an Anthropic key. The base URL is fixed by the SDK.' },
+    none:      { model:'',                         base:'',                            key:false, note:'No LLM. The pipeline uses the scripts in the Script editor tab (or the bundled samples).' }
+  };
+  const provSel = card.querySelector('#llm_provider');
+  const knownModels = Object.values(PRESETS).map(p => p.model).filter(Boolean);
+  provSel.onchange = () => {
+    const p = PRESETS[provSel.value] || PRESETS.ollama;
+    const m = card.querySelector('#llm_model'), b = card.querySelector('#llm_base_url'), k = card.querySelector('#llm_api_key');
+    if (!m.value.trim() || knownModels.includes(m.value.trim())) m.value = p.model;
+    if (!b.value.trim() || Object.values(PRESETS).some(x => x.base && x.base === b.value.trim())) b.value = p.base;
+    k.disabled = !p.key;
+    k.placeholder = p.key ? 'paste your API key' : 'not needed for this provider';
+    card.querySelector('#llmNote').innerHTML = p.note;
+  };
+  provSel.onchange();
 
   card.querySelector('#saveCfg').onclick = async () => {
     const body = {

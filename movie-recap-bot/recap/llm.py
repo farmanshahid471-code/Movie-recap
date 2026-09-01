@@ -22,8 +22,22 @@ class LLMError(RuntimeError):
     pass
 
 
-def _client_from(provider: str, model: str):
-    """Lazily build a client and return (client, model, needs_key=False)."""
+# Per-provider fallback when no model is configured.
+DEFAULT_MODELS = {
+    "openai": "gpt-4o-mini",
+    "deepseek": "deepseek-chat",
+    "anthropic": "claude-3-5-sonnet-latest",
+    "ollama": "qwen2.5",
+}
+
+
+def _client_from(provider: str, model: str, base_url: str | None = None):
+    """Lazily build a client and return (client, model).
+
+    ``base_url`` is the provider endpoint from config; it wins over the env
+    var so the control panel's Base URL field is honoured for every provider,
+    not just Ollama.
+    """
     provider = (provider or "").strip().lower()
 
     if provider in ("", "none"):
@@ -38,9 +52,9 @@ def _client_from(provider: str, model: str):
 
         client = openai.OpenAI(
             api_key=os.environ.get("OPENAI_API_KEY"),
-            base_url=os.environ.get("OPENAI_BASE_URL") or None,
+            base_url=base_url or os.environ.get("OPENAI_BASE_URL") or None,
         )
-        model = model or os.environ.get("MODEL_NAME") or "gpt-4o-mini"
+        model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["openai"]
         return client, model
 
     if provider == "deepseek":
@@ -48,32 +62,40 @@ def _client_from(provider: str, model: str):
 
         client = openai.OpenAI(
             api_key=os.environ.get("DEEPSEEK_API_KEY"),
-            base_url=os.environ.get("OPENAI_BASE_URL") or "https://api.deepseek.com/v1",
+            base_url=base_url
+            or os.environ.get("DEEPSEEK_BASE_URL")
+            or "https://api.deepseek.com/v1",
         )
-        model = model or os.environ.get("MODEL_NAME") or "deepseek-chat"
+        model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["deepseek"]
         return client, model
 
     if provider == "anthropic":
         import anthropic  # type: ignore
 
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-        model = model or os.environ.get("MODEL_NAME") or "claude-3-5-sonnet-latest"
+        model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["anthropic"]
         return client, model
 
     if provider == "ollama":
         import openai  # type: ignore
 
-        base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+        base = base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
         client = openai.OpenAI(base_url=base, api_key="ollama")
-        model = model or os.environ.get("MODEL_NAME") or "qwen2.5"
+        model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["ollama"]
         return client, model
 
     raise LLMError(f"Unknown LLM provider: {provider!r}")
 
 
-def complete(provider: str, model: str, system: str, user: str) -> str:
+def complete(
+    provider: str,
+    model: str,
+    system: str,
+    user: str,
+    base_url: str | None = None,
+) -> str:
     """Send a single completion (no history). Returns assistant text."""
-    client, resolved_model = _client_from(provider, model)
+    client, resolved_model = _client_from(provider, model, base_url)
 
     try:  # OpenAI-compatible + Ollama
         resp = client.chat.completions.create(

@@ -141,32 +141,53 @@ voice, burns subtitles in the same language as the dubbing, and renders to
 
 ---
 
-## LLM — Ollama + Qwen (free, local, no key)
+## LLM — which provider?
 
-The recap script (EN) and the Chinese translation are written by a local **Ollama**
-server running **Qwen** — free, offline, no API key.
+The narration script (EN) and its 简体中文 translation are written by whichever
+provider you pick in **Settings → LLM**. All of these go through the same
+OpenAI-compatible code path in `recap/llm.py`.
 
-On your machine (one-time setup):
+| Provider | Cost | Key | Base URL | Default model |
+|----------|------|-----|----------|---------------|
+| `ollama` (default) | free, local | no | `http://localhost:11434/v1` | `qwen2.5` |
+| `deepseek` | ~cents per movie | yes | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| `openai` | paid | yes | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| `anthropic` | paid | yes | (fixed by the SDK) | `claude-3-5-sonnet-latest` |
+| `none` | — | no | — | uses the Script editor / bundled scripts |
+
+Switching provider in the dropdown also fills in that provider's endpoint and
+model, then **Save settings** — nothing else to edit. The key you paste is
+exported as the matching env var (`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`) that `recap/llm.py` reads.
+
+### Ollama (free, local, no key)
 
 ```bash
-# 1. Install Ollama
-curl -fsSL https://ollama.com/install.sh | sh
-
-# 2. Start the server + pull the model
-ollama serve          # keep this running (or run it as a service)
+curl -fsSL https://ollama.com/install.sh | sh   # Windows: download the installer
+ollama serve          # keep this running
 ollama pull qwen2.5
 ```
 
-Config is already set to `provider: ollama`, `model: qwen2.5`,
-`base_url: http://localhost:11434/v1`. No key to paste.
+Best when: you want $0 cost, offline operation, and your transcript never
+leaving your machine. Watch two things — the model has to be big enough to hold
+the "one sentence per line, line-aligned translation" contract over ~1400 words
+(a 7B model will drift), and Ollama's default context window truncates a
+full-length movie transcript, so raise `num_ctx` or pass an `.srt`.
 
-The pipeline uses Ollama's **OpenAI-compatible endpoint** (`/v1/chat/completions`),
-so it also works with any OpenAI-compatible local/cloud endpoint by changing the
-base URL and model.
+### DeepSeek (cheap, strong Chinese)
 
-> To use a cloud LLM instead (e.g. Zhipu GLM, OpenAI, Claude), set those in the
-> Settings tab / `config.yaml` and supply an API key. Ollama is the default because
-> it's free and key-free.
+```bash
+# get a key at platform.deepseek.com, then in Settings:
+#   provider = deepseek, model = deepseek-chat, key = sk-...
+```
+
+Best when: you are publishing and want the strongest 简体中文 translation for
+the price — the translation prompt is written in Chinese and DeepSeek handles
+that natively. Trade-off: it needs internet + a key, and your transcript goes
+to their API.
+
+> The pipeline falls back to the bundled sample scripts if the LLM is
+> unreachable, so a clip still renders either way.
 
 ---
 

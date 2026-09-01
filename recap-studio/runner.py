@@ -242,15 +242,31 @@ def recap_cfg(cfg: dict, lang: str) -> dict:
     return rc
 
 
+_KEY_ENV = {
+    "openai": "OPENAI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
+
+# Sensible model when the provider changes and nothing better is configured.
+PROVIDER_PRESETS = {
+    "ollama": {"model": "qwen2.5", "base_url": "http://localhost:11434/v1", "key": False},
+    "deepseek": {"model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1", "key": True},
+    "openai": {"model": "gpt-4o-mini", "base_url": "https://api.openai.com/v1", "key": True},
+    "anthropic": {"model": "claude-3-5-sonnet-latest", "base_url": "", "key": True},
+    "none": {"model": "", "base_url": "", "key": False},
+}
+
+
 def _apply_llm(rc: dict, cfg: dict) -> None:
     """Push the panel's LLM settings into the recap config + environment.
 
     recap.llm reads provider/base-url/model from the config *and* from env vars
-    (OLLAMA_BASE_URL, OPENAI_API_KEY, ...), so both have to be set here or the
+    (OLLAMA_BASE_URL, DEEPSEEK_API_KEY, ...), so both have to be set here or the
     Settings tab would be a no-op.
     """
     provider = (cfg.get("llm_provider") or "ollama").strip().lower()
-    model = cfg.get("llm_model") or "qwen2.5"
+    model = cfg.get("llm_model") or PROVIDER_PRESETS.get(provider, {}).get("model", "")
     base = cfg.get("llm_base_url") or ""
     key = (cfg.get("llm_api_key") or "").strip()
 
@@ -260,14 +276,20 @@ def _apply_llm(rc: dict, cfg: dict) -> None:
     if base:
         rc["llm"]["base_url"] = base
 
+    os.environ["LLM_PROVIDER"] = provider
     if provider == "ollama":
         os.environ["OLLAMA_BASE_URL"] = base or "http://localhost:11434/v1"
-    os.environ["LLM_PROVIDER"] = provider
-    os.environ["MODEL_NAME"] = model
+    elif base:
+        # recap.llm now takes base_url from the config, but keep the env var in
+        # sync so a direct `python -m recap.cli` run behaves the same.
+        os.environ[f"{provider.upper()}_BASE_URL"] = base
+    if model:
+        os.environ["MODEL_NAME"] = model
     if key:
         os.environ["LLM_API_KEY"] = key
-        for var in ("OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"):
-            os.environ.setdefault(var, key)
+        var = _KEY_ENV.get(provider)
+        if var:
+            os.environ[var] = key  # authoritative for the selected provider
 
 
 # --------------------------------------------------------------------------

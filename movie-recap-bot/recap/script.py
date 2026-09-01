@@ -90,7 +90,11 @@ def generate_from_dialogue(
     system = "You write engaging, present-tense movie recap narration."
     user = render_dialogue_prompt(transcript, plot, target, mn, mx)
     return llm.complete(
-        cfg_llm.get("provider", ""), model or cfg_llm.get("model", ""), system, user
+        cfg_llm.get("provider", ""),
+        model or cfg_llm.get("model", ""),
+        system,
+        user,
+        base_url=cfg_llm.get("base_url"),
     )
 
 
@@ -98,7 +102,11 @@ def generate_online(notes: str, cfg_llm: dict, target: int, mn: int, mx: int) ->
     system = "You write engaging, present-tense movie recap narration."
     user = render_prompt(notes, target, mn, mx)
     return llm.complete(
-        cfg_llm.get("provider", ""), cfg_llm.get("model", ""), system, user
+        cfg_llm.get("provider", ""),
+        cfg_llm.get("model", ""),
+        system,
+        user,
+        base_url=cfg_llm.get("base_url"),
     )
 
 
