@@ -1,0 +1,8 @@
+file '/home/user/movie-recap-bot/output/_work/norm/seg_000.mp4'
+file '/home/user/movie-recap-bot/output/_work/norm/seg_001.mp4'
+file '/home/user/movie-recap-bot/output/_work/norm/seg_002.mp4'
+file '/home/user/movie-recap-bot/output/_work/norm/seg_003.mp4'
+file '/home/user/movie-recap-bot/output/_work/norm/seg_004.mp4'
+file '/home/user/movie-recap-bot/output/_work/norm/seg_005.mp4'
+file '/home/user/movie-recap-bot/output/_work/norm/seg_006.mp4'
+file '/home/user/movie-recap-bot/output/_work/norm/seg_007.mp4'

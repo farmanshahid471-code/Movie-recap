@@ -1,0 +1,30 @@
+# Clip 1 — ENGLISH dubbing + ENGLISH burned-in subtitles.
+# Narration language = en -> script generated in English, TTS = en voice,
+# subtitles = original (English, matching the narration).
+movie: "Sample Movie"
+style: "engaging story recap"
+duration: 60
+lang: en                    # narration language
+voice: en-US-ChristopherNeural
+video_format: "16:9"
+video: "/home/user/samplemovie/sample_movie.mp4"
+no_bgm: true
+
+steps:
+  research: true
+  align: false              # optional; enable with [ml] extra for word-level timestamps
+  scene: true
+  match: true
+  bgm: false
+  export: false
+  translate: false          # subtitles stay in narration language (English)
+
+subtitle_lang: ""           # empty = original subtitles in the narration language (EN)
+subtitle_mode: original
+narration_preset: "mainstream-dry"
+
+params:
+  scene_threshold: 27.0
+  scene_frame_skip: 6
+  scene_merge_min_duration: 2.0
+  match_min_score: 0.25

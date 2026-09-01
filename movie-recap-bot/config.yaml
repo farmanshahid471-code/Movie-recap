@@ -1,0 +1,44 @@
+# Active config (copy of config.example.yaml; adjust freely)
+project:
+  name: "pinocchio-recap"
+  output_dir: "output"
+
+language:
+  target_languages: ["en", "zh"]
+  zh_variant: "zh-CN"
+
+narration:
+  words_target: 1400
+  words_min: 500
+  words_max: 2600
+  lang_voice:
+    en: "en-US-ChristopherNeural"
+    zh: "zh-CN-YunxiNeural"
+  tts_provider: "edge"
+  rate: "+0%"
+
+subtitles:
+  font: "Noto Serif CJK SC"
+  fontsize: 56
+  margin_v: 96
+  margin_x: 40
+  outline: 3
+  shadow: 1
+  max_combo_duration: 6.0
+  line_width_units: 30
+  display_lang: "en"
+
+video:
+  fps: 30
+  width: 1920
+  height: 1080
+  concat_mode: "fit"
+  codec: "libx264"
+  audio_codec: "aac"
+  bgm: ""
+  bgm_volume: 0.12
+
+llm:
+  provider: ollama      # free, local, no key. Start with `ollama serve`
+  model: qwen2.5        # pull with `ollama pull qwen2.5`
+  base_url: "http://localhost:11434/v1"

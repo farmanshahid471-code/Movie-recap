@@ -1,0 +1,12 @@
+1
+00:00:00,500 --> 00:00:03,000
+A boy loses both of his parents in a car accident.
+2
+00:00:03,500 --> 00:00:06,000
+He moves in with his grandfather, Japetto.
+3
+00:00:06,500 --> 00:00:09,000
+One day he finds a living puppet in the basement.
+4
+00:00:09,500 --> 00:00:12,000
+The puppet starts hurting everyone who hurt the boy.

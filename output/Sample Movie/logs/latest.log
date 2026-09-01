@@ -1,0 +1,2 @@
+[782eeea3] 2026-08-26 00:14:06 [INFO] STEP_START preflight
+[782eeea3] 2026-08-26 00:14:06 [DEBUG]   preflight: probing LLM at https://open.bigmodel.cn/api/paas/v4 (model=glm-4-flash)

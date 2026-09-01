@@ -1,0 +1,14 @@
+{
+  "engine": "recap",
+  "movie_path": "",
+  "storyboard": true,
+  "duration": 60,
+  "voice_en": "en-US-ChristopherNeural",
+  "voice_zh": "zh-CN-YunxiNeural",
+  "subtitle_lang_en": "en",
+  "subtitle_lang_zh": "zh",
+  "llm_provider": "ollama",
+  "llm_base_url": "http://localhost:11434/v1",
+  "llm_api_key": "",
+  "llm_model": "qwen2.5"
+}

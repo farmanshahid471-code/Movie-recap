@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Recap Studio — Control Panel</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#151a24; --panel2:#1b2230; --border:#263041;
+    --text:#e8edf5; --muted:#8a97ad; --accent:#22c55e; --accent2:#3b82f6;
+    --warn:#eab308; --danger:#ef4444; --chip:#1f2837;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:28px;min-height:100vh}
+  .wrap{max-width:1180px;margin:0 auto}
+  h1{font-size:20px;font-weight:700;letter-spacing:.2px}
+  .sub{color:var(--muted);font-size:13px;margin-top:2px}
+  .badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;background:var(--chip);color:var(--muted);border:1px solid var(--border)}
+  .badge.green{background:rgba(34,197,94,.12);color:#4ade80;border-color:rgba(34,197,94,.35)}
+  .badge.yellow{background:rgba(234,179,8,.12);color:#facc15;border-color:rgba(234,179,8,.35)}
+  .badge.red{background:rgba(239,68,68,.12);color:#f87171;border-color:rgba(239,68,68,.35)}
+  .badge.blue{background:rgba(59,130,246,.14);color:#60a5fa;border-color:rgba(59,130,246,.35)}
+  .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:22px}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px}
+  @media(max-width:760px){.stats{grid-template-columns:repeat(2,1fr)}}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:18px}
+  .stat .num{font-size:26px;font-weight:700}
+  .stat .lab{color:var(--muted);font-size:12px;margin-top:6px;text-transform:uppercase;letter-spacing:.5px}
+  .tabs{display:flex;gap:8px;margin-bottom:16px}
+  .tab{padding:9px 16px;border-radius:10px;background:var(--chip);border:1px solid var(--border);font-size:13px;cursor:pointer;color:var(--muted);font-weight:600}
+  .tab.active{background:rgba(59,130,246,.14);color:#60a5fa;border-color:rgba(59,130,246,.4)}
+  .tab .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;background:var(--muted)}
+  .tab.active .dot{background:var(--accent)}
+  .card h2{font-size:15px;font-weight:700;margin-bottom:4px}
+  .card h3{font-size:13px;font-weight:600;color:var(--muted);margin-bottom:12px}
+  .desc{color:var(--muted);font-size:12.5px;line-height:1.5;margin-bottom:16px}
+  fieldset{border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:16px}
+  legend{font-size:12px;color:var(--muted);padding:0 8px}
+  label{display:block;font-size:12px;color:var(--muted);margin:10px 0 5px}
+  input[type=text],input[type=number]{width:100%;background:#0e1420;border:1px solid var(--border);border-radius:8px;color:var(--text);padding:9px 12px;font-size:13px}
+  input:focus{outline:2px solid rgba(59,130,246,.4);border-color:transparent}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:700px){.grid2{grid-template-columns:1fr}}
+  .btn{border:none;border-radius:9px;padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;background:var(--chip);color:var(--text);border:1px solid var(--border)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#052e16}
+  .btn.primary:hover{filter:brightness(1.08)}
+  .btn.blue{background:var(--accent2);border-color:var(--accent2);color:#eef4ff}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btnrow{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
+  .switch{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-top:12px;cursor:pointer}
+  .switch input{width:16px;height:16px}
+  .logpre{background:#070b11;border:1px solid var(--border);border-radius:10px;padding:12px;height:220px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.6;color:#a8b3c5;white-space:pre-wrap}
+  .table{width:100%;border-collapse:collapse;font-size:12.5px}
+  .table th,.table td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border)}
+  .table th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px}
+  .tags{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+  .pill{background:var(--chip);border:1px solid var(--border);border-radius:7px;padding:6px 10px;font-size:12px;color:var(--muted)}
+  .pill b{color:var(--text);font-weight:600}
+  .muted{color:var(--muted)}
+  .mt{margin-top:16px}
+  .mk-row{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}
+  .nowrap{white-space:nowrap}
+  .status-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <div>
+      <h1>🎬 Recap Studio — Control Panel</h1>
+      <div class="sub">Two clips per movie: English dubbing + English subtitles, and Chinese dubbing + Chinese subtitles.</div>
+      <div class="row mt">
+        <span class="badge" id="engBadge">engine: recap</span>
+        <span class="badge yellow" id="modeBadge">mode: NOT READY</span>
+        <span class="badge" id="jobBadge">runner: idle</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="card stat"><div class="num" id="statClips">0</div><div class="lab">Clips Made</div></div>
+    <div class="card stat"><div class="num" id="statRuns">0</div><div class="lab">Runs</div></div>
+    <div class="card stat"><div class="num" id="statStorage">0 MB</div><div class="lab">Storage</div></div>
+    <div class="card stat"><div class="num">2</div><div class="lab">Accounts (En / Zh)</div></div>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="en"><span class="dot"></span>EN clip</div>
+    <div class="tab" data-tab="zh"><span class="dot"></span>ZH clip</div>
+    <div class="tab" data-tab="settings"><span class="dot"></span>Settings</div>
+  </div>
+
+  <div id="panel"></div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const state = {};
+
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  return r.json();
+}
+
+function el(html){ const t=document.createElement('template'); t.innerHTML=html.trim(); return t.content.firstChild; }
+
+function statusDot(ok){ return `<span class="status-dot" style="background:${ok?'var(--accent)':'var(--danger)'}"></span>`; }
+
+async function refresh(){
+  const s = await api('/api/status');
+  state.status = s;
+  const cfg = s.config||{};
+  const env = s.env||{};
+  const job = s.job||{};
+
+  // header badges
+  $('#engBadge').textContent = 'engine: '+(s.engine||'recap');
+  const llmReady = env.llm_ready;                 // ollama = true w/o key
+  const movieReady = env.movie_set && env.movie_exists;
+  const engineOk = env.ffmpeg && env.edge_tts;
+  const readyState = engineOk && (llmReady || movieReady /* scripting can be file-based */);
+  const mb = $('#modeBadge');
+  mb.className = 'badge ' + (readyState ? 'green' : 'yellow');
+  mb.textContent = 'mode: ' + (readyState ? 'READY' : 'NOT READY');
+  $('#jobBadge').className = 'badge ' + (job.running ? 'blue' : '');
+  $('#jobBadge').textContent = 'runner: '+ (job.running ? 'running…' : 'idle');
+
+  // stats
+  $('#statClips').textContent = (s.outputs||[]).length;
+  $('#statRuns').textContent = job.finished ? '1' : '0';
+  const totMb = (s.outputs||[]).reduce((a,o)=>a+o.size_mb,0);
+  $('#statStorage').textContent = totMb.toFixed(1)+' MB';
+
+  renderPanel(s);
+}
+
+function renderPanel(s){
+  const tab = document.querySelector('.tab.active').dataset.tab;
+  const cfg = s.config||{};
+  const p = $('#panel');
+  p.innerHTML='';
+  if(tab==='en' || tab==='zh'){
+    p.appendChild(clipCard(tab, cfg, s));
+  } else {
+    p.appendChild(settingsCard(cfg, s));
+  }
+}
+
+function clipCard(lang, cfg, s){
+  const isEn = lang==='en';
+  const voice = isEn ? cfg.voice_en : cfg.voice_zh;
+  const sub = isEn ? cfg.subtitle_lang_en : cfg.subtitle_lang_zh;
+  const c = el(`<div class="card">
+    <h2>${isEn?'English':'Chinese (中文)'} clip</h2>
+    <div class="desc">Dubbing in ${isEn?'English':'Mandarin 普通话'}, burned-in subtitles in ${isEn?'English':'简体中文'}.</div>
+    <fieldset><legend>Output</legend>
+      <div class="table" style="min-height:40px" id="clipTable"></div>
+    </fieldset>
+    <div class="btnrow">
+      <button class="btn primary" data-run="${lang}" ${s.job.running?'disabled':''}>Run ${lang.toUpperCase()} clip</button>
+    </div>
+  </div>`);
+  const tbl=c.querySelector('#clipTable');
+  tbl.innerHTML = `<table class="table"><tr><th>File</th><th>Size</th></tr>${
+    (s.outputs||[]).map(o=>`<tr><td>${o.name}</td><td>${o.size_mb} MB</td></tr>`).join('')||
+    '<tr><td colspan="2" class="muted">No clips yet.</td></tr>'
+  }</table>`;
+  c.querySelector('[data-run]').onclick = ()=>doRun(lang);
+  return c;
+}
+
+function settingsCard(cfg, s){
+  const c = el(`<div class="card">
+    <h2>Settings</h2>
+    <div class="desc">Point the pipeline at your owned movie (optional) and configure the LLM (Zhipu GLM) for auto scripting. The two clip voices and their subtitle languages are already set.</div>
+
+    <fieldset><legend>Movie</legend>
+      <label>Movie file path (owned / licensed)</label>
+      <input type="text" id="movie_path" value="${esc(cfg.movie_path)}" placeholder="/home/user/…/movie.mp4">
+      <label class="switch"><input type="checkbox" id="storyboard" ${cfg.storyboard?'checked':''}> Use placeholder scenes when no movie is set</label>
+      <label class="switch"><input type="checkbox" id="auto" ${cfg.auto?'checked':''}> Auto-recap: write the narration from the movie's dialogue (needs a movie + LLM)</label>
+      <label>Dialogue subtitle (.srt) — optional; blank = look for one next to the movie, else Whisper</label>
+      <input type="text" id="auto_subtitle" value="${esc(cfg.auto_subtitle)}" placeholder="/home/user/…/movie.srt (or leave blank)">
+    </fieldset>
+
+    <fieldset><legend>Clip voices & subtitles</legend>
+      <div class="grid2">
+        <div><label>English voice</label><input type="text" id="voice_en" value="${esc(cfg.voice_en)}"></div>
+        <div><label>English subtitle lang</label><input type="text" id="subtitle_lang_en" value="${esc(cfg.subtitle_lang_en)}"></div>
+        <div><label>Chinese voice</label><input type="text" id="voice_zh" value="${esc(cfg.voice_zh)}"></div>
+        <div><label>Chinese subtitle lang</label><input type="text" id="subtitle_lang_zh" value="${esc(cfg.subtitle_lang_zh)}"></div>
+      </div>
+    </fieldset>
+
+    <fieldset><legend>LLM — Ollama + Qwen (free, local, no key)</legend>
+      <div class="grid2">
+        <div><label>Ollama base URL</label><input type="text" id="llm_base_url" value="${esc(cfg.llm_base_url)}"></div>
+        <div><label>Model</label><input type="text" id="llm_model" value="${esc(cfg.llm_model)}"></div>
+      </div>
+      <label>API key</label>
+      <input type="text" id="llm_api_key" value="${esc(cfg.llm_api_key)}" placeholder="not required for Ollama">
+      <div class="desc">Free &amp; fully local. On your machine run: <b>ollama serve</b> then <b>ollama pull qwen2.5</b>. When the server is up and the model is pulled, the recap script + Chinese translation are auto-written for both clips.</div>
+      <div class="btnrow"><button class="btn primary" id="saveCfg">Save settings</button></div>
+    </fieldset>
+
+    <fieldset><legend>Environment</legend>
+      <div class="tags" id="envTags"></div>
+    </fieldset>
+  </div>`);
+
+  const envTags = c.querySelector('#envTags');
+  const env = s.env||{};
+  const items = [
+    ['ffmpeg', env.ffmpeg], ['edge-tts', env.edge_tts],
+    ['scene detect', env.scene_detect],
+    ['movie set', env.movie_set], ['movie file exists', env.movie_exists],
+    ['llm: ' + (env.llm_provider||'none'), env.llm_ready]
+  ];
+  envTags.innerHTML = items.map(([n,ok])=>`<span class="pill">${statusDot(ok)} ${n}</span>`).join('');
+
+  c.querySelector('#saveCfg').onclick = async ()=>{
+    const body = {
+      movie_path: $('#movie_path').value,
+      storyboard: $('#storyboard').checked,
+      auto: $('#auto').checked,
+      auto_subtitle: $('#auto_subtitle').value,
+      voice_en: $('#voice_en').value,
+      subtitle_lang_en: $('#subtitle_lang_en').value,
+      voice_zh: $('#voice_zh').value,
+      subtitle_lang_zh: $('#subtitle_lang_zh').value,
+      llm_base_url: $('#llm_base_url').value,
+      llm_model: $('#llm_model').value,
+      llm_api_key: $('#llm_api_key').value
+    };
+    await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    toast('Settings saved');
+    refresh();
+  };
+  return c;
+}
+
+async function doRun(lang){
+  await api('/api/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({langs:[lang]})});
+  toast('Started '+lang.toUpperCase()+' clip');
+  refresh();
+  pollLogs();
+}
+
+function esc(x){ return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+let logTimer=null;
+function pollLogs(){
+  if(logTimer) return;
+  logTimer=setInterval(async ()=>{
+    const d = await api('/api/logs?n=200');
+    $('#logpre').textContent = (d.logs||[]).join('\n');
+    $('#logpre').scrollTop = $('#logpre').scrollHeight;
+    const st = await api('/api/status');
+    if(!st.job.running){ clearInterval(logTimer); logTimer=null; renderPanel(st); }
+  }, 1200);
+}
+
+function toast(msg){
+  let t=document.getElementById('toast');
+  if(!t){ t=el('<div id="toast" style="position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#16a34a;color:#fff;padding:10px 18px;border-radius:9px;font-size:13px;font-weight:600;z-index:99;box-shadow:0 8px 20px rgba(0,0,0,.4)"></div>'); document.body.appendChild(t); }
+  t.textContent=msg; t.style.opacity='1';
+  clearTimeout(t._h); t._h=setTimeout(()=>{t.style.opacity='0';},2600);
+}
+
+document.querySelectorAll('.tab').forEach(t=>{
+  t.onclick=()=>{ document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active')); t.classList.add('active'); refresh(); };
+});
+
+// Initial render
+(function init(){
+  refresh();
+  const cp = el('<div class="card mt"><div class="mk-row"><h2>Console</h2><button class="btn" id="reloadLogs">Reload</button></div><pre class="logpre" id="logpre"></pre></div>');
+  document.querySelector('.wrap').appendChild(cp);
+  $('#reloadLogs').onclick=()=>{ pollLogs(); };
+  setInterval(refresh, 4000);
+})();
+</script>
+</body>
+</html>

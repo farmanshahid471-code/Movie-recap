@@ -1,0 +1,58 @@
+[Script Info]
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+ScaledBorderAndShadow: yes
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Top,Noto Serif CJK SC,56,&H00FFFFFF,&H00FFFFFF,&H00101010,&H96000000,-1,0,0,0,100,100,0,0,1,3,1,2,40,40,0,1
+Style: Bot,Noto Serif CJK SC,56,&H00FFFFFF,&H00FFFFFF,&H00101010,&H96000000,-1,0,0,0,100,100,0,0,1,3,1,2,40,40,0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.10,0:00:05.85,Bot,,0,0,96,,{\fad(150,150)}A fourteen-year-old boy named James loses both of his\Nparents in a terrible car accident.
+Dialogue: 0,0:00:05.80,0:00:09.14,Bot,,0,0,96,,{\fad(150,150)}He moves in with his grandfather, Japetto.
+Dialogue: 0,0:00:09.14,0:00:14.29,Bot,,0,0,96,,{\fad(150,150)}James quickly makes two friends in the neighborhood, but one\Nof them dies of cancer.
+Dialogue: 0,0:00:14.29,0:00:17.64,Bot,,0,0,96,,{\fad(150,150)}The other friend moves away to a different town.
+Dialogue: 0,0:00:17.64,0:00:22.92,Bot,,0,0,96,,{\fad(150,150)}On that very day, Japetto decides that James should never\Nlose anyone again.
+Dialogue: 0,0:00:22.92,0:00:27.96,Bot,,0,0,96,,{\fad(150,150)}He spends weeks locked away in the basement, where James is\Nnever allowed to go.
+Dialogue: 0,0:00:27.96,0:00:34.33,Bot,,0,0,96,,{\fad(150,150)}After countless hours down there, Japetto finishes a\Ncreation that will never abandon his grandson.
+Dialogue: 0,0:00:34.33,0:00:38.71,Bot,,0,0,96,,{\fad(150,150)}One evening, Japetto takes James out for some fresh air.
+Dialogue: 0,0:00:38.71,0:00:42.74,Bot,,0,0,96,,{\fad(150,150)}He promises to show him something very special the next day.
+Dialogue: 0,0:00:42.74,0:00:47.20,Bot,,0,0,96,,{\fad(150,150)}That night, James wakes up to a strange noise in the house.
+Dialogue: 0,0:00:47.20,0:00:51.44,Bot,,0,0,96,,{\fad(150,150)}He sees a figure in the shadows and chases it down to the\Nbasement.
+Dialogue: 0,0:00:51.44,0:00:56.24,Bot,,0,0,96,,{\fad(150,150)}To his shock, a living puppet named Pinocchio emerges to\Ngreet him.
+Dialogue: 0,0:00:56.24,0:01:02.49,Bot,,0,0,96,,{\fad(150,150)}James is terrified and calls him a creepy thing, but Japetto\Ninsists he is a real living being.
+Dialogue: 0,0:01:02.49,0:01:06.26,Bot,,0,0,96,,{\fad(150,150)}Japetto begs James to keep Pinocchio a secret.
+Dialogue: 0,0:01:06.26,0:01:11.11,Bot,,0,0,96,,{\fad(150,150)}Over the weekend, the two boys play together and become the\Nbest of friends.
+Dialogue: 0,0:01:11.11,0:01:15.78,Bot,,0,0,96,,{\fad(150,150)}Pinocchio watches a documentary about animals protecting\Ntheir herds.
+Dialogue: 0,0:01:15.78,0:01:20.99,Bot,,0,0,96,,{\fad(150,150)}He decides that James is his herd, and that he must protect\Nhim at all costs.
+Dialogue: 0,0:01:20.99,0:01:26.09,Bot,,0,0,96,,{\fad(150,150)}Later, Pinocchio discovers another puppet in the basement,\Nthe Wooden Mother.
+Dialogue: 0,0:01:26.09,0:01:32.22,Bot,,0,0,96,,{\fad(150,150)}She tells him that to become a real boy, he needs skin,\Nblood, teeth, and hair.
+Dialogue: 0,0:01:32.22,0:01:35.70,Bot,,0,0,96,,{\fad(150,150)}He must take them from others and wear them every day.
+Dialogue: 0,0:01:35.70,0:01:39.09,Bot,,0,0,96,,{\fad(150,150)}A cricket hidden in the shadows hears every word.
+Dialogue: 0,0:01:39.09,0:01:42.48,Bot,,0,0,96,,{\fad(150,150)}Pinocchio asks James to take him to school.
+Dialogue: 0,0:01:42.48,0:01:46.80,Bot,,0,0,96,,{\fad(150,150)}James hides him in his bag and sneaks him past his\Ngrandfather.
+Dialogue: 0,0:01:46.80,0:01:51.71,Bot,,0,0,96,,{\fad(150,150)}At the gym, Pinocchio slips out and watches the adults\Nexercise.
+Dialogue: 0,0:01:51.71,0:01:57.41,Bot,,0,0,96,,{\fad(150,150)}A woman notices him, falls from her treadmill, and is\Ncrushed by the falling weights.
+Dialogue: 0,0:01:57.41,0:02:02.84,Bot,,0,0,96,,{\fad(150,150)}Then the bullies, Trey and Logan, find James and destroy his\Ntoys.
+Dialogue: 0,0:02:02.84,0:02:06.74,Bot,,0,0,96,,{\fad(150,150)}They mock him and threaten to kill him if he ever tells\Nanyone.
+Dialogue: 0,0:02:06.74,0:02:12.12,Bot,,0,0,96,,{\fad(150,150)}James whispers that he wishes all those teens were dead, and\NPinocchio hears him.
+Dialogue: 0,0:02:12.12,0:02:17.44,Bot,,0,0,96,,{\fad(150,150)}That night, Pinocchio decides to make every one of James'\Nwishes come true.
+Dialogue: 0,0:02:17.44,0:02:21.89,Bot,,0,0,96,,{\fad(150,150)}At the dentist, Pinocchio watches James suffer in pain.
+Dialogue: 0,0:02:21.89,0:02:27.89,Bot,,0,0,96,,{\fad(150,150)}On the way home, a distracted driver crashes the car, and\NJames ends up in the hospital.
+Dialogue: 0,0:02:27.89,0:02:33.16,Bot,,0,0,96,,{\fad(150,150)}Pinocchio learns that the crash was caused by a drunk driver\Nwho has hurt many people.
+Dialogue: 0,0:02:33.16,0:02:37.78,Bot,,0,0,96,,{\fad(150,150)}To protect his best friend, Pinocchio hunts the drunk driver\Ndown.
+Dialogue: 0,0:02:37.78,0:02:41.50,Bot,,0,0,96,,{\fad(150,150)}He rips the organs out of the man to make himself real.
+Dialogue: 0,0:02:41.50,0:02:44.94,Bot,,0,0,96,,{\fad(150,150)}Then he goes after the dentist and takes her teeth.
+Dialogue: 0,0:02:44.94,0:02:49.75,Bot,,0,0,96,,{\fad(150,150)}James and his friends watch old tapes and uncover the truth\Nabout Japetto.
+Dialogue: 0,0:02:49.75,0:02:54.45,Bot,,0,0,96,,{\fad(150,150)}Their grandfather was trying to cheat death by trapping\Nsouls in puppets.
+Dialogue: 0,0:02:54.45,0:02:59.29,Bot,,0,0,96,,{\fad(150,150)}James realizes that Pinocchio is now hunting everyone who\Never hurt him.
+Dialogue: 0,0:02:59.29,0:03:04.06,Bot,,0,0,96,,{\fad(150,150)}Pinocchio attacks Logan's house and kills his friends at the\Nswimming pool.
+Dialogue: 0,0:03:04.06,0:03:09.26,Bot,,0,0,96,,{\fad(150,150)}He hunts down Amanda, and then Trey, ending them in\Nhorrifying ways.
+Dialogue: 0,0:03:09.26,0:03:14.68,Bot,,0,0,96,,{\fad(150,150)}James begs Pinocchio to stop, but Pinocchio thinks he wants\Nhim to kill more.
+Dialogue: 0,0:03:14.68,0:03:18.88,Bot,,0,0,96,,{\fad(150,150)}By the time Japetto returns home, Pinocchio is gone.
+Dialogue: 0,0:03:18.88,0:03:23.09,Bot,,0,0,96,,{\fad(150,150)}James realizes the puppet will never stop trying to protect\Nhim.
+Dialogue: 0,0:03:23.09,0:03:27.08,Bot,,0,0,96,,{\fad(150,150)}And that is the story of a boy who brought a monster to\Nlife.

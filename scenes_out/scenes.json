@@ -1,0 +1,30 @@
+[
+  {
+    "index": 0,
+    "start": 0.0,
+    "end": 8.066667,
+    "clip_path": null,
+    "thumbnail_path": null
+  },
+  {
+    "index": 1,
+    "start": 8.066667,
+    "end": 16.133333,
+    "clip_path": null,
+    "thumbnail_path": null
+  },
+  {
+    "index": 2,
+    "start": 16.133333,
+    "end": 20.166667,
+    "clip_path": null,
+    "thumbnail_path": null
+  },
+  {
+    "index": 3,
+    "start": 20.166667,
+    "end": 24.0,
+    "clip_path": null,
+    "thumbnail_path": null
+  }
+]

@@ -1,0 +1,24 @@
+# Core (always required)
+PyYAML>=6.0
+pysubs2>=1.6.0
+
+# Free text-to-speech (English + Chinese, used by default)
+edge-tts>=6.1.0
+
+# ffmpeg / ffprobe static binaries (bundled via pip; also works if you
+# already have ffmpeg on PATH). Used for video assembly + subtitle burning.
+static-ffmpeg>=2.0.0
+
+# Video/audio toolkit (optional but convenient for previews & probe helpers)
+imageio-ffmpeg>=0.4.9
+
+# ---- Optional: LLM-backed script writing & translation ----
+# Install only the provider(s) you use:
+openai>=1.30.0          # OpenAI + DeepSeek (openai-compatible)
+anthropic>=0.34.0       # Anthropic Claude
+# requests>=2.31.0      # Ollama (if you don't want the SDK)
+
+# ---- Optional: higher-quality TTS / forced alignment ----
+# elevenlabs>=1.0.0    # ElevenLabs multilingual TTS (best quality, paid)
+# whisperx            # ASR-based subtitle timing fallback (heavy, GPU helpful)
+# faster-whisper

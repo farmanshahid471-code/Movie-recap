@@ -1,0 +1,53 @@
+# Movie-Recaps-style summary bot — configuration
+# Copy to config.yaml and adjust. Values here are sensible defaults.
+
+project:
+  name: "recap-project"        # used to name output files/folders
+  output_dir: "output"
+
+language:
+  # en = English, zh = Simplified Chinese + mainland Mandarin (普通话)
+  # The pipeline currently produces separate videos per language.
+  target_languages: ["en", "zh"]
+  zh_variant: "zh-CN"          # language tag used by TTS / subtitles
+
+narration:
+  # Movie-Recaps style: present tense, beat-by-beat storytelling.
+  # Keep sentences short; one per line so each maps to a subtitle cue.
+  words_target: 1400           # approximate narration word count (~10-13 min)
+  words_min: 500
+  words_max: 2600
+  # voice for each language (edge-tts neural voices)
+  lang_voice:
+    en: "en-US-ChristopherNeural"   # calm male narrator
+    zh: "zh-CN-YunxiNeural"         # male Mandarin narrator
+  tts_provider: "edge"         # edge | elevenlabs | openai
+  rate: "+0%"                  # edge-tts speaking rate, e.g. "+10%"
+
+subtitles:
+  # Burned-in subtitles, in the language of each output video.
+  font: "Noto Serif CJK SC"    # covers both Latin + CJK glyphs
+  fontsize: 56                 # at 1080p
+  margin_v: 96                 # distance from bottom
+  margin_x: 40                 # left/right safe margin
+  outline: 3
+  shadow: 1
+  max_combo_duration: 6.0      # merge two short lines if together under this
+  line_width_units: 30         # ~30 CJK (or ~60 Latin) glyphs per line
+  display_lang: "en"           # language of the burned subtitle in each video
+
+video:
+  fps: 30
+  width: 1920
+  height: 1080
+  concat_mode: "fit"           # "fit" narration length (loop/trim as needed)
+  codec: "libx264"
+  audio_codec: "aac"
+  bgm: ""                      # optional background music path (audio only)
+  bgm_volume: 0.12
+
+llm:
+  provider: ollama             # free & local (no key). Start `ollama serve`
+  model: qwen2.5               # `ollama pull qwen2.5`
+  base_url: "http://localhost:11434/v1"   # Ollama OpenAI-compatible endpoint
+  # Keys are read from environment (see .env.example)
