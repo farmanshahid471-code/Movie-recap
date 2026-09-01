@@ -3,65 +3,169 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Recap Studio — Control Panel</title>
+<title>Recap Studio — Control Panel</style>
 <style>
-  :root{
+:root{
     --bg:#0b0e14; --panel:#151a24; --panel2:#1b2230; --border:#263041;
     --text:#e8edf5; --muted:#8a97ad; --accent:#22c55e; --accent2:#3b82f6;
     --warn:#eab308; --danger:#ef4444; --chip:#1f2837;
-  }
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:28px;min-height:100vh}
-  .wrap{max-width:1180px;margin:0 auto}
-  h1{font-size:20px;font-weight:700;letter-spacing:.2px}
-  .sub{color:var(--muted);font-size:13px;margin-top:2px}
-  .badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;background:var(--chip);color:var(--muted);border:1px solid var(--border)}
-  .badge.green{background:rgba(34,197,94,.12);color:#4ade80;border-color:rgba(34,197,94,.35)}
-  .badge.yellow{background:rgba(234,179,8,.12);color:#facc15;border-color:rgba(234,179,8,.35)}
-  .badge.red{background:rgba(239,68,68,.12);color:#f87171;border-color:rgba(239,68,68,.35)}
-  .badge.blue{background:rgba(59,130,246,.14);color:#60a5fa;border-color:rgba(59,130,246,.35)}
-  .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-  .head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:22px}
-  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px}
-  @media(max-width:760px){.stats{grid-template-columns:repeat(2,1fr)}}
-  .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:18px}
-  .stat .num{font-size:26px;font-weight:700}
-  .stat .lab{color:var(--muted);font-size:12px;margin-top:6px;text-transform:uppercase;letter-spacing:.5px}
-  .tabs{display:flex;gap:8px;margin-bottom:16px}
-  .tab{padding:9px 16px;border-radius:10px;background:var(--chip);border:1px solid var(--border);font-size:13px;cursor:pointer;color:var(--muted);font-weight:600}
-  .tab.active{background:rgba(59,130,246,.14);color:#60a5fa;border-color:rgba(59,130,246,.4)}
-  .tab .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;background:var(--muted)}
-  .tab.active .dot{background:var(--accent)}
-  .card h2{font-size:15px;font-weight:700;margin-bottom:4px}
-  .card h3{font-size:13px;font-weight:600;color:var(--muted);margin-bottom:12px}
-  .desc{color:var(--muted);font-size:12.5px;line-height:1.5;margin-bottom:16px}
-  fieldset{border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:16px}
-  legend{font-size:12px;color:var(--muted);padding:0 8px}
-  label{display:block;font-size:12px;color:var(--muted);margin:10px 0 5px}
-  input[type=text],input[type=number]{width:100%;background:#0e1420;border:1px solid var(--border);border-radius:8px;color:var(--text);padding:9px 12px;font-size:13px}
-  input:focus{outline:2px solid rgba(59,130,246,.4);border-color:transparent}
-  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-  @media(max-width:700px){.grid2{grid-template-columns:1fr}}
-  .btn{border:none;border-radius:9px;padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;background:var(--chip);color:var(--text);border:1px solid var(--border)}
-  .btn.primary{background:var(--accent);border-color:var(--accent);color:#052e16}
-  .btn.primary:hover{filter:brightness(1.08)}
-  .btn.blue{background:var(--accent2);border-color:var(--accent2);color:#eef4ff}
-  .btn:disabled{opacity:.5;cursor:not-allowed}
-  .btnrow{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
-  .switch{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-top:12px;cursor:pointer}
-  .switch input{width:16px;height:16px}
-  .logpre{background:#070b11;border:1px solid var(--border);border-radius:10px;padding:12px;height:220px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.6;color:#a8b3c5;white-space:pre-wrap}
-  .table{width:100%;border-collapse:collapse;font-size:12.5px}
-  .table th,.table td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border)}
-  .table th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px}
-  .tags{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
-  .pill{background:var(--chip);border:1px solid var(--border);border-radius:7px;padding:6px 10px;font-size:12px;color:var(--muted)}
-  .pill b{color:var(--text);font-weight:600}
-  .muted{color:var(--muted)}
-  .mt{margin-top:16px}
-  .mk-row{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}
-  .nowrap{white-space:nowrap}
-  .status-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
+}
+*{
+    box-sizing:border-box;margin:0;padding:0
+}
+body{
+    background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:28px;min-height:100vh
+}
+.wrap{
+    max-width:1180px;margin:0 auto
+}
+h1{
+    font-size:20px;font-weight:700;letter-spacing:.2px
+}
+.sub{
+    color:var(--muted);font-size:13px;margin-top:2px
+}
+.badge{
+    display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;background:var(--chip);color:var(--muted);border:1px solid var(--border)
+}
+.badge.green{
+    background:rgba(34,197,94,.12);color:#4ade80;border-color:rgba(34,197,94,.35)
+}
+.badge.yellow{
+    background:rgba(234,179,8,.12);color:#facc15;border-color:rgba(234,179,8,.35)
+}
+.badge.red{
+    background:rgba(239,68,68,.12);color:#f87171;border-color:rgba(239,68,68,.35)
+}
+.badge.blue{
+    background:rgba(59,130,246,.14);color:#60a5fa;border-color:rgba(59,130,246,.4)
+}
+.row{
+    display:flex;align-items:center;gap:10px;flex-wrap:wrap
+}
+.head{
+    display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:22px
+}
+.stats{
+    display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px
+}
+@media(max-width:760px){
+    .stats{grid-template-columns:repeat(2,1fr)}
+}
+.card{
+    background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:18px
+}
+.stat .num{
+    font-size:26px;font-weight:700
+}
+.stat .lab{
+    color:var(--muted);font-size:12px;margin-top:6px;text-transform:uppercase;letter-spacing:.5px
+}
+.tabs{
+    display:flex;gap:8px;margin-bottom:16px
+}
+.tab{
+    padding:9px 16px;border-radius:10px;background:var(--chip);border:1px solid var(--border);font-size:13px;cursor:pointer;color:var(--muted);font-weight:600
+}
+.tab.active{
+    background:rgba(59,130,246,.14);color:#60a5fa;border-color:rgba(59,130,246,.4)
+}
+.tab .dot{
+    display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;background:var(--muted)
+}
+.tab.active .dot{
+    background:var(--accent)
+}
+.card h2{
+    font-size:15px;font-weight:700;margin-bottom:4px
+}
+.card h3{
+    font-size:13px;font-weight:600;color:var(--muted);margin-bottom:12px
+}
+.desc{
+    color:var(--muted);font-size:12.5px;line-height:1.5;margin-bottom:16px
+}
+fieldset{
+    border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:16px
+}
+legend{
+    font-size:12px;color:var(--muted);padding:0 8px
+}
+label{
+    display:block;font-size:12px;color:var(--muted);margin:10px 0 5px
+}
+input[type=text],input[type=number]{
+    width:100%;background:#0e1420;border:1px solid var(--border);border-radius:8px;color:var(--text);padding:9px 12px;font-size:13px
+}
+input:focus{
+    outline:2px solid rgba(59,130,246,.4);border-color:transparent
+}
+.grid2{
+    display:grid;grid-template-columns:1fr 1fr;gap:14px
+}
+@media(max-width:700px){
+    .grid2{grid-template-columns:1fr}
+}
+.btn{
+    border:none;border-radius:9px;padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;background:var(--chip);color:var(--text);border:1px solid var(--border)
+}
+.btn.primary{
+    background:var(--accent);border-color:var(--accent);color:#052e16
+}
+.btn.primary:hover{
+    filter:brightness(1.08)
+}
+.btn.blue{
+    background:var(--accent2);border-color:var(--accent2);color:#eef4ff
+}
+.btn:disabled{
+    opacity:.5;cursor:not-allowed
+}
+.btnrow{
+    display:flex;gap:10px;flex-wrap:wrap;margin-top:6px
+}
+.switch{
+    display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-top:12px;cursor:pointer
+}
+.switch input{
+    width:16px;height:16px
+}
+.logpre{
+    background:#070b11;border:1px solid var(--border);border-radius:10px;padding:12px;height:220px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.6;color:#a8b3c5;white-space:pre-wrap
+}
+.table{
+    width:100%;border-collapse:collapse;font-size:12.5px
+}
+.table th,.table td{
+    text-align:left;padding:8px 10px;border-bottom:1px solid var(--border)
+}
+.table th{
+    color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px
+}
+.tags{
+    display:flex;gap:8px;flex-wrap:wrap;margin-top:6px
+}
+.pill{
+    background:var(--chip);border:1px solid var(--border);border-radius:7px;padding:6px 10px;font-size:12px;color:var(--muted)
+}
+.pill b{
+    color:var(--text);font-weight:600
+}
+.muted{
+    color:var(--muted)
+}
+.mt{
+    margin-top:16px
+}
+.mk-row{
+    display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px
+}
+.nowrap{
+    white-space:nowrap
+}
+.status-dot{
+    display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px
+}
 </style>
 </head>
 <body>
@@ -74,6 +178,7 @@
         <span class="badge" id="engBadge">engine: recap</span>
         <span class="badge yellow" id="modeBadge">mode: NOT READY</span>
         <span class="badge" id="jobBadge">runner: idle</span>
+        <button class="btn primary" id="generateBtn" style="margin-left:12px;">Generate</button>
       </div>
     </div>
   </div>
@@ -92,11 +197,30 @@
   </div>
 
   <div id="panel"></div>
-</div>
+
+  <!-- Script edit panel: shown after Generate -->
+  <div id="scriptPanel" class="card mt" style="display:none; margin-top:24px">
+    <h2>Script Editor</h2>
+    <div class="desc">Edit the English and Chinese narration scripts. Changes are applied when you click <b>Render</b> (re‑narrates + re‑renders without LLM).</div>
+    <div class="grid2" style="gap:20px;margin-top:16px">
+      <div>
+        <label>English script</label>
+        <textarea id="scriptEn" rows="15" style="width:100%;background:#0e1420;border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;padding:10px;"></textarea>
+      </div>
+      <div>
+        <label>Simplified Chinese script</label>
+        <textarea id="scriptZh" rows="15" style="width:100%;background:#0e1420;border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;padding:10px;"></textarea>
+      </div>
+    </div>
+    <div class="btnrow" style="margin-top:16px">
+      <button class="btn primary" id="renderBtn" disabled>Render</button>
+      <button class="btn" id="closeScriptBtn" style="margin-left:12px;">Close</button>
+    </div>
+  </div>
 
 <script>
 const $ = s => document.querySelector(s);
-const state = {};
+const state = { generated: false };
 
 async function api(path, opts){
   const r = await fetch(path, opts);
@@ -133,6 +257,19 @@ async function refresh(){
   $('#statStorage').textContent = totMb.toFixed(1)+' MB';
 
   renderPanel(s);
+
+  // if just generated, show the script panel
+  if (s.outputs && s.outputs.length > 0 && !state.scriptPanelShown) {
+    state.scriptPanelShown = true;
+    $('#scriptPanel').show();
+    // load the just-generated scripts into the textareas
+    // read from the pipeline workdir
+    const en = await api('/api/scripts?lang=en');
+    const zh = await api('/api/scripts?lang=zh');
+    $('#scriptEn').val(en.script || '');
+    $('#scriptZh').val(zh.script || '');
+    $('#renderBtn').disabled = false;
+  }
 }
 
 function renderPanel(s){
@@ -162,10 +299,7 @@ function clipCard(lang, cfg, s){
     </div>
   </div>`);
   const tbl=c.querySelector('#clipTable');
-  tbl.innerHTML = `<table class="table"><tr><th>File</th><th>Size</th></tr>${
-    (s.outputs||[]).map(o=>`<tr><td>${o.name}</td><td>${o.size_mb} MB</td></tr>`).join('')||
-    '<tr><td colspan="2" class="muted">No clips yet.</td></tr>'
-  }</table>`;
+  tbl.innerHTML = `<table class="table"><tr><th>File</th><th>Size</th></tr>${\n    (s.outputs||[]).map(o=>`<tr><td>${o.name}</td><td>${o.size_mb} MB</td></tr>`).join('')||\n    '<tr><td colspan="2" class="muted">No clips yet.</td></tr>'\n  }</table>`;
   c.querySelector('[data-run]').onclick = ()=>doRun(lang);
   return c;
 }
@@ -213,8 +347,7 @@ function settingsCard(cfg, s){
   const env = s.env||{};
   const items = [
     ['ffmpeg', env.ffmpeg], ['edge-tts', env.edge_tts],
-    ['scene detect', env.scene_detect],
-    ['movie set', env.movie_set], ['movie file exists', env.movie_exists],
+    ['scene detect', env.scene_detect], ['movie set', env.movie_set], ['movie file exists', env.movie_exists],
     ['llm: ' + (env.llm_provider||'none'), env.llm_ready]
   ];
   envTags.innerHTML = items.map(([n,ok])=>`<span class="pill">${statusDot(ok)} ${n}</span>`).join('');
@@ -247,14 +380,19 @@ async function doRun(lang){
   pollLogs();
 }
 
-function esc(x){ return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+async function generateBoth(){
+  const ok = await api('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({})});
+  return ok.ok;
+}
+
+function esc(x){ return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;'); }
 
 let logTimer=null;
 function pollLogs(){
   if(logTimer) return;
   logTimer=setInterval(async ()=>{
     const d = await api('/api/logs?n=200');
-    $('#logpre').textContent = (d.logs||[]).join('\n');
+    $('#logpre').textContent = (d.logs||[]).join('\\n');
     $('#logpre').scrollTop = $('#logpre').scrollHeight;
     const st = await api('/api/status');
     if(!st.job.running){ clearInterval(logTimer); logTimer=null; renderPanel(st); }
@@ -272,7 +410,7 @@ document.querySelectorAll('.tab').forEach(t=>{
   t.onclick=()=>{ document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active')); t.classList.add('active'); refresh(); };
 });
 
-// Initial render
+// Initialize: show script panel after Generate if outputs exist
 (function init(){
   refresh();
   const cp = el('<div class="card mt"><div class="mk-row"><h2>Console</h2><button class="btn" id="reloadLogs">Reload</button></div><pre class="logpre" id="logpre"></pre></div>');
@@ -280,6 +418,42 @@ document.querySelectorAll('.tab').forEach(t=>{
   $('#reloadLogs').onclick=()=>{ pollLogs(); };
   setInterval(refresh, 4000);
 })();
+
+// Handle Generate button
+$('#generateBtn').onclick = async ()=>{
+  const ok = await generateBoth();
+  if(ok) {
+    toast('Generate started');
+    // refresh will show script panel after pipeline finishes
+  } else {
+    toast('Generate failed');
+  }
+};
+
+// Handle Render button
+$('#renderBtn').onclick = async ()=>{
+  const enScript = $('#scriptEn').value;
+  const zhScript = $('#scriptZh').value;
+  const ok = await api('/api/render', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({en_script: enScript, zh_script: zhScript})
+  });
+  if(ok.ok){
+    toast('Render started');
+    // hide script panel, wait for completion
+    $('#scriptPanel').hide();
+    $('#renderBtn').disabled = true;
+  } else {
+    toast('Render failed');
+  }
+};
+
+// Handle Close button
+$('#closeScriptBtn').onclick = ()=>{
+  $('#scriptPanel').hide();
+  $('#renderBtn').disabled = true;
+};
 </script>
 </body>
 </html>
