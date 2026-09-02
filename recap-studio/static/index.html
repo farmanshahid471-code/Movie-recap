@@ -192,6 +192,17 @@ function clipCard(lang, cfg, s){
     '<h2>' + (isEn ? 'English clip' : 'Chinese clip (中文)') + '</h2>' +
     '<div class="desc">Dubbing in ' + (isEn ? 'English' : 'Mandarin 普通话') +
       ', burned-in subtitles in ' + (isEn ? 'English' : '简体中文') + '.</div>' + warn +
+    '<fieldset><legend>Montage — how the footage is cut</legend>' +
+      '<div class="grid2">' +
+        '<div><label>Cut style</label><select id="montage">' +
+          '<option value="scenes"' + ((cfg.montage || 'scenes') === 'scenes' ? ' selected' : '') + '>scenes — cut beats from the movie (recap style)</option>' +
+          '<option value="continuous"' + ((cfg.montage || 'scenes') === 'continuous' ? ' selected' : '') + '>continuous — play it straight through</option>' +
+        '</select></div>' +
+        '<div><label>Seconds per beat</label><input type="number" id="scene_len" value="' + esc(cfg.scene_len) + '"></div>' +
+      '</div>' +
+      '<div class="desc mt">Needs a real movie file. With <b>scenes</b> the film is sliced into short beats and re-assembled in story order over the narration, the way recap channels do it. Install <code>pip install scenedetect[opencv]</code> for content-aware cut detection; otherwise beats are evenly spaced.</div>' +
+    '</fieldset>' +
+
     '<fieldset><legend>Output</legend>' + table + '</fieldset>' +
     '<div class="tags">' +
       '<span class="pill">' + dot(true) + 'voice: ' + esc(voice) + '</span>' +
@@ -255,6 +266,17 @@ function settingsCard(cfg, s){
       '<label>Dialogue subtitle (.srt) — optional; blank = look for one next to the movie, else Whisper</label>' +
       '<input type="text" id="auto_subtitle" value="' + esc(cfg.auto_subtitle) + '" placeholder="D:\\videos\\my_movie.srt (or leave blank)">' +
       '<div class="desc mt" id="readyBox"></div>' +
+    '</fieldset>' +
+
+    '<fieldset><legend>Montage — how the footage is cut</legend>' +
+      '<div class="grid2">' +
+        '<div><label>Cut style</label><select id="montage">' +
+          '<option value="scenes"' + ((cfg.montage || 'scenes') === 'scenes' ? ' selected' : '') + '>scenes — cut beats from the movie (recap style)</option>' +
+          '<option value="continuous"' + ((cfg.montage || 'scenes') === 'continuous' ? ' selected' : '') + '>continuous — play it straight through</option>' +
+        '</select></div>' +
+        '<div><label>Seconds per beat</label><input type="number" id="scene_len" value="' + esc(cfg.scene_len) + '"></div>' +
+      '</div>' +
+      '<div class="desc mt">Needs a real movie file. With <b>scenes</b> the film is sliced into short beats and re-assembled in story order over the narration, the way recap channels do it. Install <code>pip install scenedetect[opencv]</code> for content-aware cut detection; otherwise beats are evenly spaced.</div>' +
     '</fieldset>' +
 
     '<fieldset><legend>Output</legend>' +
@@ -353,6 +375,8 @@ function settingsCard(cfg, s){
     const body = {
       movie_path: $('#movie_path').value,
       output_dir: $('#output_dir').value.trim(),
+      montage: $('#montage').value,
+      scene_len: parseFloat($('#scene_len').value) || 6.0,
       storyboard: $('#storyboard').checked,
       auto: $('#auto').checked,
       auto_subtitle: $('#auto_subtitle').value,

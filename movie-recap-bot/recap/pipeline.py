@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import dialogue, llm, script, subtitles, translate, tts, video
+from . import dialogue, llm, scenes, script, subtitles, translate, tts, video
 from .config import out_dir, work_dir
 from .dialogue import DialogueError
 from .util import count_words, probe_duration
@@ -211,7 +211,12 @@ def run(cfg: dict, clips: list[Path], storyboard: bool = False) -> list[Path]:
     for code, (mp3, cues) in audios.items():
         target = max((c.end for c in cues), default=5.0) + 0.5
         print(f"  * {code}: narration {target:.1f}s over {len(cues)} cues")
-        base = video.compose_base(clips, target, cfg["video"], wd)
+        montage = str(cfg["video"].get("montage", "scenes")).lower()
+        if montage == "scenes" and len(clips) == 1 and not storyboard:
+            # recap-channel style: cut real beats from the film itself
+            base = scenes.build_montage(clips[0], target, cfg["video"], wd)
+        else:
+            base = video.compose_base(clips, target, cfg["video"], wd)
         base = video.add_bgm_if_any(base, cfg["video"].get("bgm", ""), cfg["video"].get("bgm_volume", 0.12), wd)
         ass = wd / f"{code}.ass"
         out_mp4 = outd / f"{name}_{code}.mp4"

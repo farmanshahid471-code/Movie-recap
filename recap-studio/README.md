@@ -106,6 +106,27 @@ Tick **Auto-recap** in Settings and set a movie. On Run the tool:
 
 ---
 
+## How the footage is cut
+
+`video.montage` controls this, and the panel exposes it under
+**Settings -> Montage**:
+
+| Mode | What you get |
+|------|--------------|
+| `scenes` (default) | The film is sliced into short beats and re-assembled in story order under the narration — the recap-channel look. |
+| `continuous` | The film plays straight through and loops to cover the narration. |
+
+Beat boundaries come from **PySceneDetect** when it is installed
+(`pip install scenedetect[opencv]`) — real content-aware cut detection. Without
+it the film is sliced into evenly spaced beats of `scene_len` seconds, which
+needs no extra dependency and already reads as a montage rather than one long
+shot. The list is cached in `<output>/_work/scenes.json`.
+
+Either way the narration stays the master clock: the montage is cut to at least
+the narration length and `-shortest` trims it exactly, so subtitles never drift.
+
+---
+
 ## Config
 
 Stored in `config.json` (next to the code). Key fields:

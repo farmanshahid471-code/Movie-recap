@@ -63,21 +63,40 @@ def run(
 
 
 def probe_duration(path: str | Path) -> float:
-    """Return media duration in seconds via ffprobe."""
+    """Return media duration in seconds.
+
+    Prefers ffprobe; if it is missing (common on Windows installs that only have
+    ffmpeg.exe) the duration is read from ffmpeg's own banner on stderr.
+    """
     p = Path(path)
+    try:
+        probe = which_ffprobe()
+    except RuntimeError:
+        return _duration_via_ffmpeg(p)
     res = run(
         [
-            which_ffprobe(),
+            probe,
             "-v", "error",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
             str(p),
-        ]
+        ],
+        check=False,
     )
     try:
         return float(res.stdout.strip())
     except ValueError:
+        return _duration_via_ffmpeg(p)
+
+
+def _duration_via_ffmpeg(path: Path) -> float:
+    """Parse 'Duration: 00:03:27.60' out of ffmpeg's stderr."""
+    res = run([which_ffmpeg(), "-hide_banner", "-i", str(path)], check=False)
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", res.stderr or "")
+    if not m:
         return 0.0
+    h, mnt, sec = m.groups()
+    return int(h) * 3600 + int(mnt) * 60 + float(sec)
 
 
 def probe_streams(path: str | Path) -> list[dict]:

@@ -58,6 +58,8 @@ DEFAULT_CONFIG = {
     "output_dir": r"D:\recap",              # where the clips + _work go; "" = recap-studio/output
     "storyboard": True,                     # use placeholder scenes when no movie
     "duration": 60,                         # target clip length (seconds)
+    "montage": "scenes",                    # "scenes" = cut beats from the movie
+    "scene_len": 6.0,                       # seconds per beat
     "voice_en": "en-US-ChristopherNeural",
     "voice_zh": "zh-CN-YunxiNeural",
     "subtitle_lang_en": "en",
@@ -351,6 +353,14 @@ def recap_cfg(cfg: dict, lang: str) -> dict:
         rc["narration"]["words_target"] = words
 
     rc["subtitles"]["display_lang"] = cfg.get(f"subtitle_lang_{lang}", lang) or lang
+
+    # Recap-style montage: cut real beats from the film instead of looping it.
+    montage = str(cfg.get("montage") or "scenes").strip().lower()
+    rc["video"]["montage"] = montage if montage in ("scenes", "continuous") else "scenes"
+    try:
+        rc["video"]["scene_len"] = float(cfg.get("scene_len") or 6.0)
+    except (TypeError, ValueError):
+        rc["video"]["scene_len"] = 6.0
 
     _apply_llm(rc, cfg)
     return rc
