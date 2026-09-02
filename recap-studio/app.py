@@ -170,8 +170,18 @@ class Handler(BaseHTTPRequestHandler):
         cfg = runner.load_config()
         clips = []
         mp = (cfg.get("movie_path") or "").strip().strip('"')
+        movie, movie_err = runner.check_movie(mp)
         if mp:
-            clips.append({"path": mp, "exists": os.path.exists(mp), "size_mb": _mb(mp)})
+            clips.append(
+                {
+                    "path": mp,
+                    "resolved": str(movie) if movie else "",
+                    "exists": movie is not None,
+                    "size_mb": _mb(str(movie)) if movie else 0.0,
+                    "error": movie_err,
+                }
+            )
+        out = runner.output_dir(cfg)
         return {
             "engine": cfg.get("engine", "recap"),
             "config": cfg,
@@ -189,11 +199,14 @@ class Handler(BaseHTTPRequestHandler):
                 "llm_key_set": bool(cfg.get("llm_api_key")),
                 "llm_ready": runner.llm_ready(cfg),
                 "movie_set": bool(mp),
-                "movie_exists": bool(mp and os.path.exists(mp)),
+                "movie_exists": movie is not None,
+                "movie_error": movie_err,
+                "movie_resolved": str(movie) if movie else "",
                 "edge_tts": runner.have("edge_tts"),
                 "pysubs2": runner.have("pysubs2"),
                 "yaml": runner.have("yaml"),
-                "output_dir": str(runner.OUTPUT_DIR),
+                "output_dir": str(out),
+                "output_writable": os.access(out, os.W_OK),
                 "python": sys.version.split()[0],
             },
         }
@@ -210,7 +223,7 @@ class Handler(BaseHTTPRequestHandler):
         safe = Path(name).name  # no traversal, no subfolders
         if not safe.lower().endswith(".mp4") or not re.fullmatch(r"[\w.\-]+", safe):
             return self._json(404, {"ok": False, "error": "not found"})
-        fp = runner.OUTPUT_DIR / safe
+        fp = runner.output_dir() / safe
         if not fp.is_file():
             return self._json(404, {"ok": False, "error": "not found"})
 

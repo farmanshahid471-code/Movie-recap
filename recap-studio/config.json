@@ -1,6 +1,7 @@
 {
   "engine": "recap",
   "movie_path": "",
+  "output_dir": "D:\\recap",
   "storyboard": true,
   "duration": 60,
   "voice_en": "en-US-ChristopherNeural",
@@ -10,5 +11,8 @@
   "llm_provider": "ollama",
   "llm_base_url": "http://localhost:11434/v1",
   "llm_api_key": "",
-  "llm_model": "qwen2.5"
+  "llm_model": "qwen2.5",
+  "auto": false,
+  "auto_subtitle": "",
+  "whisper_model": "small"
 }

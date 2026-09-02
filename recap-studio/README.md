@@ -112,7 +112,8 @@ Stored in `config.json` (next to the code). Key fields:
 
 | Field | Meaning |
 |-------|---------|
-| `movie_path` | path to an owned movie file (empty → placeholder scenes) |
+| `movie_path` | path to an owned movie **file** (empty → placeholder scenes). A folder is rejected with a message naming the videos inside it — ffmpeg would only say "Permission denied" |
+| `output_dir` | folder for the rendered clips + the `_work` intermediates (default `D:\recap`; created on demand, falls back to `recap-studio/output` with a warning if it can't be written) |
 | `storyboard` | use placeholder scenes when no movie is set |
 | `duration` | target clip length in seconds (shapes the LLM prompt in auto mode) |
 | `auto` | write the narration from the movie's dialogue (needs movie + LLM) |

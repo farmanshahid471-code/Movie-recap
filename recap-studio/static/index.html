@@ -173,12 +173,16 @@ function clipCard(lang, cfg, s){
       '</table>'
     : '<div class="muted">No ' + lang.toUpperCase() + ' clip rendered yet.</div>';
 
+  const env = s.env || {};
+  const warn = env.movie_error
+    ? '<div class="desc" style="color:#f87171;font-weight:600">&#9888; ' + esc(env.movie_error) + ' Fix it in the Settings tab.</div>'
+    : '';
   const card = document.createElement('div');
   card.className = 'card';
   card.innerHTML =
     '<h2>' + (isEn ? 'English clip' : 'Chinese clip (中文)') + '</h2>' +
     '<div class="desc">Dubbing in ' + (isEn ? 'English' : 'Mandarin 普通话') +
-      ', burned-in subtitles in ' + (isEn ? 'English' : '简体中文') + '.</div>' +
+      ', burned-in subtitles in ' + (isEn ? 'English' : '简体中文') + '.</div>' + warn +
     '<fieldset><legend>Output</legend>' + table + '</fieldset>' +
     '<div class="tags">' +
       '<span class="pill">' + dot(true) + 'voice: ' + esc(voice) + '</span>' +
@@ -234,12 +238,21 @@ function settingsCard(cfg, s){
     '<div class="desc">Point the pipeline at a movie you own, pick the voices, and configure the LLM used for auto-writing the narration.</div>' +
 
     '<fieldset><legend>Movie</legend>' +
-      '<label>Movie file path (owned / licensed)</label>' +
-      '<input type="text" id="movie_path" value="' + esc(cfg.movie_path) + '" placeholder="C:\\Movies\\my_movie.mp4">' +
+      '<label>Movie file path (owned / licensed) — a video FILE, not a folder</label>' +
+      '<input type="text" id="movie_path" value="' + esc(cfg.movie_path) + '" placeholder="D:\\videos\\my_movie.mp4">' +
+      '<div id="movieMsg" class="desc mt"></div>' +
       '<label class="switch"><input type="checkbox" id="storyboard"' + (cfg.storyboard ? ' checked' : '') + '> Use placeholder scenes when no movie is set</label>' +
       '<label class="switch"><input type="checkbox" id="auto"' + (cfg.auto ? ' checked' : '') + '> Auto-recap: write the narration from the movie\'s dialogue (needs a movie + LLM)</label>' +
       '<label>Dialogue subtitle (.srt) — optional; blank = look for one next to the movie, else Whisper</label>' +
-      '<input type="text" id="auto_subtitle" value="' + esc(cfg.auto_subtitle) + '" placeholder="C:\\Movies\\my_movie.srt (or leave blank)">' +
+      '<input type="text" id="auto_subtitle" value="' + esc(cfg.auto_subtitle) + '" placeholder="D:\\videos\\my_movie.srt (or leave blank)">' +
+    '</fieldset>' +
+
+    '<fieldset><legend>Output</legend>' +
+      '<label>Save rendered clips to this folder (created if missing)</label>' +
+      '<input type="text" id="output_dir" value="' + esc(cfg.output_dir) + '" placeholder="D:\\recap">' +
+      '<div class="desc mt">Currently writing to <b>' + esc((s.env || {}).output_dir) + '</b>' +
+        ((s.env || {}).output_writable ? '' : ' <span style="color:#f87171">(not writable)</span>') +
+        '. Intermediates go in its <code>_work</code> subfolder. Leave blank to use <code>recap-studio\\output</code>.</div>' +
     '</fieldset>' +
 
     '<fieldset><legend>Clip voices &amp; subtitles</legend>' +
@@ -271,11 +284,22 @@ function settingsCard(cfg, s){
   const env = s.env || {};
   const items = [
     ['ffmpeg', env.ffmpeg], ['edge-tts', env.edge_tts], ['pysubs2', env.pysubs2], ['pyyaml', env.yaml],
-    ['scene detect', env.scene_detect], ['movie set', env.movie_set], ['movie file exists', env.movie_exists],
+    ['scene detect', env.scene_detect], ['movie set', env.movie_set], ['movie file readable', env.movie_exists],
+    ['output folder writable', env.output_writable],
     ['llm: ' + (env.llm_provider || 'none'), env.llm_ready],
     ['python ' + (env.python || '?'), true]
   ];
   card.querySelector('#envTags').innerHTML = items.map(([n, ok]) => '<span class="pill">' + dot(ok) + ' ' + esc(n) + '</span>').join('');
+
+  // Say plainly why the movie path will not work (folder, missing, empty...)
+  const mm = card.querySelector('#movieMsg');
+  if (env.movie_error) {
+    mm.innerHTML = '<span style="color:#f87171;font-weight:600">&#9888; ' + esc(env.movie_error) + '</span>';
+  } else if (env.movie_resolved) {
+    mm.innerHTML = '<span style="color:#4ade80">OK — will recap ' + esc(env.movie_resolved) + '</span>';
+  } else {
+    mm.innerHTML = '<span class="muted">No movie set — placeholder scenes will be used.</span>';
+  }
 
   // Switching provider also fills in that provider's endpoint + model, so you
   // cannot end up asking DeepSeek for "qwen2.5".
@@ -302,6 +326,7 @@ function settingsCard(cfg, s){
   card.querySelector('#saveCfg').onclick = async () => {
     const body = {
       movie_path: $('#movie_path').value,
+      output_dir: $('#output_dir').value.trim(),
       storyboard: $('#storyboard').checked,
       auto: $('#auto').checked,
       auto_subtitle: $('#auto_subtitle').value,

@@ -75,9 +75,15 @@ def find_subtitle_near(video: Path, extra: str | None = None) -> Path | None:
     return None
 
 
-def _from_whisper(video: Path, model_size: str, device: str, language: str | None) -> list[dict]:
+def _from_whisper(
+    video: Path,
+    model_size: str,
+    device: str,
+    language: str | None,
+    tmp_dir: Path | None = None,
+) -> list[dict]:
     """Transcribe with Whisper (openai-whisper, faster-whisper, or whisperx)."""
-    audio = _extract_audio(video)
+    audio = _extract_audio(video, tmp_dir)
     # Try faster-whisper first (fast, CPU-friendly), then openai-whisper, then whisperx.
     try:
         return _faster_whisper(audio, model_size, device, language)
@@ -99,8 +105,17 @@ def _from_whisper(video: Path, model_size: str, device: str, language: str | Non
         )
 
 
-def _extract_audio(video: Path, tmp: Path | None = None) -> Path:
-    audio = tmp or (video.parent / f"{video.stem}_audio.wav")
+def _extract_audio(video: Path, tmp_dir: Path | None = None) -> Path:
+    """Rip the movie's audio to 16k mono wav for the ASR step.
+
+    The scratch file goes in ``tmp_dir`` (the pipeline workdir). Writing it next
+    to the source movie fails whenever the media folder is read-only or on a
+    drive the user does not want written to.
+    """
+    if tmp_dir is None:
+        tmp_dir = video.parent
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    audio = tmp_dir / f"{video.stem}_audio.wav"
     run(
         [
             which_ffmpeg(), "-y", "-i", str(video),
@@ -162,6 +177,7 @@ def extract_dialogue(
     whisper_device: str = "cpu",
     whisper_language: str | None = None,
     whitelist: bool = True,
+    tmp_dir: Path | None = None,
 ) -> list[dict]:
     """Return a list of timed cues from the film's dialogue.
 
@@ -174,7 +190,7 @@ def extract_dialogue(
         return _maybe_whitelist(cues, whitelist)
     # No subtitles -> transcribe.
     return _maybe_whitelist(
-        _from_whisper(video, whisper_model, whisper_device, whisper_language),
+        _from_whisper(video, whisper_model, whisper_device, whisper_language, tmp_dir),
         whitelist,
     )
 

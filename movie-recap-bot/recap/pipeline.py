@@ -39,6 +39,7 @@ def _auto_script(cfg: dict, workdir: Path, video: Path | None) -> str:
         whisper_model=cfg.get("dialogue", {}).get("whisper_model", "small"),
         whisper_device=cfg.get("dialogue", {}).get("whisper_device", "cpu"),
         whisper_language=cfg.get("dialogue", {}).get("whisper_language"),
+        tmp_dir=workdir / "audio",   # scratch wav stays out of the media folder
     )
     transcript = dialogue.to_transcript_text(cues, max_chars=cfg.get("dialogue", {}).get("max_chars"))
     tdir = workdir / "script"

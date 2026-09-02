@@ -18,6 +18,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import threading
@@ -30,8 +31,21 @@ if str(BOT_DIR) not in sys.path:
     sys.path.insert(0, str(BOT_DIR))
 
 STUDIO_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = STUDIO_DIR / "output"
+DEFAULT_OUTPUT_DIR = STUDIO_DIR / "output"
+# Kept as the fallback location. Use output_dir() — it honours the configured
+# folder and falls back here if that folder cannot be created/written.
+OUTPUT_DIR = DEFAULT_OUTPUT_DIR
 INPUTS = BOT_DIR / "inputs" / "text"
+
+VIDEO_EXTS = {
+    ".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".wmv",
+    ".flv", ".ts", ".m2ts", ".mpg", ".mpeg", ".mxf",
+}
+
+
+class MoviePathError(RuntimeError):
+    """The configured movie path cannot be used (missing, a folder, unreadable)."""
+
 
 # Captured before any redirection so the tee can still echo to the real console.
 _REAL_STDOUT = sys.stdout
@@ -41,6 +55,7 @@ CONFIG_PATH = STUDIO_DIR / "config.json"
 DEFAULT_CONFIG = {
     "engine": "recap",
     "movie_path": "",                       # optional owned movie file
+    "output_dir": r"D:\recap",              # where the clips + _work go; "" = recap-studio/output
     "storyboard": True,                     # use placeholder scenes when no movie
     "duration": 60,                         # target clip length (seconds)
     "voice_en": "en-US-ChristopherNeural",
@@ -188,6 +203,105 @@ def overall_cfg() -> dict:
     return load_config()
 
 
+_OUTPUT_CACHE: dict[str, Path] = {}
+
+
+def output_dir(cfg: dict | None = None) -> Path:
+    """Folder that holds the rendered clips and the ``_work`` intermediates.
+
+    Configurable from the panel (`output_dir`, e.g. ``D:\\recap``). It is created
+    on demand and write-tested once per distinct value; if it cannot be used the
+    run falls back to ``recap-studio/output`` with a warning in the log rather
+    than dying halfway through a render.
+    """
+    if cfg is None:
+        cfg = load_config()
+    raw = (cfg.get("output_dir") or "").strip().strip('"')
+    cached = _OUTPUT_CACHE.get(raw)
+    if cached is not None:
+        return cached
+
+    resolved = DEFAULT_OUTPUT_DIR
+    if raw:
+        # "D:\recap" is a perfectly legal *filename* on Linux/macOS, so without
+        # this check it silently creates a folder named "D:\recap" instead of
+        # telling you the path makes no sense on this OS.
+        if re.match(r"^[A-Za-z]:[\\/]", raw) and os.name != "nt":
+            _log(
+                f"! output folder {raw} is a Windows path but this is not Windows "
+                f"({sys.platform}); falling back to {DEFAULT_OUTPUT_DIR}"
+            )
+            raw = ""
+    if raw:
+        target = Path(raw).expanduser()
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            probe = target / ".recap_write_test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            resolved = target
+        except Exception as exc:
+            _log(
+                f"! output folder {target} is not usable ({type(exc).__name__}: {exc}); "
+                f"falling back to {DEFAULT_OUTPUT_DIR}"
+            )
+    try:
+        resolved.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        resolved = DEFAULT_OUTPUT_DIR
+        resolved.mkdir(parents=True, exist_ok=True)
+    _OUTPUT_CACHE[raw] = resolved
+    return resolved
+
+
+def check_movie(path: str) -> tuple[Path | None, str]:
+    """Validate the movie path. Returns ``(resolved_file, error_message)``.
+
+    A folder is a very common mistake — ffmpeg reports it as a confusing
+    "Permission denied", so we catch it here and say what to do instead. If the
+    folder holds exactly one video file we use that; if it holds several we list
+    them and ask you to pick.
+    """
+    raw = (path or "").strip().strip('"')
+    if not raw:
+        return None, ""
+
+    p = Path(raw).expanduser()
+    if not p.exists():
+        return None, f"Movie not found: {raw}"
+
+    if p.is_dir():
+        vids = sorted(
+            x for x in p.iterdir()
+            if x.is_file() and x.suffix.lower() in VIDEO_EXTS
+        )
+        if not vids:
+            return None, (
+                f"{raw} is a FOLDER, and it contains no video files. "
+                f"Set Movie file path to a video FILE such as "
+                f"{raw}{os.sep}movie.mp4"
+            )
+        if len(vids) > 1:
+            shown = ", ".join(v.name for v in vids[:6])
+            return None, (
+                f"{raw} is a FOLDER containing {len(vids)} video files "
+                f"({shown}{' ...' if len(vids) > 6 else ''}). Recap one film at a "
+                f"time: set Movie file path to {raw}{os.sep}{vids[0].name}"
+            )
+        _log(f"    {raw} is a folder -> using {vids[0].name}")
+        p = vids[0]
+
+    if not p.is_file():
+        return None, f"Not a readable file: {raw}"
+    try:
+        size = p.stat().st_size
+    except OSError as exc:
+        return None, f"Cannot read {raw}: {exc}"
+    if size == 0:
+        return None, f"{raw} is empty (0 bytes)"
+    return p, ""
+
+
 def llm_ready(cfg: dict) -> bool:
     """Ollama is key-free and configured; other providers need a key."""
     prov = (cfg.get("llm_provider") or "none").lower()
@@ -201,22 +315,22 @@ def llm_ready(cfg: dict) -> bool:
 # --------------------------------------------------------------------------
 # Recap config assembly (the single place UI settings reach the pipeline)
 # --------------------------------------------------------------------------
-def _base_recap() -> dict:
-    """Load movie-recap-bot/config.yaml and point its output at the studio dir."""
+def _base_recap(cfg: dict | None = None) -> dict:
+    """Load movie-recap-bot/config.yaml and point its output at the studio folder."""
     from recap.config import load_config as recap_load_config
 
     rc = recap_load_config()
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    rc["project"]["_out"] = OUTPUT_DIR
+    out = output_dir(cfg)
+    rc["project"]["_out"] = out
     rc["project"]["name"] = "recap"
-    rc["project"]["output_dir"] = str(OUTPUT_DIR)
+    rc["project"]["output_dir"] = str(out)
     return rc
 
 
 def recap_cfg(cfg: dict, lang: str) -> dict:
     """Build the recap config for a single-language run from panel settings."""
     lang = "zh" if lang.startswith("zh") else "en"
-    rc = _base_recap()
+    rc = _base_recap(cfg)
 
     rc["language"]["target_languages"] = [lang]
     tag = rc["language"].get("zh_variant", "zh-CN") if lang.startswith("zh") else lang
@@ -348,10 +462,16 @@ def clear_staged_scripts() -> None:
 # Runs
 # --------------------------------------------------------------------------
 def _resolve_clips(cfg: dict) -> list[Path]:
-    mp = (cfg.get("movie_path") or "").strip().strip('"')
-    if mp and Path(mp).exists():
-        return [Path(mp)]
-    return []
+    """Return the movie file to recap, or [] to use placeholder scenes.
+
+    Raises MoviePathError with a human-readable reason when the configured path
+    is missing, a folder, or unreadable — instead of letting ffmpeg fail later
+    with a cryptic "Permission denied".
+    """
+    resolved, err = check_movie(cfg.get("movie_path", ""))
+    if err:
+        raise MoviePathError(err)
+    return [resolved] if resolved else []
 
 
 def run_language(lang: str, cfg: dict | None = None) -> Path | None:
@@ -362,8 +482,14 @@ def run_language(lang: str, cfg: dict | None = None) -> Path | None:
     lang = "zh" if lang.startswith("zh") else "en"
     _log(f">>> Run clip [{lang}] — dubbing={lang}, subtitles={lang}")
 
+    try:
+        clips = _resolve_clips(cfg)
+    except MoviePathError as exc:
+        _log(f"    ERROR: {exc}")
+        _log("    Fix it in Settings -> Movie file path, then run again.")
+        raise
+
     rc = recap_cfg(cfg, lang)
-    clips = _resolve_clips(cfg)
     storyboard = not clips
     auto = bool(cfg.get("auto")) and bool(clips)
 
@@ -401,8 +527,9 @@ def run_language(lang: str, cfg: dict | None = None) -> Path | None:
 
 def list_outputs() -> list[dict]:
     res = []
-    if OUTPUT_DIR.exists():
-        for p in sorted(OUTPUT_DIR.glob("*.mp4")):
+    out = output_dir()
+    if out.exists():
+        for p in sorted(out.glob("*.mp4")):
             res.append(
                 {
                     "path": str(p),
