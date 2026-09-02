@@ -33,11 +33,27 @@ def which_ffprobe() -> str:
     )
 
 
-def run(cmd: list[str], check: bool = True, capture: bool = True) -> subprocess.CompletedProcess:
-    """Run a command, echoing the call for debuggability."""
+def run(
+    cmd: list[str],
+    check: bool = True,
+    capture: bool = True,
+    cwd: str | Path | None = None,
+) -> subprocess.CompletedProcess:
+    """Run a command, echoing the call for debuggability.
+
+    ``cwd`` matters for filtergraph arguments: a Windows path like
+    ``D:\\recap\\_work\\en.ass`` contains a colon, and ffmpeg's filter parser
+    reads ``:`` as an option separator, so absolute paths in filters break.
+    Callers pass the file's folder here and use a bare relative filename.
+    """
     pretty = " ".join(str(c) for c in cmd)
     print(f"  $ {pretty}")
-    res = subprocess.run([str(c) for c in cmd], capture_output=capture, text=True)
+    res = subprocess.run(
+        [str(c) for c in cmd],
+        capture_output=capture,
+        text=True,
+        cwd=str(cwd) if cwd else None,
+    )
     if check and res.returncode != 0:
         raise RuntimeError(
             f"Command failed ({res.returncode}): {pretty}\n"

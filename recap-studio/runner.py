@@ -434,6 +434,80 @@ def _ensure_scripts() -> None:
         src = INPUTS / name
         if not dest.exists() and src.exists():
             dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            _log(f"    staged the BUNDLED SAMPLE script ({name}) into {dest}")
+
+
+def sample_script_in_use() -> bool:
+    """True when the staged EN script is still the bundled sample.
+
+    The pipeline prefers any script_en.txt it finds, so a leftover sample will
+    quietly produce a recap of the *sample film* instead of yours. The panel
+    uses this to warn before you render.
+    """
+    staged = script_path("en")
+    src = INPUTS / "script_en.txt"
+    if not staged.exists() or not src.exists():
+        return False
+    try:
+        return staged.read_text(encoding="utf-8").strip() == src.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+
+
+def whisper_available() -> bool:
+    """Any Whisper implementation the dialogue extractor can use."""
+    return any(have(m) for m in ("faster_whisper", "whisper", "whisperx"))
+
+
+def subtitle_for(movie: Path | None, explicit: str = "") -> Path | None:
+    """The .srt/.ass/.vtt that auto-recap would read, if any."""
+    if movie is None:
+        return None
+    try:
+        from recap.dialogue import find_subtitle_near
+
+        return find_subtitle_near(Path(movie), explicit or None)
+    except Exception:
+        return None
+
+
+def readiness(cfg: dict | None = None) -> dict:
+    """Why auto-recap can or cannot run — the panel shows this before Run."""
+    cfg = cfg if cfg is not None else load_config()
+    movie, movie_err = check_movie(cfg.get("movie_path", ""))
+    wants_auto = bool(cfg.get("auto"))
+    llm_ok = llm_ready(cfg)
+    srt = subtitle_for(movie, cfg.get("auto_subtitle", ""))
+    whisper = whisper_available()
+    sample = sample_script_in_use()
+
+    blocking = []
+    if wants_auto:
+        if movie is None:
+            blocking.append(movie_err or "no movie file set")
+        if not llm_ok:
+            blocking.append("no LLM configured (pick one in Settings -> LLM)")
+        if movie is not None and not srt and not whisper:
+            blocking.append(
+                "no .srt next to the movie and no Whisper installed "
+                "(pip install faster-whisper), so the dialogue cannot be read"
+            )
+
+    return {
+        "auto": wants_auto,
+        "auto_ready": wants_auto and not blocking,
+        "blocking": blocking,
+        "movie_ok": movie is not None,
+        "movie_resolved": str(movie) if movie else "",
+        "subtitle": str(srt) if srt else "",
+        "whisper": whisper,
+        "llm_ready": llm_ok,
+        "llm_provider": cfg.get("llm_provider", "none"),
+        "sample_script": sample,
+        "script_source": (
+            "bundled sample" if sample else ("workdir script" if script_path("en").exists() else "none")
+        ),
+    }
 
 
 def write_scripts(en_script: str = "", zh_script: str = "") -> dict:
@@ -491,7 +565,25 @@ def run_language(lang: str, cfg: dict | None = None) -> Path | None:
 
     rc = recap_cfg(cfg, lang)
     storyboard = not clips
-    auto = bool(cfg.get("auto")) and bool(clips)
+    wants_auto = bool(cfg.get("auto"))
+
+    # Auto-recap means "read this movie, then write the narration". Without a
+    # movie there is nothing to read, and the old behaviour was to quietly fall
+    # back to the bundled sample script and render placeholder frames — i.e. a
+    # finished-looking video of the wrong film. Refuse instead.
+    if wants_auto and not clips:
+        _, why = check_movie(cfg.get("movie_path", ""))
+        msg = (
+            "Auto-recap is ON but no usable movie file is set, so there is nothing "
+            "to read. "
+            + (f"{why}. " if why else "")
+            + "Set Movie file path to a video FILE (not a folder) in Settings, or "
+            "turn Auto-recap OFF to narrate the script in the Script editor."
+        )
+        _log(f"    ERROR: {msg}")
+        raise MoviePathError(msg)
+
+    auto = wants_auto and bool(clips)
 
     if auto:
         # Auto-recap: the LLM writes the EN recap from the movie's dialogue.
@@ -512,6 +604,12 @@ def run_language(lang: str, cfg: dict | None = None) -> Path | None:
             _log("    no movie file -> using placeholder storyboard scenes")
         else:
             _log(f"    using movie: {clips[0]}")
+        if sample_script_in_use():
+            _log(
+                "    WARNING: the narration is the BUNDLED SAMPLE script, not your "
+                "movie. Turn on Auto-recap with a movie file, or paste your own "
+                "script in the Script editor tab."
+            )
 
     try:
         with redirect_stdout(_Tee(_REAL_STDOUT)):

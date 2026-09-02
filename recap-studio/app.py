@@ -188,6 +188,7 @@ class Handler(BaseHTTPRequestHandler):
             "job": runner.status(),
             "outputs": runner.list_outputs(),
             "clips": clips,
+            "ready": runner.readiness(cfg),
             "scripts": {
                 "en": str(runner.script_path("en")),
                 "zh": str(runner.script_path("zh")),
@@ -204,6 +205,7 @@ class Handler(BaseHTTPRequestHandler):
                 "movie_resolved": str(movie) if movie else "",
                 "edge_tts": runner.have("edge_tts"),
                 "pysubs2": runner.have("pysubs2"),
+                "whisper": runner.whisper_available(),
                 "yaml": runner.have("yaml"),
                 "output_dir": str(out),
                 "output_writable": os.access(out, os.W_OK),

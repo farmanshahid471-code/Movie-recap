@@ -174,9 +174,18 @@ function clipCard(lang, cfg, s){
     : '<div class="muted">No ' + lang.toUpperCase() + ' clip rendered yet.</div>';
 
   const env = s.env || {};
-  const warn = env.movie_error
-    ? '<div class="desc" style="color:#f87171;font-weight:600">&#9888; ' + esc(env.movie_error) + ' Fix it in the Settings tab.</div>'
-    : '';
+  const ready = s.ready || {};
+  const warns = [];
+  if (env.movie_error) {
+    warns.push('<span style="color:#f87171;font-weight:600">&#9888; ' + esc(env.movie_error) + '</span>');
+  }
+  if (ready.auto && !ready.auto_ready) {
+    (ready.blocking || []).forEach(b => warns.push('<span style="color:#f87171;font-weight:600">&#9888; Auto-recap cannot run: ' + esc(b) + '</span>'));
+  }
+  if (ready.sample_script) {
+    warns.push('<span style="color:#facc15">&#9888; The narration is the <b>bundled sample script</b>, not your movie. Turn on Auto-recap with a movie file, or paste your own script in the Script editor.</span>');
+  }
+  const warn = warns.length ? '<div class="desc">' + warns.join('<br>') + '</div>' : '';
   const card = document.createElement('div');
   card.className = 'card';
   card.innerHTML =
@@ -245,6 +254,7 @@ function settingsCard(cfg, s){
       '<label class="switch"><input type="checkbox" id="auto"' + (cfg.auto ? ' checked' : '') + '> Auto-recap: write the narration from the movie\'s dialogue (needs a movie + LLM)</label>' +
       '<label>Dialogue subtitle (.srt) — optional; blank = look for one next to the movie, else Whisper</label>' +
       '<input type="text" id="auto_subtitle" value="' + esc(cfg.auto_subtitle) + '" placeholder="D:\\videos\\my_movie.srt (or leave blank)">' +
+      '<div class="desc mt" id="readyBox"></div>' +
     '</fieldset>' +
 
     '<fieldset><legend>Output</legend>' +
@@ -285,6 +295,7 @@ function settingsCard(cfg, s){
   const items = [
     ['ffmpeg', env.ffmpeg], ['edge-tts', env.edge_tts], ['pysubs2', env.pysubs2], ['pyyaml', env.yaml],
     ['scene detect', env.scene_detect], ['movie set', env.movie_set], ['movie file readable', env.movie_exists],
+    ['whisper (ASR)', env.whisper],
     ['output folder writable', env.output_writable],
     ['llm: ' + (env.llm_provider || 'none'), env.llm_ready],
     ['python ' + (env.python || '?'), true]
@@ -322,6 +333,21 @@ function settingsCard(cfg, s){
     card.querySelector('#llmNote').innerHTML = p.note;
   };
   provSel.onchange();
+
+  // What auto-recap needs, stated plainly before you press Run.
+  const rb = card.querySelector('#readyBox');
+  const rd = s.ready || {};
+  if (rd.auto) {
+    const lines = (rd.blocking || []).length
+      ? (rd.blocking || []).map(b => '<span style="color:#f87171">&#10007; ' + esc(b) + '</span>').join('<br>')
+      : '<span style="color:#4ade80">&#10003; Auto-recap is ready — it will read the movie and write the narration.</span>';
+    rb.innerHTML = '<b>Auto-recap check</b><br>' + lines +
+      '<br><span class="muted">dialogue source: ' + esc(rd.subtitle || (rd.whisper ? 'Whisper ASR (no .srt found)' : 'none')) +
+      ' · llm: ' + esc(rd.llm_provider) + '</span>';
+  } else {
+    rb.innerHTML = '<span class="muted">Auto-recap is off — the clip narrates the script in the Script editor tab' +
+      (rd.sample_script ? ', which is currently the <b style="color:#facc15">bundled sample</b>' : '') + '.</span>';
+  }
 
   card.querySelector('#saveCfg').onclick = async () => {
     const body = {
