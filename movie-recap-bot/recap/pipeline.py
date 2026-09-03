@@ -86,7 +86,17 @@ def _get_script(cfg: dict, workdir: Path, video: Path | None = None) -> str:
         try:
             script_text = _auto_script(cfg, workdir, video)
             print(f"  * Auto-written EN recap from dialogue.")
-        except (DialogueError, llm.LLMError) as exc:
+        except llm.LLMError as exc:
+            # The movie and dialogue were fine — the LLM is unreachable. Do NOT
+            # fall through to the plot-summary path (its "provide script_en.txt"
+            # error is misleading here); say what to actually do.
+            raise llm.LLMError(
+                "Auto-recap read your movie's dialogue but could not reach the LLM to "
+                f"write the narration ({exc}). If you use Ollama, start it: run "
+                "`ollama serve` and `ollama pull qwen2.5`. Otherwise pick a provider and "
+                "key in Settings -> LLM."
+            ) from exc
+        except DialogueError as exc:
             print(f"  ! Auto-recap unavailable ({exc}); falling back.")
             script_text = None
 

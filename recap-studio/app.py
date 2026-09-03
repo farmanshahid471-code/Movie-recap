@@ -240,6 +240,7 @@ class Handler(BaseHTTPRequestHandler):
                 "llm_provider": cfg.get("llm_provider", "none"),
                 "llm_key_set": bool(cfg.get("llm_api_key")),
                 "llm_ready": runner.llm_ready(cfg),
+                "llm_reachable": runner.ollama_up(cfg),
                 "movie_set": bool(mp),
                 "movie_exists": movie is not None,
                 "movie_error": movie_err,

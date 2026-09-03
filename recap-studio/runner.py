@@ -368,10 +368,40 @@ def llm_ready(cfg: dict) -> bool:
     """Ollama is key-free and configured; other providers need a key."""
     prov = (cfg.get("llm_provider") or "none").lower()
     if prov == "ollama":
-        return True  # no key required; reachability is checked at run time
+        return True  # no key required; reachability is checked separately
     if prov == "none":
         return False
     return bool(cfg.get("llm_api_key"))
+
+
+_OLLAMA_PROBE: dict[str, tuple[float, bool]] = {}
+
+
+def ollama_up(cfg: dict) -> bool:
+    """True when an Ollama server actually answers at the configured base URL.
+
+    ``llm_ready`` only says Ollama is *configured* (it needs no key); this checks
+    it is *running*, so the panel can warn before a run dies on a connection
+    error. Probing localhost is instant when up and refuses instantly when down;
+    the result is cached a few seconds so the status poll stays cheap.
+    """
+    if (cfg.get("llm_provider") or "").lower() != "ollama":
+        return True  # other providers need a key, not a local server
+    base = (cfg.get("llm_base_url") or "http://localhost:11434/v1").rstrip("/")
+    now = time.time()
+    cached = _OLLAMA_PROBE.get(base)
+    if cached and now - cached[0] < 5:
+        return cached[1]
+    ok = False
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(base + "/models", timeout=1.5) as resp:
+            ok = 200 <= resp.status < 300
+    except Exception:
+        ok = False
+    _OLLAMA_PROBE[base] = (now, ok)
+    return ok
 
 
 # --------------------------------------------------------------------------
@@ -591,6 +621,11 @@ def readiness(cfg: dict | None = None) -> dict:
             blocking.append(movie_err or "no movie file set")
         if not llm_ok:
             blocking.append("no LLM configured (pick one in Settings -> LLM)")
+        if llm_ok and not ollama_up(cfg):
+            blocking.append(
+                "Ollama is not running — open a terminal and run: ollama serve, then "
+                "ollama pull qwen2.5 (or switch provider in Settings -> LLM)"
+            )
         # A missing Whisper is no longer a blocker: when the run starts and no
         # .srt is found, ensure_whisper() downloads & installs faster-whisper.
 
@@ -598,6 +633,7 @@ def readiness(cfg: dict | None = None) -> dict:
 
     return {
         "whisper_will_install": whisper_will_install,
+        "llm_reachable": ollama_up(cfg),
         "auto": wants_auto,
         "auto_ready": wants_auto and not blocking,
         "blocking": blocking,
