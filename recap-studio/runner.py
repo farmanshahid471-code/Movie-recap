@@ -256,6 +256,52 @@ def output_dir(cfg: dict | None = None) -> Path:
     return resolved
 
 
+def _resolve_hidden_extension(p: Path) -> Path | None:
+    """Resolve a path typed without its (hidden) file extension.
+
+    Windows Explorer hides known extensions by default, so a copy-pasted name
+    like ``ToyStory5.2026.HDRip`` is really ``ToyStory5.2026.HDRip.mp4``. Try the
+    typed name plus each video extension before giving up.
+    """
+    parent = p.parent
+    if not parent.is_dir():
+        return None
+    for ext in sorted(VIDEO_EXTS):
+        cand = parent / (p.name + ext)
+        if cand.is_file():
+            return cand
+    # also match files whose full name starts with the typed name plus a dot
+    for cand in sorted(parent.iterdir()):
+        if (
+            cand.is_file()
+            and cand.suffix.lower() in VIDEO_EXTS
+            and cand.name.startswith(p.name + ".")
+        ):
+            return cand
+    return None
+
+
+def _not_found_message(raw: str, p: Path) -> str:
+    parent = p.parent
+    hint = ""
+    if parent.is_dir():
+        vids = sorted(
+            x.name for x in parent.iterdir()
+            if x.is_file() and x.suffix.lower() in VIDEO_EXTS
+        )
+        if vids:
+            hint = (
+                f" The folder {parent} holds these video files: "
+                f"{', '.join(vids[:6])}{' ...' if len(vids) > 6 else ''}."
+            )
+        else:
+            hint = (
+                " Note: Windows hides file extensions by default — if the file "
+                "is really there, its true name may end in .mp4/.mkv/.avi."
+            )
+    return f"Movie not found: {raw}.{hint}"
+
+
 def check_movie(path: str) -> tuple[Path | None, str]:
     """Validate the movie path. Returns ``(resolved_file, error_message)``.
 
@@ -270,7 +316,12 @@ def check_movie(path: str) -> tuple[Path | None, str]:
 
     p = Path(raw).expanduser()
     if not p.exists():
-        return None, f"Movie not found: {raw}"
+        resolved = _resolve_hidden_extension(p)
+        if resolved is not None:
+            _log(f"    {raw} has no extension as typed -> using {resolved.name}")
+            p = resolved
+        else:
+            return None, _not_found_message(raw, p)
 
     if p.is_dir():
         vids = sorted(
