@@ -520,6 +520,40 @@ def whisper_available() -> bool:
     return any(have(m) for m in ("faster_whisper", "whisper", "whisperx"))
 
 
+def ensure_whisper() -> tuple[bool, str]:
+    """Make a Whisper implementation available, installing it if missing.
+
+    Auto-recap needs the movie's dialogue; when there is no ``.srt`` that comes
+    from Whisper. Rather than telling the user to run pip by hand, we check and,
+    if nothing is installed, download & install ``faster-whisper`` into the same
+    interpreter that is running the panel. One-time; later runs find it already
+    present. Returns ``(ok, message)``.
+    """
+    if whisper_available():
+        return True, "already installed"
+
+    _log("    Whisper not installed -> downloading & installing faster-whisper "
+         "(one-time; this can take a couple of minutes) ...")
+    import subprocess
+
+    cmd = [sys.executable, "-m", "pip", "install", "faster-whisper"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+    except subprocess.TimeoutExpired:
+        return False, "pip install faster-whisper timed out"
+    except Exception as exc:
+        return False, f"could not start pip: {exc}"
+
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return False, f"pip install faster-whisper failed: {tail[-1] if tail else 'unknown error'}"
+
+    if whisper_available():
+        _log("    faster-whisper installed.")
+        return True, "installed"
+    return False, "faster-whisper was installed but could not be imported"
+
+
 def subtitle_for(movie: Path | None, explicit: str = "") -> Path | None:
     """The .srt/.ass/.vtt that auto-recap would read, if any."""
     if movie is None:
@@ -548,13 +582,13 @@ def readiness(cfg: dict | None = None) -> dict:
             blocking.append(movie_err or "no movie file set")
         if not llm_ok:
             blocking.append("no LLM configured (pick one in Settings -> LLM)")
-        if movie is not None and not srt and not whisper:
-            blocking.append(
-                "no .srt next to the movie and no Whisper installed "
-                "(pip install faster-whisper), so the dialogue cannot be read"
-            )
+        # A missing Whisper is no longer a blocker: when the run starts and no
+        # .srt is found, ensure_whisper() downloads & installs faster-whisper.
+
+    whisper_will_install = bool(wants_auto) and movie is not None and not srt and not whisper
 
     return {
+        "whisper_will_install": whisper_will_install,
         "auto": wants_auto,
         "auto_ready": wants_auto and not blocking,
         "blocking": blocking,
@@ -659,6 +693,19 @@ def run_language(lang: str, cfg: dict | None = None) -> Path | None:
         rc.setdefault("dialogue", {})
         rc["dialogue"]["srt_path"] = cfg.get("auto_subtitle", "") or None
         rc["dialogue"]["whisper_model"] = cfg.get("whisper_model", "small")
+
+        # The dialogue comes from an .srt when one exists; otherwise Whisper must
+        # transcribe the movie's audio. If nothing is installed, fetch it now.
+        if subtitle_for(clips[0], cfg.get("auto_subtitle", "")) is None:
+            ok, why = ensure_whisper()
+            if not ok:
+                msg = (
+                    "Auto-recap needs the movie's dialogue, but Whisper could not be "
+                    f"made available ({why}). Drop an .srt next to the movie, or fix "
+                    "your network/pip and run again."
+                )
+                _log(f"    ERROR: {msg}")
+                raise RuntimeError(msg)
     else:
         _ensure_scripts()
         if storyboard:

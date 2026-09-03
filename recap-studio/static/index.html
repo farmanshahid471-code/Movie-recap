@@ -364,7 +364,7 @@ function settingsCard(cfg, s){
       ? (rd.blocking || []).map(b => '<span style="color:#f87171">&#10007; ' + esc(b) + '</span>').join('<br>')
       : '<span style="color:#4ade80">&#10003; Auto-recap is ready — it will read the movie and write the narration.</span>';
     rb.innerHTML = '<b>Auto-recap check</b><br>' + lines +
-      '<br><span class="muted">dialogue source: ' + esc(rd.subtitle || (rd.whisper ? 'Whisper ASR (no .srt found)' : 'none')) +
+      '<br><span class="muted">dialogue source: ' + esc(rd.subtitle || (rd.whisper ? 'Whisper ASR (no .srt found)' : (rd.whisper_will_install ? 'Whisper — will be downloaded & installed automatically on first run' : 'none'))) +
       ' · llm: ' + esc(rd.llm_provider) + '</span>';
   } else {
     rb.innerHTML = '<span class="muted">Auto-recap is off — the clip narrates the script in the Script editor tab' +
