@@ -130,6 +130,9 @@ def _extract_audio(video: Path, tmp_dir: Path | None = None) -> Path:
 def _faster_whisper(audio: Path, model_size: str, device: str, language: str | None) -> list[dict]:
     from faster_whisper import WhisperModel  # type: ignore
 
+    print(f"  * Whisper: loading model '{model_size}' and transcribing the audio "
+          f"(on CPU this can take several minutes for a full movie — the log goes "
+          f"quiet while it works; this is normal) ...")
     model = WhisperModel(model_size, device=device, compute_type="int8")
     segments, _info = model.transcribe(str(audio), language=language, beam_size=1)
     cues: list[dict] = []

@@ -207,6 +207,10 @@ def overall_cfg() -> dict:
 
 _OUTPUT_CACHE: dict[str, Path] = {}
 
+# Paths whose hidden-extension resolution we have already announced, so the
+# status poll doesn't reprint the same line every couple of seconds.
+_RESOLVE_LOGGED: set[str] = set()
+
 
 def output_dir(cfg: dict | None = None) -> Path:
     """Folder that holds the rendered clips and the ``_work`` intermediates.
@@ -318,7 +322,11 @@ def check_movie(path: str) -> tuple[Path | None, str]:
     if not p.exists():
         resolved = _resolve_hidden_extension(p)
         if resolved is not None:
-            _log(f"    {raw} has no extension as typed -> using {resolved.name}")
+            # The panel polls /api/status (which validates the movie) every couple
+            # of seconds; log the resolution once, not once per poll.
+            if raw not in _RESOLVE_LOGGED:
+                _RESOLVE_LOGGED.add(raw)
+                _log(f"    {raw} has no extension as typed -> using {resolved.name}")
             p = resolved
         else:
             return None, _not_found_message(raw, p)
