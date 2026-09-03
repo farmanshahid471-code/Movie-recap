@@ -110,9 +110,50 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"lang": lang, "script": runner.read_script(lang), "path": str(runner.script_path(lang))})
         if path.startswith("/output/"):
             return self._stream_clip(path[len("/output/"):])
+        if path == "/api/browse":
+            return self._browse(parse_qs(parsed.query))
         if path == "/healthz":
             return self._send(200, b"ok", "text/plain; charset=utf-8")
         return self._json(404, {"ok": False, "error": "not found"})
+
+    def _browse(self, qs):
+        """Server-side file browser so the panel can offer a Browse button.
+
+        Browsers refuse to reveal a chosen file's full path, so instead we list
+        the machine's folders here (it is the same machine) and let the UI pick.
+        """
+        kind = qs.get("kind", ["video"])[0]
+        raw = (qs.get("path", [""])[0]).strip().strip('"')
+        exts = runner.VIDEO_EXTS if kind == "video" else (".srt", ".ass", ".vtt", ".sub", ".txt")
+
+        p = Path(raw).expanduser() if raw else None
+        if p is not None and p.is_file():
+            p = p.parent
+        if p is None or not p.is_dir():
+            return self._json(200, {
+                "ok": True, "path": "", "parent": "", "dirs": [], "files": [],
+                "roots": self._roots(),
+            })
+
+        try:
+            entries = sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+        except OSError as exc:
+            return self._json(200, {"ok": False, "error": f"cannot open {p}: {exc}"})
+
+        dirs = [d.name for d in entries if d.is_dir() and not d.name.startswith(".")]
+        files = [f.name for f in entries if f.is_file() and f.suffix.lower() in exts]
+        parent = "" if p == p.parent else str(p.parent)
+        return self._json(200, {
+            "ok": True, "path": str(p), "parent": parent, "dirs": dirs, "files": files,
+            "roots": self._roots(),
+        })
+
+    @staticmethod
+    def _roots():
+        if os.name == "nt":
+            import string
+            return [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
+        return ["/"]
 
     def do_POST(self):
         self._guard(self._route_post)

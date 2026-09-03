@@ -128,6 +128,19 @@ video{width:100%;border-radius:10px;border:1px solid var(--border);background:#0
   <div class="sub" style="text-align:center">The server has shut down. You can close this browser tab and the launcher window now — or run <b>setup_ui.bat</b> again to reopen it.</div>
 </div>
 
+<div id="fileModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:150;align-items:center;justify-content:center">
+  <div style="background:#0f1420;border:1px solid #2a3244;border-radius:12px;width:min(640px,92vw);max-height:80vh;display:flex;flex-direction:column;padding:14px">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+      <button class="btn" id="fmUp">↑ Up</button>
+      <code id="fmPath" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px"></code>
+      <button class="btn" id="fmClose">✕</button>
+    </div>
+    <div id="fmRoots" style="margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap"></div>
+    <div id="fmList" style="overflow:auto;flex:1;min-height:200px"></div>
+    <div class="muted" style="margin-top:8px;font-size:12px">Click a folder to open it, or a file to choose it.</div>
+  </div>
+</div>
+
 <script>
 "use strict";
 const $ = (sel) => document.querySelector(sel);
@@ -315,6 +328,23 @@ function settingsCard(cfg, s){
 
     '<fieldset><legend>Environment</legend><div class="tags" id="envTags"></div></fieldset>';
 
+  // Attach a "Browse…" picker beside the two path fields (built via DOM so the
+  // template string stays simple). Browsers won't reveal a picked file's full
+  // path, so the picker lists this machine's folders through /api/browse.
+  [['movie_path', 'video', 'Pick the movie file from your folders'],
+   ['auto_subtitle', 'subtitle', 'Pick the .srt subtitle file']].forEach(([inp, kind, tip]) => {
+    const field = card.querySelector('#' + inp);
+    if (!field) return;
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;gap:8px;align-items:stretch';
+    const btn = document.createElement('button');
+    btn.className = 'btn'; btn.type = 'button'; btn.textContent = 'Browse…'; btn.title = tip;
+    field.style.flex = '1';
+    field.parentNode.insertBefore(wrap, field);
+    wrap.appendChild(field); wrap.appendChild(btn);
+    btn.onclick = () => openBrowser(inp, kind);
+  });
+
   const env = s.env || {};
   const items = [
     ['ffmpeg', env.ffmpeg], ['edge-tts', env.edge_tts], ['pysubs2', env.pysubs2], ['pyyaml', env.yaml],
@@ -369,31 +399,16 @@ function settingsCard(cfg, s){
       '<br><span class="muted">dialogue source: ' + esc(rd.subtitle || (rd.whisper ? 'Whisper ASR (no .srt found)' : (rd.whisper_will_install ? 'Whisper — will be downloaded & installed automatically on first run' : 'none'))) +
       ' · llm: ' + esc(rd.llm_provider) + '</span>';
   } else {
-    rb.innerHTML = '<span class="muted">Auto-recap is off — the clip narrates the script in the Script editor tab' +
+    let offMsg = '<span class="muted">Auto-recap is off — the clip narrates the script in the Script editor tab' +
       (rd.sample_script ? ', which is currently the <b style="color:#facc15">bundled sample</b>' : '') + '.</span>';
+    if (rd.subtitle) offMsg += '<br><span style="color:#60a5fa">A subtitle was found (' + esc(rd.subtitle) +
+      '). Turn Auto-recap ON to write the narration from your movie instead of the sample.</span>';
+    rb.innerHTML = offMsg;
   }
 
   card.querySelector('#saveCfg').onclick = async () => {
-    const body = {
-      movie_path: $('#movie_path').value,
-      output_dir: $('#output_dir').value.trim(),
-      montage: $('#montage').value,
-      scene_len: parseFloat($('#scene_len').value) || 6.0,
-      storyboard: $('#storyboard').checked,
-      auto: $('#auto').checked,
-      auto_subtitle: $('#auto_subtitle').value,
-      voice_en: $('#voice_en').value,
-      subtitle_lang_en: $('#subtitle_lang_en').value,
-      voice_zh: $('#voice_zh').value,
-      subtitle_lang_zh: $('#subtitle_lang_zh').value,
-      duration: parseInt($('#duration').value, 10) || 60,
-      llm_provider: $('#llm_provider').value.trim() || 'ollama',
-      llm_model: $('#llm_model').value.trim(),
-      llm_base_url: $('#llm_base_url').value.trim(),
-      llm_api_key: $('#llm_api_key').value.trim()
-    };
     try {
-      await post('/api/config', body);
+      await post('/api/config', collectSettings());
       toast('Settings saved');
     } catch (e) { toast('Save failed: ' + e.message, true); }
     refresh();
@@ -420,8 +435,40 @@ function selectTab(tab){
 }
 
 // ---------------------------------------------------------------- actions ---
+// Reads the Settings tab into the object POST /api/config expects. Shared by the
+// Save button and by Run/Render so a run always uses what you last typed, even if
+// you never clicked Save.
+function collectSettings(){
+  // Start from what is already saved, then override only the fields that are
+  // actually on screen. Inputs that are not rendered (e.g. you pressed Run from
+  // the EN tab, where the movie field does not exist) must NOT be blanked out.
+  const base = Object.assign({}, (state.status && state.status.config) || {});
+  const v = id => { const e = $('#'+id); return e ? e.value : null; };
+  const c = id => { const e = $('#'+id); return e ? e.checked : null; };
+  const put = (k, val) => { if (val !== null) base[k] = val; };
+
+  put('movie_path', v('movie_path'));
+  const od = v('output_dir'); if (od !== null) base.output_dir = od.trim();
+  put('montage', v('montage') || 'scenes');
+  const sl = v('scene_len'); if (sl !== null) base.scene_len = parseFloat(sl) || 6.0;
+  put('storyboard', c('storyboard'));
+  put('auto', c('auto'));
+  put('auto_subtitle', v('auto_subtitle'));
+  put('voice_en', v('voice_en'));
+  put('subtitle_lang_en', v('subtitle_lang_en'));
+  put('voice_zh', v('voice_zh'));
+  put('subtitle_lang_zh', v('subtitle_lang_zh'));
+  const du = v('duration'); if (du !== null) base.duration = parseInt(du, 10) || 60;
+  const lp = v('llm_provider'); if (lp !== null) base.llm_provider = lp.trim() || 'ollama';
+  const lm = v('llm_model'); if (lm !== null) base.llm_model = lm.trim();
+  const lb = v('llm_base_url'); if (lb !== null) base.llm_base_url = lb.trim();
+  const lk = v('llm_api_key'); if (lk !== null) base.llm_api_key = lk.trim();
+  return base;
+}
+
 async function doRun(langs){
   try {
+    await post('/api/config', collectSettings());   // apply typed Settings first
     await post('/api/run', { langs: langs });
     toast('Started ' + langs.join(' + ').toUpperCase());
     pollLogs();
@@ -434,6 +481,7 @@ async function doRender(){
   const zh = $('#scriptZh').value;
   if (!en.trim() && !zh.trim()) { toast('Both scripts are empty', true); return; }
   try {
+    await post('/api/config', collectSettings());   // apply typed Settings first
     await post('/api/render', { en_script: en, zh_script: zh });
     state.dirty = false;
     toast('Render started');
@@ -461,6 +509,65 @@ async function stopRun(){
     toast(r.ok ? 'Stop requested — finishing the current step' : 'Nothing to stop', !r.ok);
   } catch (e) { toast('Stop failed: ' + e.message, true); }
   refresh();
+}
+
+// ------------------------------------------------------- file browser ---
+// Browsers refuse to expose a chosen file's absolute path, so instead of a real
+// upload we list this machine's folders via /api/browse (same machine) and let
+// you click through to the movie / .srt.
+let _fm = { target: null, kind: 'video' };
+function _joinPath(base, name){
+  if (!base) return name;
+  const sep = base.indexOf('\\') >= 0 ? '\\' : '/';
+  return base.replace(/[\\/]+$/, '') + sep + name;
+}
+async function openBrowser(inputId, kind){
+  _fm.target = inputId; _fm.kind = kind;
+  const cur = ($('#'+inputId) || {}).value || '';
+  $('#fileModal').style.display = 'flex';
+  await browseTo(cur, kind);
+}
+async function browseTo(path, kind){
+  let d;
+  try {
+    d = await api('/api/browse?kind=' + kind + '&path=' + encodeURIComponent(path || ''));
+  } catch (e) { toast('Browse failed: ' + e.message, true); return; }
+  if (!d.ok) { toast(d.error || 'cannot open folder', true); return; }
+  $('#fmPath').textContent = d.path || 'Pick a drive:';
+  $('#fmUp').disabled = !d.parent;
+  $('#fmUp').onclick = d.parent ? () => browseTo(d.parent, kind) : null;
+  const roots = $('#fmRoots'); roots.innerHTML = '';
+  (d.roots || []).forEach(rt => {
+    const b = document.createElement('button');
+    b.className = 'btn'; b.type = 'button'; b.textContent = rt.replace(/[\\/]$/, '');
+    b.onclick = () => browseTo(rt, kind);
+    roots.appendChild(b);
+  });
+  const list = $('#fmList'); list.innerHTML = '';
+  if (!(d.dirs || []).length && !(d.files || []).length) {
+    const e = document.createElement('div');
+    e.className = 'muted'; e.style.padding = '8px'; e.textContent = '(empty folder)';
+    list.appendChild(e);
+  }
+  (d.dirs || []).forEach(nm => list.appendChild(_fmRow('📁', nm, () => browseTo(_joinPath(d.path, nm), kind))));
+  (d.files || []).forEach(nm => list.appendChild(_fmRow(kind === 'video' ? '🎬' : '📄', nm, () => {
+    const t = $('#'+_fm.target); if (t) t.value = _joinPath(d.path, nm);
+    $('#fileModal').style.display = 'none';
+    toast('Picked ' + nm);
+  })));
+}
+function _fmRow(icon, label, onclick){
+  const row = document.createElement('div');
+  row.style.cssText = 'padding:7px 8px;border-radius:8px;cursor:pointer;display:flex;gap:8px;align-items:center';
+  row.onmouseover = () => row.style.background = '#1a2130';
+  row.onmouseout = () => row.style.background = '';
+  const i = document.createElement('span'); i.textContent = icon;
+  const t = document.createElement('span');
+  t.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+  t.textContent = label;
+  row.appendChild(i); row.appendChild(t);
+  row.onclick = onclick;
+  return row;
 }
 
 // ------------------------------------------------------------------ poll ---
@@ -546,6 +653,7 @@ document.querySelectorAll('.tab').forEach(t => { t.onclick = () => selectTab(t.d
 $('#generateBtn').onclick = () => doRun(['en', 'zh']);
 $('#stopRunBtn').onclick = stopRun;
 $('#reloadLogs').onclick = pullLogs;
+$('#fmClose').onclick = () => { $('#fileModal').style.display = 'none'; };
 $('#closeBtn').onclick = async () => {
   if (!confirm('Shut down the Recap Studio server? Close the launcher window afterwards.')) return;
   try { await post('/api/stop', {}); } catch (e) { /* server already gone */ }

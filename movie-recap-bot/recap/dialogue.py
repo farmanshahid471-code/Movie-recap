@@ -72,6 +72,19 @@ def find_subtitle_near(video: Path, extra: str | None = None) -> Path | None:
     for c in candidates:
         if c.exists() and c != video:
             return c
+
+    # Releases rarely name the subtitle exactly like the video file. If the
+    # folder holds exactly one subtitle, that is almost certainly the right one.
+    try:
+        subs = sorted(
+            x for x in video.parent.iterdir()
+            if x.is_file() and x.suffix.lower() in (".srt", ".ass", ".vtt", ".sub")
+            and x != video
+        )
+    except OSError:
+        subs = []
+    if len(subs) == 1:
+        return subs[0]
     return None
 
 
