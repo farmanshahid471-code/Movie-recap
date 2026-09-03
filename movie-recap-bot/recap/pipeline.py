@@ -37,7 +37,9 @@ def _auto_script(cfg: dict, workdir: Path, video: Path | None) -> str:
         video,
         srt,
         whisper_model=cfg.get("dialogue", {}).get("whisper_model", "small"),
-        whisper_device=cfg.get("dialogue", {}).get("whisper_device", "cpu"),
+        # "auto" lets faster-whisper pick the GPU when one is present and fall
+        # back to CPU otherwise — a big speed-up on GPU machines, no config needed.
+        whisper_device=cfg.get("dialogue", {}).get("whisper_device", "auto"),
         whisper_language=cfg.get("dialogue", {}).get("whisper_language"),
         tmp_dir=workdir / "audio",   # scratch wav stays out of the media folder
     )

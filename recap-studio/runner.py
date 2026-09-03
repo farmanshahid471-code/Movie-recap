@@ -74,6 +74,7 @@ DEFAULT_CONFIG = {
     "auto": False,                   # write the recap from the movie's dialogue (needs LLM)
     "auto_subtitle": "",             # optional explicit .srt for dialogue; blank = auto-detect
     "whisper_model": "small",        # used if no subtitle is found
+    "whisper_device": "auto",        # auto = GPU when available, else CPU
 }
 
 LOCK = threading.Lock()
@@ -701,6 +702,7 @@ def run_language(lang: str, cfg: dict | None = None) -> Path | None:
         rc.setdefault("dialogue", {})
         rc["dialogue"]["srt_path"] = cfg.get("auto_subtitle", "") or None
         rc["dialogue"]["whisper_model"] = cfg.get("whisper_model", "small")
+        rc["dialogue"]["whisper_device"] = cfg.get("whisper_device", "auto")
 
         # The dialogue comes from an .srt when one exists; otherwise Whisper must
         # transcribe the movie's audio. If nothing is installed, fetch it now.

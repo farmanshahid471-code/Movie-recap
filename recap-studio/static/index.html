@@ -92,6 +92,8 @@ video{width:100%;border-radius:10px;border:1px solid var(--border);background:#0
     </div>
   </div>
 
+  <div id="jobAlert" style="display:none;margin:12px 0;padding:10px 14px;border:1px solid #7f1d1d;background:#3f1d1d;color:#fecaca;border-radius:10px;font-size:14px"></div>
+
   <div class="stats">
     <div class="card stat"><div class="num" id="statClips">0</div><div class="lab">Clips Made</div></div>
     <div class="card stat"><div class="num" id="statRuns">0</div><div class="lab">Runs</div></div>
@@ -504,6 +506,16 @@ async function refresh(){
   $('#jobBadge').className = 'badge ' + (running ? 'blue' : (job.error ? 'red' : ''));
   $('#jobBadge').textContent = 'runner: ' + (running ? 'running…' : (job.error ? 'error' : 'idle'));
   if (job.error) $('#jobBadge').title = job.error;
+
+  // A failed run used to hide its reason in a hover-tooltip. Show it for real.
+  const ja = $('#jobAlert');
+  if (!running && job.error) {
+    ja.style.display = 'block';
+    ja.innerHTML = '<b>&#9888; Last run failed:</b> ' + esc(job.error) +
+      ' <span class="muted">— full details in the log tab.</span>';
+  } else {
+    ja.style.display = 'none';
+  }
 
   $('#statClips').textContent = (s.outputs || []).length;
   $('#statRuns').textContent = job.runs != null ? job.runs : (job.finished ? 1 : 0);
