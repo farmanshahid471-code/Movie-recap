@@ -144,7 +144,7 @@ video{width:100%;border-radius:10px;border:1px solid var(--border);background:#0
 <script>
 "use strict";
 const $ = (sel) => document.querySelector(sel);
-const state = { tab: 'en', status: null, scriptLoaded: false, dirty: false, stopped: false };
+const state = { tab: 'en', status: null, scriptLoaded: false, dirty: false, settingsDirty: false, stopped: false };
 
 function esc(x){
   return String(x == null ? '' : x)
@@ -406,13 +406,7 @@ function settingsCard(cfg, s){
     rb.innerHTML = offMsg;
   }
 
-  card.querySelector('#saveCfg').onclick = async () => {
-    try {
-      await post('/api/config', collectSettings());
-      toast('Settings saved');
-    } catch (e) { toast('Save failed: ' + e.message, true); }
-    refresh();
-  };
+  card.querySelector('#saveCfg').onclick = () => saveSettings(false);
   return card;
 }
 
@@ -466,9 +460,25 @@ function collectSettings(){
   return base;
 }
 
-async function doRun(langs){
+// Persist the Settings tab. Picked/typed values live only in the page until this
+// runs, and the 3s status poll re-renders from the saved config — so anything not
+// saved gets wiped. Browse picks and Run/Render all go through here.
+async function saveSettings(silent){
   try {
-    await post('/api/config', collectSettings());   // apply typed Settings first
+    await post('/api/config', collectSettings());
+    state.settingsDirty = false;
+    if (!silent) toast('Settings saved');
+    refresh();
+    return true;
+  } catch (e) {
+    if (!silent) toast('Save failed: ' + e.message, true);
+    return false;
+  }
+}
+
+async function doRun(langs){
+  if (!(await saveSettings(true))) { toast('Could not apply settings — run aborted', true); return; }
+  try {
     await post('/api/run', { langs: langs });
     toast('Started ' + langs.join(' + ').toUpperCase());
     pollLogs();
@@ -480,8 +490,8 @@ async function doRender(){
   const en = $('#scriptEn').value;
   const zh = $('#scriptZh').value;
   if (!en.trim() && !zh.trim()) { toast('Both scripts are empty', true); return; }
+  if (!(await saveSettings(true))) { toast('Could not apply settings — render aborted', true); return; }
   try {
-    await post('/api/config', collectSettings());   // apply typed Settings first
     await post('/api/render', { en_script: en, zh_script: zh });
     state.dirty = false;
     toast('Render started');
@@ -550,9 +560,12 @@ async function browseTo(path, kind){
     list.appendChild(e);
   }
   (d.dirs || []).forEach(nm => list.appendChild(_fmRow('📁', nm, () => browseTo(_joinPath(d.path, nm), kind))));
-  (d.files || []).forEach(nm => list.appendChild(_fmRow(kind === 'video' ? '🎬' : '📄', nm, () => {
+  (d.files || []).forEach(nm => list.appendChild(_fmRow(kind === 'video' ? '🎬' : '📄', nm, async () => {
     const t = $('#'+_fm.target); if (t) t.value = _joinPath(d.path, nm);
     $('#fileModal').style.display = 'none';
+    // Save straight away so the periodic re-render (and tab switches) can't wipe
+    // the picked path before you press Run.
+    await saveSettings(true);
     toast('Picked ' + nm);
   })));
 }
@@ -632,10 +645,11 @@ async function refresh(){
   $('#stopRunBtn').disabled = !running;
   $('#closeBtn').disabled = false;
 
-  // Only re-render the panel when nothing is being typed in it.
+  // Only re-render the panel when nothing is being typed in it. Unsaved Settings
+  // edits (incl. a Browse pick not yet saved) must not be clobbered either.
   const editing = state.tab === 'script' && state.dirty;
   if (!editing) {
-    if (state.tab === 'settings' && settingsEditing()) return;
+    if (state.tab === 'settings' && (settingsEditing() || state.settingsDirty)) return;
     renderPanel();
   }
   if (running) pollLogs();
@@ -648,7 +662,11 @@ function settingsEditing(){
 }
 
 // ----------------------------------------------------------------- wiring ---
-document.querySelectorAll('.tab').forEach(t => { t.onclick = () => selectTab(t.dataset.tab); });
+document.querySelectorAll('.tab').forEach(t => { t.onclick = async () => {
+  // Leaving Settings with unsaved edits would drop them on the floor — save first.
+  if (state.tab === 'settings' && state.settingsDirty) await saveSettings(true);
+  selectTab(t.dataset.tab);
+}; });
 
 $('#generateBtn').onclick = () => doRun(['en', 'zh']);
 $('#stopRunBtn').onclick = stopRun;
@@ -662,7 +680,14 @@ $('#closeBtn').onclick = async () => {
 };
 
 document.addEventListener('input', (e) => {
-  if (e.target && (e.target.id === 'scriptEn' || e.target.id === 'scriptZh')) state.dirty = true;
+  const t = e.target;
+  if (!t) return;
+  if (t.id === 'scriptEn' || t.id === 'scriptZh') state.dirty = true;
+  if (state.tab === 'settings' && t.matches && t.matches('input,select,textarea')) state.settingsDirty = true;
+});
+document.addEventListener('change', (e) => {
+  const t = e.target;
+  if (t && state.tab === 'settings' && t.matches && t.matches('input,select')) state.settingsDirty = true;
 });
 window.addEventListener('beforeunload', (e) => {
   if (state.dirty) { e.preventDefault(); e.returnValue = ''; }
