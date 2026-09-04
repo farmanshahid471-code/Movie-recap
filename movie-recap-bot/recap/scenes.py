@@ -21,6 +21,7 @@ least as long as the narration and `-shortest` trims it exactly.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 from .util import probe_duration, run, which_ffmpeg
@@ -162,16 +163,34 @@ def build_montage(
     if not scenes:
         raise ValueError(f"Could not find any scenes in {video}")
 
+    # A recap montage must cover the WHOLE film, not just its opening. Take only
+    # as many beats as the narration needs, spread evenly across the timeline so
+    # the footage walks from beginning through middle to end.
+    avg = sum(max(b - a, 0.2) for a, b in scenes) / len(scenes)
+    n_needed = max(1, math.ceil(target_duration / avg))
+    picked: list[tuple[float, float]] = []
+    if n_needed >= len(scenes):
+        picked = list(scenes)
+    else:
+        prev = -1
+        for j in range(n_needed):
+            idx = round(j * (len(scenes) - 1) / (n_needed - 1)) if n_needed > 1 else 0
+            if idx != prev:
+                picked.append(scenes[idx])
+                prev = idx
+
     cutdir = workdir / "cuts"
     cutdir.mkdir(parents=True, exist_ok=True)
-    print(f"  * montage: {len(scenes)} beats from the movie ({method})")
+    print(f"  * montage: {len(picked)} beats spread across the whole movie ({method})")
 
     pieces: list[Path] = []
     covered = 0.0
     i = 0
-    while covered < target_duration and i < len(scenes) * 4:
-        start, end = scenes[i % len(scenes)]
-        out = cutdir / f"beat_{i:04d}.mp4"
+    while covered < target_duration and i < len(picked) * 4:
+        start, end = picked[i % len(picked)]
+        # include the start time in the name so cuts from an older selection
+        # strategy are never mistaken for the right beat
+        out = cutdir / f"beat_{i:04d}_{int(start * 1000):07d}.mp4"
         if not out.exists():
             _cut(video, start, end, out, cfg_video)
         pieces.append(out)

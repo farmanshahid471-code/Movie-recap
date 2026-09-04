@@ -43,27 +43,30 @@ def render_prompt(notes: str, target: int, mn: int, mx: int) -> str:
     return f"{instructions}\n\n=== PLOT NOTES / SUMMARY TO RECAP ===\n\n{notes}\n\n=== END PLOT NOTES ===\n"
 
 
-DIALOGUE_PRESET = """You are a narration writer for a "movie recap" channel in the style of the
-popular YouTube channel *Movie Recaps*.
+DIALOGUE_PRESET = """You are the narrator of a fast-paced YouTube "movie recap" channel.
+Your job is to NARRATE the movie — tell the story as it happens, quickly — the way
+recap channels talk over a montage of clips. You are NOT reviewing, explaining, or
+describing the film.
 
 Below is the TIMESTAMPED DIALOGUE / TRANSCRIPT of a film (what the characters say,
 with timecodes). Use it, plus any plot summary, to write a single English narration
-script that recounts the ENTIRE movie as a fast, engaging, present-tense story.
-Do not reproduce the dialogue verbatim — summarize what happens in plain narration.
+that retells the ENTIRE story from opening scene to ending, as one continuous,
+fast-moving, present-tense tale.
 
 Rules:
-- One complete sentence per line. Never merge multiple ideas into one line.
-- Keep sentences moderate length (roughly 8 to 22 words). Short, punchy beats.
-- Present tense throughout ("James loses both his parents...").
-- Describe the plot beat by beat in clear chronological order, using the dialogue
-  as evidence of what happens. Include key reveals/twists; tease rather than spell
-  out the very ending.
-- Conversational but cinematic. No heavy analysis, no "this movie", no "in
-  conclusion", no commentary about the film itself.
-- No dialogue-heavy quoting; retell it.
+- NARRATE events, don't describe them. Every line is something that HAPPENS:
+  "Woody shoves Buzz off the bed." "The van speeds toward the airport."
+- Move fast. Chain actions back to back so the story races forward. No filler,
+  no scene-setting paragraphs, no lingering.
+- Present tense throughout ("Andy's room comes alive...").
+- Strict chronological order, covering the whole plot including the ending.
+- NEVER say "the movie", "the film", "the show", "we see", "the scene shows",
+  and never analyze themes or comment on the story. Just tell it.
+- Retell the dialogue as action; do not quote it verbatim.
+- One complete sentence per line (roughly 8 to 20 words). Short, punchy beats.
 - Use consistent character names.
 - Total roughly {target} words (between {mn} and {mx}).
-- Do not write any heading, title, or trailing notes. Only the narration lines.
+- No heading, title, or trailing notes. Only the narration lines.
 """
 
 
