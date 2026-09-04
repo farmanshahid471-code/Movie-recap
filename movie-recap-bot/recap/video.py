@@ -125,6 +125,22 @@ def add_bgm_if_any(base: Path, bgm: str, volume: float, workdir: Path) -> Path:
     return out
 
 
+def _filter_arg(name: str) -> str:
+    """Escape a filename for use inside an ffmpeg filtergraph argument.
+
+    Inside a filter arg, ``\\``, ``'``, ``:``, ``,``, ``;``, ``[`` and ``]`` are
+    special. Each needs a double backslash: one level for the filtergraph
+    parser, one for the filter-argument parser.
+    """
+    out = []
+    for ch in name:
+        if ch in "\\':,;[]":
+            out.append("\\\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def burn_and_mux(
     base: Path,
     narration_mp3: Path,
@@ -132,21 +148,30 @@ def burn_and_mux(
     out_mp4: Path,
     cfg_video: dict,
 ) -> Path:
-    """Burn subtitles (ASS) and add narration as the audio track."""
+    """Burn subtitles (ASS) and add narration as the audio track.
+
+    The subtitle path is passed as a bare filename with ffmpeg's working
+    directory set to the file's folder. An absolute Windows path
+    (``D:\\recap\\_work\\en.ass``) would be split at the colon by ffmpeg's
+    filter parser and fail with "Unable to parse option value ... as image
+    size" / "Error applying option 'original_size' to filter 'ass'".
+    """
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
+    ass_path = Path(ass_path)
     run(
         [
             which_ffmpeg(), "-y",
             "-i", str(base),
             "-i", str(narration_mp3),
-            "-vf", f"ass='{ass_path.as_posix()}'",
+            "-vf", f"ass={_filter_arg(ass_path.name)}",
             "-map", "0:v", "-map", "1:a",
             "-c:v", cfg_video.get("codec", "libx264"),
             "-c:a", cfg_video.get("audio_codec", "aac"),
             "-shortest",
             "-movflags", "+faststart",
             str(out_mp4),
-        ]
+        ],
+        cwd=ass_path.parent,
     )
     return out_mp4
 

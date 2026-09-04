@@ -37,6 +37,13 @@ _DEFAULTS: dict[str, Any] = {
         "width": 1920,
         "height": 1080,
         "concat_mode": "fit",
+        # "scenes" cuts a recap-style montage of beats from the movie;
+        # "continuous" plays it straight through and loops to cover narration.
+        "montage": "scenes",
+        "scene_len": 6.0,          # seconds per beat (even-beat fallback)
+        "scene_min_len": 2.0,      # drop detected scenes shorter than this
+        "scene_max_len": 20.0,     # trim detected scenes longer than this
+        "scene_threshold": 27.0,   # PySceneDetect ContentDetector threshold
         "codec": "libx264",
         "audio_codec": "aac",
         "bgm": "",

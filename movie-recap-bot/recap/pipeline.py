@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import dialogue, llm, script, subtitles, translate, tts, video
+from . import dialogue, llm, scenes, script, subtitles, translate, tts, video
 from .config import out_dir, work_dir
 from .dialogue import DialogueError
 from .util import count_words, probe_duration
@@ -37,8 +37,11 @@ def _auto_script(cfg: dict, workdir: Path, video: Path | None) -> str:
         video,
         srt,
         whisper_model=cfg.get("dialogue", {}).get("whisper_model", "small"),
-        whisper_device=cfg.get("dialogue", {}).get("whisper_device", "cpu"),
+        # "auto" lets faster-whisper pick the GPU when one is present and fall
+        # back to CPU otherwise — a big speed-up on GPU machines, no config needed.
+        whisper_device=cfg.get("dialogue", {}).get("whisper_device", "auto"),
         whisper_language=cfg.get("dialogue", {}).get("whisper_language"),
+        tmp_dir=workdir / "audio",   # scratch wav stays out of the media folder
     )
     transcript = dialogue.to_transcript_text(cues, max_chars=cfg.get("dialogue", {}).get("max_chars"))
     tdir = workdir / "script"
@@ -83,7 +86,17 @@ def _get_script(cfg: dict, workdir: Path, video: Path | None = None) -> str:
         try:
             script_text = _auto_script(cfg, workdir, video)
             print(f"  * Auto-written EN recap from dialogue.")
-        except (DialogueError, llm.LLMError) as exc:
+        except llm.LLMError as exc:
+            # The movie and dialogue were fine — the LLM is unreachable. Do NOT
+            # fall through to the plot-summary path (its "provide script_en.txt"
+            # error is misleading here); say what to actually do.
+            raise llm.LLMError(
+                "Auto-recap read your movie's dialogue but could not reach the LLM to "
+                f"write the narration ({exc}). If you use Ollama, start it: run "
+                "`ollama serve` and `ollama pull qwen2.5`. Otherwise pick a provider and "
+                "key in Settings -> LLM."
+            ) from exc
+        except DialogueError as exc:
             print(f"  ! Auto-recap unavailable ({exc}); falling back.")
             script_text = None
 
@@ -210,7 +223,12 @@ def run(cfg: dict, clips: list[Path], storyboard: bool = False) -> list[Path]:
     for code, (mp3, cues) in audios.items():
         target = max((c.end for c in cues), default=5.0) + 0.5
         print(f"  * {code}: narration {target:.1f}s over {len(cues)} cues")
-        base = video.compose_base(clips, target, cfg["video"], wd)
+        montage = str(cfg["video"].get("montage", "scenes")).lower()
+        if montage == "scenes" and len(clips) == 1 and not storyboard:
+            # recap-channel style: cut real beats from the film itself
+            base = scenes.build_montage(clips[0], target, cfg["video"], wd)
+        else:
+            base = video.compose_base(clips, target, cfg["video"], wd)
         base = video.add_bgm_if_any(base, cfg["video"].get("bgm", ""), cfg["video"].get("bgm_volume", 0.12), wd)
         ass = wd / f"{code}.ass"
         out_mp4 = outd / f"{name}_{code}.mp4"

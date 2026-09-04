@@ -3,169 +3,74 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Recap Studio — Control Panel</style>
+<title>Recap Studio — Control Panel</title>
 <style>
 :root{
-    --bg:#0b0e14; --panel:#151a24; --panel2:#1b2230; --border:#263041;
-    --text:#e8edf5; --muted:#8a97ad; --accent:#22c55e; --accent2:#3b82f6;
-    --warn:#eab308; --danger:#ef4444; --chip:#1f2837;
+  --bg:#0b0e14; --panel:#151a24; --panel2:#1b2230; --border:#263041;
+  --text:#e8edf5; --muted:#8a97ad; --accent:#22c55e; --accent2:#3b82f6;
+  --warn:#eab308; --danger:#ef4444; --chip:#1f2837;
 }
-*{
-    box-sizing:border-box;margin:0;padding:0
-}
-body{
-    background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:28px;min-height:100vh
-}
-.wrap{
-    max-width:1180px;margin:0 auto
-}
-h1{
-    font-size:20px;font-weight:700;letter-spacing:.2px
-}
-.sub{
-    color:var(--muted);font-size:13px;margin-top:2px
-}
-.badge{
-    display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;background:var(--chip);color:var(--muted);border:1px solid var(--border)
-}
-.badge.green{
-    background:rgba(34,197,94,.12);color:#4ade80;border-color:rgba(34,197,94,.35)
-}
-.badge.yellow{
-    background:rgba(234,179,8,.12);color:#facc15;border-color:rgba(234,179,8,.35)
-}
-.badge.red{
-    background:rgba(239,68,68,.12);color:#f87171;border-color:rgba(239,68,68,.35)
-}
-.badge.blue{
-    background:rgba(59,130,246,.14);color:#60a5fa;border-color:rgba(59,130,246,.4)
-}
-.row{
-    display:flex;align-items:center;gap:10px;flex-wrap:wrap
-}
-.head{
-    display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:22px
-}
-.stats{
-    display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px
-}
-@media(max-width:760px){
-    .stats{grid-template-columns:repeat(2,1fr)}
-}
-.card{
-    background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:18px
-}
-.stat .num{
-    font-size:26px;font-weight:700
-}
-.stat .lab{
-    color:var(--muted);font-size:12px;margin-top:6px;text-transform:uppercase;letter-spacing:.5px
-}
-.tabs{
-    display:flex;gap:8px;margin-bottom:16px
-}
-.tab{
-    padding:9px 16px;border-radius:10px;background:var(--chip);border:1px solid var(--border);font-size:13px;cursor:pointer;color:var(--muted);font-weight:600
-}
-.tab.active{
-    background:rgba(59,130,246,.14);color:#60a5fa;border-color:rgba(59,130,246,.4)
-}
-.tab .dot{
-    display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;background:var(--muted)
-}
-.tab.active .dot{
-    background:var(--accent)
-}
-.card h2{
-    font-size:15px;font-weight:700;margin-bottom:4px
-}
-.card h3{
-    font-size:13px;font-weight:600;color:var(--muted);margin-bottom:12px
-}
-.desc{
-    color:var(--muted);font-size:12.5px;line-height:1.5;margin-bottom:16px
-}
-fieldset{
-    border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:16px
-}
-legend{
-    font-size:12px;color:var(--muted);padding:0 8px
-}
-label{
-    display:block;font-size:12px;color:var(--muted);margin:10px 0 5px
-}
-input[type=text],input[type=number]{
-    width:100%;background:#0e1420;border:1px solid var(--border);border-radius:8px;color:var(--text);padding:9px 12px;font-size:13px
-}
-input:focus{
-    outline:2px solid rgba(59,130,246,.4);border-color:transparent
-}
-.grid2{
-    display:grid;grid-template-columns:1fr 1fr;gap:14px
-}
-@media(max-width:700px){
-    .grid2{grid-template-columns:1fr}
-}
-.btn{
-    border:none;border-radius:9px;padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;background:var(--chip);color:var(--text);border:1px solid var(--border)
-}
-.btn.primary{
-    background:var(--accent);border-color:var(--accent);color:#052e16
-}
-.btn.primary:hover{
-    filter:brightness(1.08)
-}
-.btn.blue{
-    background:var(--accent2);border-color:var(--accent2);color:#eef4ff
-}
-.btn:disabled{
-    opacity:.5;cursor:not-allowed
-}
-.btnrow{
-    display:flex;gap:10px;flex-wrap:wrap;margin-top:6px
-}
-.switch{
-    display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-top:12px;cursor:pointer
-}
-.switch input{
-    width:16px;height:16px
-}
-.logpre{
-    background:#070b11;border:1px solid var(--border);border-radius:10px;padding:12px;height:220px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.6;color:#a8b3c5;white-space:pre-wrap
-}
-.table{
-    width:100%;border-collapse:collapse;font-size:12.5px
-}
-.table th,.table td{
-    text-align:left;padding:8px 10px;border-bottom:1px solid var(--border)
-}
-.table th{
-    color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px
-}
-.tags{
-    display:flex;gap:8px;flex-wrap:wrap;margin-top:6px
-}
-.pill{
-    background:var(--chip);border:1px solid var(--border);border-radius:7px;padding:6px 10px;font-size:12px;color:var(--muted)
-}
-.pill b{
-    color:var(--text);font-weight:600
-}
-.muted{
-    color:var(--muted)
-}
-.mt{
-    margin-top:16px
-}
-.mk-row{
-    display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px
-}
-.nowrap{
-    white-space:nowrap
-}
-.status-dot{
-    display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px
-}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:28px;min-height:100vh}
+.wrap{max-width:1180px;margin:0 auto}
+h1{font-size:20px;font-weight:700;letter-spacing:.2px}
+.sub{color:var(--muted);font-size:13px;margin-top:2px;max-width:640px}
+.badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;background:var(--chip);color:var(--muted);border:1px solid var(--border)}
+.badge.green{background:rgba(34,197,94,.12);color:#4ade80;border-color:rgba(34,197,94,.35)}
+.badge.yellow{background:rgba(234,179,8,.12);color:#facc15;border-color:rgba(234,179,8,.35)}
+.badge.red{background:rgba(239,68,68,.12);color:#f87171;border-color:rgba(239,68,68,.35)}
+.badge.blue{background:rgba(59,130,246,.14);color:#60a5fa;border-color:rgba(59,130,246,.4)}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:22px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px}
+@media(max-width:760px){.stats{grid-template-columns:repeat(2,1fr)}}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:18px}
+.stat .num{font-size:26px;font-weight:700}
+.stat .lab{color:var(--muted);font-size:12px;margin-top:6px;text-transform:uppercase;letter-spacing:.5px}
+.tabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+.tab{padding:9px 16px;border-radius:10px;background:var(--chip);border:1px solid var(--border);font-size:13px;cursor:pointer;color:var(--muted);font-weight:600}
+.tab:hover{color:var(--text)}
+.tab.active{background:rgba(59,130,246,.14);color:#60a5fa;border-color:rgba(59,130,246,.4)}
+.tab .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;background:var(--muted);vertical-align:middle}
+.tab.active .dot{background:var(--accent)}
+.card h2{font-size:15px;font-weight:700;margin-bottom:4px}
+.card h3{font-size:13px;font-weight:600;color:var(--muted);margin-bottom:12px}
+.desc{color:var(--muted);font-size:12.5px;line-height:1.55;margin-bottom:16px}
+fieldset{border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:16px}
+legend{font-size:12px;color:var(--muted);padding:0 8px}
+label{display:block;font-size:12px;color:var(--muted);margin:10px 0 5px}
+input[type=text],input[type=number],textarea,select{width:100%;background:#0e1420;border:1px solid var(--border);border-radius:8px;color:var(--text);padding:9px 12px;font-size:13px}
+select{appearance:none;cursor:pointer}
+textarea{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;line-height:1.5;resize:vertical}
+input:focus,textarea:focus{outline:2px solid rgba(59,130,246,.4);border-color:transparent}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:700px){.grid2{grid-template-columns:1fr}}
+.btn{border:1px solid var(--border);border-radius:9px;padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer;background:var(--chip);color:var(--text)}
+.btn:hover{filter:brightness(1.12)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#052e16}
+.btn.blue{background:var(--accent2);border-color:var(--accent2);color:#eef4ff}
+.btn.danger{background:rgba(239,68,68,.16);border-color:rgba(239,68,68,.5);color:#fca5a5}
+.btn:disabled{opacity:.45;cursor:not-allowed;filter:none}
+.btnrow{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
+.switch{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-top:12px;cursor:pointer}
+.switch input{width:16px;height:16px;flex:0 0 auto}
+.logpre{background:#070b11;border:1px solid var(--border);border-radius:10px;padding:12px;height:240px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.6;color:#a8b3c5;white-space:pre-wrap}
+.table{width:100%;border-collapse:collapse;font-size:12.5px}
+.table th,.table td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border)}
+.table th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px}
+.tags{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+.pill{background:var(--chip);border:1px solid var(--border);border-radius:7px;padding:6px 10px;font-size:12px;color:var(--muted)}
+.muted{color:var(--muted)}
+.mt{margin-top:16px}
+.mk-row{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+.status-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
+a.link{color:#60a5fa;text-decoration:none;font-weight:600}
+a.link:hover{text-decoration:underline}
+video{width:100%;border-radius:10px;border:1px solid var(--border);background:#000;margin-top:10px}
+.hidden{display:none !important}
+#toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#16a34a;color:#fff;padding:10px 18px;border-radius:9px;font-size:13px;font-weight:600;z-index:99;box-shadow:0 8px 20px rgba(0,0,0,.4);transition:opacity .4s;opacity:0;pointer-events:none}
+#toast.err{background:#dc2626}
+#shutdown{position:fixed;inset:0;background:rgba(7,11,17,.96);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;z-index:200;text-align:center;padding:24px}
 </style>
 </head>
 <body>
@@ -173,287 +78,625 @@ input:focus{
   <div class="head">
     <div>
       <h1>🎬 Recap Studio — Control Panel</h1>
-      <div class="sub">Two clips per movie: English dubbing + English subtitles, and Chinese dubbing + Chinese subtitles.</div>
+      <div class="sub">Two clips per movie: English dubbing + English subtitles, and Mandarin dubbing + Simplified Chinese subtitles.</div>
       <div class="row mt">
         <span class="badge" id="engBadge">engine: recap</span>
-        <span class="badge yellow" id="modeBadge">mode: NOT READY</span>
+        <span class="badge yellow" id="modeBadge">mode: …</span>
         <span class="badge" id="jobBadge">runner: idle</span>
-        <button class="btn primary" id="generateBtn" style="margin-left:12px;">Generate</button>
       </div>
     </div>
+    <div class="row">
+      <button class="btn primary" id="generateBtn">▶ Generate both clips</button>
+      <button class="btn" id="stopRunBtn" disabled>■ Stop run</button>
+      <button class="btn danger" id="closeBtn" title="Shut the Recap Studio server down">✕ Close Studio</button>
+    </div>
   </div>
+
+  <div id="jobAlert" style="display:none;margin:12px 0;padding:10px 14px;border:1px solid #7f1d1d;background:#3f1d1d;color:#fecaca;border-radius:10px;font-size:14px"></div>
 
   <div class="stats">
     <div class="card stat"><div class="num" id="statClips">0</div><div class="lab">Clips Made</div></div>
     <div class="card stat"><div class="num" id="statRuns">0</div><div class="lab">Runs</div></div>
     <div class="card stat"><div class="num" id="statStorage">0 MB</div><div class="lab">Storage</div></div>
-    <div class="card stat"><div class="num">2</div><div class="lab">Accounts (En / Zh)</div></div>
+    <div class="card stat"><div class="num">2</div><div class="lab">Tracks (EN / 中文)</div></div>
   </div>
 
   <div class="tabs">
     <div class="tab active" data-tab="en"><span class="dot"></span>EN clip</div>
     <div class="tab" data-tab="zh"><span class="dot"></span>ZH clip</div>
+    <div class="tab" data-tab="script"><span class="dot"></span>Script editor</div>
     <div class="tab" data-tab="settings"><span class="dot"></span>Settings</div>
   </div>
 
   <div id="panel"></div>
 
-  <!-- Script edit panel: shown after Generate -->
-  <div id="scriptPanel" class="card mt" style="display:none; margin-top:24px">
-    <h2>Script Editor</h2>
-    <div class="desc">Edit the English and Chinese narration scripts. Changes are applied when you click <b>Render</b> (re‑narrates + re‑renders without LLM).</div>
-    <div class="grid2" style="gap:20px;margin-top:16px">
-      <div>
-        <label>English script</label>
-        <textarea id="scriptEn" rows="15" style="width:100%;background:#0e1420;border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;padding:10px;"></textarea>
-      </div>
-      <div>
-        <label>Simplified Chinese script</label>
-        <textarea id="scriptZh" rows="15" style="width:100%;background:#0e1420;border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;padding:10px;"></textarea>
+  <div class="card mt">
+    <div class="mk-row">
+      <h2>Console</h2>
+      <div class="row">
+        <span class="muted" id="logHint">live pipeline log</span>
+        <button class="btn" id="reloadLogs">Reload</button>
       </div>
     </div>
-    <div class="btnrow" style="margin-top:16px">
-      <button class="btn primary" id="renderBtn" disabled>Render</button>
-      <button class="btn" id="closeScriptBtn" style="margin-left:12px;">Close</button>
-    </div>
+    <pre class="logpre" id="logpre">Starting…</pre>
   </div>
+</div>
+
+<div id="toast"></div>
+<div id="shutdown" class="hidden">
+  <h1>Recap Studio has been closed.</h1>
+  <div class="sub" style="text-align:center">The server has shut down. You can close this browser tab and the launcher window now — or run <b>setup_ui.bat</b> again to reopen it.</div>
+</div>
+
+<div id="fileModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:150;align-items:center;justify-content:center">
+  <div style="background:#0f1420;border:1px solid #2a3244;border-radius:12px;width:min(640px,92vw);max-height:80vh;display:flex;flex-direction:column;padding:14px">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+      <button class="btn" id="fmUp">↑ Up</button>
+      <code id="fmPath" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px"></code>
+      <button class="btn" id="fmClose">✕</button>
+    </div>
+    <div id="fmRoots" style="margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap"></div>
+    <div id="fmList" style="overflow:auto;flex:1;min-height:200px"></div>
+    <div class="muted" style="margin-top:8px;font-size:12px">Click a folder to open it, or a file to choose it.</div>
+  </div>
+</div>
 
 <script>
-const $ = s => document.querySelector(s);
-const state = { generated: false };
+"use strict";
+const $ = (sel) => document.querySelector(sel);
+const state = { tab: 'en', status: null, scriptLoaded: false, dirty: false, settingsDirty: false, stopped: false };
+
+function esc(x){
+  return String(x == null ? '' : x)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function dot(ok){ return '<span class="status-dot" style="background:' + (ok ? 'var(--accent)' : 'var(--danger)') + '"></span>'; }
 
 async function api(path, opts){
   const r = await fetch(path, opts);
-  return r.json();
+  let data = null;
+  try { data = await r.json(); } catch (e) { data = {}; }
+  if (!r.ok) throw new Error((data && data.error) || ('HTTP ' + r.status));
+  return data || {};
+}
+function post(path, body){
+  return api(path, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body || {}) });
 }
 
-function el(html){ const t=document.createElement('template'); t.innerHTML=html.trim(); return t.content.firstChild; }
-
-function statusDot(ok){ return `<span class="status-dot" style="background:${ok?'var(--accent)':'var(--danger)'}"></span>`; }
-
-async function refresh(){
-  const s = await api('/api/status');
-  state.status = s;
-  const cfg = s.config||{};
-  const env = s.env||{};
-  const job = s.job||{};
-
-  // header badges
-  $('#engBadge').textContent = 'engine: '+(s.engine||'recap');
-  const llmReady = env.llm_ready;                 // ollama = true w/o key
-  const movieReady = env.movie_set && env.movie_exists;
-  const engineOk = env.ffmpeg && env.edge_tts;
-  const readyState = engineOk && (llmReady || movieReady /* scripting can be file-based */);
-  const mb = $('#modeBadge');
-  mb.className = 'badge ' + (readyState ? 'green' : 'yellow');
-  mb.textContent = 'mode: ' + (readyState ? 'READY' : 'NOT READY');
-  $('#jobBadge').className = 'badge ' + (job.running ? 'blue' : '');
-  $('#jobBadge').textContent = 'runner: '+ (job.running ? 'running…' : 'idle');
-
-  // stats
-  $('#statClips').textContent = (s.outputs||[]).length;
-  $('#statRuns').textContent = job.finished ? '1' : '0';
-  const totMb = (s.outputs||[]).reduce((a,o)=>a+o.size_mb,0);
-  $('#statStorage').textContent = totMb.toFixed(1)+' MB';
-
-  renderPanel(s);
-
-  // if just generated, show the script panel
-  if (s.outputs && s.outputs.length > 0 && !state.scriptPanelShown) {
-    state.scriptPanelShown = true;
-    $('#scriptPanel').show();
-    // load the just-generated scripts into the textareas
-    // read from the pipeline workdir
-    const en = await api('/api/scripts?lang=en');
-    const zh = await api('/api/scripts?lang=zh');
-    $('#scriptEn').val(en.script || '');
-    $('#scriptZh').val(zh.script || '');
-    $('#renderBtn').disabled = false;
-  }
+function toast(msg, isErr){
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = isErr ? 'err' : '';
+  t.style.opacity = '1';
+  clearTimeout(t._h);
+  t._h = setTimeout(() => { t.style.opacity = '0'; }, 3200);
 }
 
-function renderPanel(s){
-  const tab = document.querySelector('.tab.active').dataset.tab;
-  const cfg = s.config||{};
-  const p = $('#panel');
-  p.innerHTML='';
-  if(tab==='en' || tab==='zh'){
-    p.appendChild(clipCard(tab, cfg, s));
-  } else {
-    p.appendChild(settingsCard(cfg, s));
-  }
-}
-
+// ---------------------------------------------------------------- panels ---
 function clipCard(lang, cfg, s){
-  const isEn = lang==='en';
+  const isEn = lang === 'en';
   const voice = isEn ? cfg.voice_en : cfg.voice_zh;
-  const sub = isEn ? cfg.subtitle_lang_en : cfg.subtitle_lang_zh;
-  const c = el(`<div class="card">
-    <h2>${isEn?'English':'Chinese (中文)'} clip</h2>
-    <div class="desc">Dubbing in ${isEn?'English':'Mandarin 普通话'}, burned-in subtitles in ${isEn?'English':'简体中文'}.</div>
-    <fieldset><legend>Output</legend>
-      <div class="table" style="min-height:40px" id="clipTable"></div>
-    </fieldset>
-    <div class="btnrow">
-      <button class="btn primary" data-run="${lang}" ${s.job.running?'disabled':''}>Run ${lang.toUpperCase()} clip</button>
-    </div>
-  </div>`);
-  const tbl=c.querySelector('#clipTable');
-  tbl.innerHTML = `<table class="table"><tr><th>File</th><th>Size</th></tr>${\n    (s.outputs||[]).map(o=>`<tr><td>${o.name}</td><td>${o.size_mb} MB</td></tr>`).join('')||\n    '<tr><td colspan="2" class="muted">No clips yet.</td></tr>'\n  }</table>`;
-  c.querySelector('[data-run]').onclick = ()=>doRun(lang);
-  return c;
+  const sub  = isEn ? cfg.subtitle_lang_en : cfg.subtitle_lang_zh;
+  const rows = (s.outputs || []).filter(o => o.lang === lang);
+  const table = rows.length
+    ? '<table class="table"><tr><th>File</th><th>Size</th><th>Links</th><th>Direct download URL</th></tr>' +
+      rows.map(o => '<tr><td>' + esc(o.name) + '</td><td>' + o.size_mb + ' MB</td>' +
+        '<td class="nowrap"><a class="link" href="' + esc(o.url) + '" target="_blank">open</a> · ' +
+        '<a class="link" href="' + esc(o.url) + '?dl=1" download>download</a></td>' +
+        '<td><code style="font-size:11px;color:#8a97ad">' + esc(location.origin + o.url + '?dl=1') + '</code> ' +
+        '<button class="btn" style="padding:3px 8px;font-size:11px" data-copy="' + esc(location.origin + o.url + '?dl=1') + '">copy</button></td></tr>').join('') +
+      '</table>'
+    : '<div class="muted">No ' + lang.toUpperCase() + ' clip rendered yet.</div>';
+
+  const env = s.env || {};
+  const ready = s.ready || {};
+  const warns = [];
+  if (env.movie_error) {
+    warns.push('<span style="color:#f87171;font-weight:600">&#9888; ' + esc(env.movie_error) + '</span>');
+  }
+  if (ready.auto && !ready.auto_ready) {
+    (ready.blocking || []).forEach(b => warns.push('<span style="color:#f87171;font-weight:600">&#9888; Auto-recap cannot run: ' + esc(b) + '</span>'));
+  }
+  if (ready.sample_script) {
+    warns.push('<span style="color:#facc15">&#9888; The narration is the <b>bundled sample script</b>, not your movie. Turn on Auto-recap with a movie file, or paste your own script in the Script editor.</span>');
+  }
+  const warn = warns.length ? '<div class="desc">' + warns.join('<br>') + '</div>' : '';
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML =
+    '<h2>' + (isEn ? 'English clip' : 'Chinese clip (中文)') + '</h2>' +
+    '<div class="desc">Dubbing in ' + (isEn ? 'English' : 'Mandarin 普通话') +
+      ', burned-in subtitles in ' + (isEn ? 'English' : '简体中文') + '.</div>' + warn +
+    '<fieldset><legend>Montage — how the footage is cut</legend>' +
+      '<div class="grid2">' +
+        '<div><label>Cut style</label><select id="montage">' +
+          '<option value="scenes"' + ((cfg.montage || 'scenes') === 'scenes' ? ' selected' : '') + '>scenes — cut beats from the movie (recap style)</option>' +
+          '<option value="continuous"' + ((cfg.montage || 'scenes') === 'continuous' ? ' selected' : '') + '>continuous — play it straight through</option>' +
+        '</select></div>' +
+        '<div><label>Seconds per beat</label><input type="number" id="scene_len" value="' + esc(cfg.scene_len) + '"></div>' +
+      '</div>' +
+      '<div class="desc mt">Needs a real movie file. With <b>scenes</b> the film is sliced into short beats and re-assembled in story order over the narration, the way recap channels do it. Install <code>pip install scenedetect[opencv]</code> for content-aware cut detection; otherwise beats are evenly spaced.</div>' +
+    '</fieldset>' +
+
+    '<fieldset><legend>Output</legend>' + table + '</fieldset>' +
+    '<div class="tags">' +
+      '<span class="pill">' + dot(true) + 'voice: ' + esc(voice) + '</span>' +
+      '<span class="pill">' + dot(true) + 'subtitles: ' + esc(sub) + '</span>' +
+    '</div>' +
+    '<div class="btnrow">' +
+      '<button class="btn primary" id="runLang"' + (s.job.running ? ' disabled' : '') + '>Run ' + lang.toUpperCase() + ' clip</button>' +
+      '<button class="btn" id="editLang">Edit script</button>' +
+    '</div>';
+  card.querySelector('#runLang').onclick = () => doRun([lang]);
+  card.querySelector('#editLang').onclick = () => { selectTab('script'); loadScripts(); };
+  card.querySelectorAll('[data-copy]').forEach(b => {
+    b.onclick = async () => {
+      const url = b.dataset.copy;
+      try {
+        await navigator.clipboard.writeText(url);
+      } catch (e) {
+        const ta = document.createElement('textarea');
+        ta.value = url; document.body.appendChild(ta); ta.select();
+        document.execCommand('copy'); ta.remove();
+      }
+      toast('Copied ' + url);
+    };
+  });
+  return card;
+}
+
+function scriptCard(s){
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML =
+    '<h2>Script editor</h2>' +
+    '<div class="desc">Edit the narration, then <b>Render</b>: the pipeline re-narrates both clips and burns these lines in as subtitles. One sentence per line; the Chinese file must stay line-aligned with the English one.</div>' +
+    '<div class="grid2" style="gap:20px">' +
+      '<div><label>English script</label><textarea id="scriptEn" rows="16" spellcheck="false"></textarea></div>' +
+      '<div><label>Simplified Chinese script (简体中文)</label><textarea id="scriptZh" rows="16" spellcheck="false"></textarea></div>' +
+    '</div>' +
+    '<div class="btnrow" style="margin-top:16px">' +
+      '<button class="btn primary" id="renderBtn"' + (s.job.running ? ' disabled' : '') + '>Render both clips</button>' +
+      '<button class="btn" id="reloadScripts">Reload from disk</button>' +
+      '<span class="muted" id="scriptPath"></span>' +
+    '</div>';
+  card.querySelector('#renderBtn').onclick = doRender;
+  card.querySelector('#reloadScripts').onclick = loadScripts;
+  return card;
 }
 
 function settingsCard(cfg, s){
-  const c = el(`<div class="card">
-    <h2>Settings</h2>
-    <div class="desc">Point the pipeline at your owned movie (optional) and configure the LLM (Zhipu GLM) for auto scripting. The two clip voices and their subtitle languages are already set.</div>
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML =
+    '<h2>Settings</h2>' +
+    '<div class="desc">Point the pipeline at a movie you own, pick the voices, and configure the LLM used for auto-writing the narration.</div>' +
 
-    <fieldset><legend>Movie</legend>
-      <label>Movie file path (owned / licensed)</label>
-      <input type="text" id="movie_path" value="${esc(cfg.movie_path)}" placeholder="/home/user/…/movie.mp4">
-      <label class="switch"><input type="checkbox" id="storyboard" ${cfg.storyboard?'checked':''}> Use placeholder scenes when no movie is set</label>
-      <label class="switch"><input type="checkbox" id="auto" ${cfg.auto?'checked':''}> Auto-recap: write the narration from the movie's dialogue (needs a movie + LLM)</label>
-      <label>Dialogue subtitle (.srt) — optional; blank = look for one next to the movie, else Whisper</label>
-      <input type="text" id="auto_subtitle" value="${esc(cfg.auto_subtitle)}" placeholder="/home/user/…/movie.srt (or leave blank)">
-    </fieldset>
+    '<fieldset><legend>Movie</legend>' +
+      '<label>Movie file path (owned / licensed) — a video FILE, not a folder</label>' +
+      '<input type="text" id="movie_path" value="' + esc(cfg.movie_path) + '" placeholder="D:\\videos\\my_movie.mp4">' +
+      '<div id="movieMsg" class="desc mt"></div>' +
+      '<label class="switch"><input type="checkbox" id="storyboard"' + (cfg.storyboard ? ' checked' : '') + '> Use placeholder scenes when no movie is set</label>' +
+      '<label class="switch"><input type="checkbox" id="auto"' + (cfg.auto ? ' checked' : '') + '> Auto-recap: write the narration from the movie\'s dialogue (needs a movie + LLM)</label>' +
+      '<label>Dialogue subtitle (.srt) — optional; blank = look for one next to the movie, else Whisper</label>' +
+      '<input type="text" id="auto_subtitle" value="' + esc(cfg.auto_subtitle) + '" placeholder="D:\\videos\\my_movie.srt (or leave blank)">' +
+      '<div class="desc mt" id="readyBox"></div>' +
+    '</fieldset>' +
 
-    <fieldset><legend>Clip voices & subtitles</legend>
-      <div class="grid2">
-        <div><label>English voice</label><input type="text" id="voice_en" value="${esc(cfg.voice_en)}"></div>
-        <div><label>English subtitle lang</label><input type="text" id="subtitle_lang_en" value="${esc(cfg.subtitle_lang_en)}"></div>
-        <div><label>Chinese voice</label><input type="text" id="voice_zh" value="${esc(cfg.voice_zh)}"></div>
-        <div><label>Chinese subtitle lang</label><input type="text" id="subtitle_lang_zh" value="${esc(cfg.subtitle_lang_zh)}"></div>
-      </div>
-    </fieldset>
+    '<fieldset><legend>Montage — how the footage is cut</legend>' +
+      '<div class="grid2">' +
+        '<div><label>Cut style</label><select id="montage">' +
+          '<option value="scenes"' + ((cfg.montage || 'scenes') === 'scenes' ? ' selected' : '') + '>scenes — cut beats from the movie (recap style)</option>' +
+          '<option value="continuous"' + ((cfg.montage || 'scenes') === 'continuous' ? ' selected' : '') + '>continuous — play it straight through</option>' +
+        '</select></div>' +
+        '<div><label>Seconds per beat</label><input type="number" id="scene_len" value="' + esc(cfg.scene_len) + '"></div>' +
+      '</div>' +
+      '<div class="desc mt">Needs a real movie file. With <b>scenes</b> the film is sliced into short beats and re-assembled in story order over the narration, the way recap channels do it. Install <code>pip install scenedetect[opencv]</code> for content-aware cut detection; otherwise beats are evenly spaced.</div>' +
+    '</fieldset>' +
 
-    <fieldset><legend>LLM — Ollama + Qwen (free, local, no key)</legend>
-      <div class="grid2">
-        <div><label>Ollama base URL</label><input type="text" id="llm_base_url" value="${esc(cfg.llm_base_url)}"></div>
-        <div><label>Model</label><input type="text" id="llm_model" value="${esc(cfg.llm_model)}"></div>
-      </div>
-      <label>API key</label>
-      <input type="text" id="llm_api_key" value="${esc(cfg.llm_api_key)}" placeholder="not required for Ollama">
-      <div class="desc">Free &amp; fully local. On your machine run: <b>ollama serve</b> then <b>ollama pull qwen2.5</b>. When the server is up and the model is pulled, the recap script + Chinese translation are auto-written for both clips.</div>
-      <div class="btnrow"><button class="btn primary" id="saveCfg">Save settings</button></div>
-    </fieldset>
+    '<fieldset><legend>Output</legend>' +
+      '<label>Save rendered clips to this folder (created if missing)</label>' +
+      '<input type="text" id="output_dir" value="' + esc(cfg.output_dir) + '" placeholder="D:\\recap">' +
+      '<div class="desc mt">Currently writing to <b>' + esc((s.env || {}).output_dir) + '</b>' +
+        ((s.env || {}).output_writable ? '' : ' <span style="color:#f87171">(not writable)</span>') +
+        '. Intermediates go in its <code>_work</code> subfolder. Leave blank to use <code>recap-studio\\output</code>.</div>' +
+    '</fieldset>' +
 
-    <fieldset><legend>Environment</legend>
-      <div class="tags" id="envTags"></div>
-    </fieldset>
-  </div>`);
+    '<fieldset><legend>Clip voices &amp; subtitles</legend>' +
+      '<div class="grid2">' +
+        '<div><label>English voice</label><input type="text" id="voice_en" value="' + esc(cfg.voice_en) + '"></div>' +
+        '<div><label>English subtitle lang</label><input type="text" id="subtitle_lang_en" value="' + esc(cfg.subtitle_lang_en) + '"></div>' +
+        '<div><label>Chinese voice</label><input type="text" id="voice_zh" value="' + esc(cfg.voice_zh) + '"></div>' +
+        '<div><label>Chinese subtitle lang</label><input type="text" id="subtitle_lang_zh" value="' + esc(cfg.subtitle_lang_zh) + '"></div>' +
+        '<div><label>Target clip length (seconds)</label><input type="number" id="duration" value="' + esc(cfg.duration) + '"></div>' +
+      '</div>' +
+    '</fieldset>' +
 
-  const envTags = c.querySelector('#envTags');
-  const env = s.env||{};
+    '<fieldset><legend>LLM — Ollama + Qwen (free, local, no key)</legend>' +
+      '<div class="grid2">' +
+        '<div><label>Provider</label><select id="llm_provider">' +
+          ['ollama','deepseek','openai','anthropic','none'].map(p =>
+            '<option value="' + p + '"' + ((cfg.llm_provider || 'ollama') === p ? ' selected' : '') + '>' + p + '</option>').join('') +
+        '</select></div>' +
+        '<div><label>Model</label><input type="text" id="llm_model" value="' + esc(cfg.llm_model) + '"></div>' +
+        '<div><label>Base URL</label><input type="text" id="llm_base_url" value="' + esc(cfg.llm_base_url) + '"></div>' +
+        '<div><label>API key</label><input type="text" id="llm_api_key" value="' + esc(cfg.llm_api_key) + '" placeholder="not required for Ollama"></div>' +
+      '</div>' +
+      '<div class="desc mt" id="llmNote"></div>' +
+      '<div class="btnrow"><button class="btn primary" id="saveCfg">Save settings</button></div>' +
+    '</fieldset>' +
+
+    '<fieldset><legend>Environment</legend><div class="tags" id="envTags"></div></fieldset>';
+
+  // Attach a "Browse…" picker beside the two path fields (built via DOM so the
+  // template string stays simple). Browsers won't reveal a picked file's full
+  // path, so the picker lists this machine's folders through /api/browse.
+  [['movie_path', 'video', 'Pick the movie file from your folders'],
+   ['auto_subtitle', 'subtitle', 'Pick the .srt subtitle file']].forEach(([inp, kind, tip]) => {
+    const field = card.querySelector('#' + inp);
+    if (!field) return;
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;gap:8px;align-items:stretch';
+    const btn = document.createElement('button');
+    btn.className = 'btn'; btn.type = 'button'; btn.textContent = 'Browse…'; btn.title = tip;
+    field.style.flex = '1';
+    field.parentNode.insertBefore(wrap, field);
+    wrap.appendChild(field); wrap.appendChild(btn);
+    btn.onclick = () => openBrowser(inp, kind);
+  });
+
+  const env = s.env || {};
   const items = [
-    ['ffmpeg', env.ffmpeg], ['edge-tts', env.edge_tts],
-    ['scene detect', env.scene_detect], ['movie set', env.movie_set], ['movie file exists', env.movie_exists],
-    ['llm: ' + (env.llm_provider||'none'), env.llm_ready]
+    ['ffmpeg', env.ffmpeg], ['edge-tts', env.edge_tts], ['pysubs2', env.pysubs2], ['pyyaml', env.yaml],
+    ['scene detect', env.scene_detect], ['movie set', env.movie_set], ['movie file readable', env.movie_exists],
+    ['whisper (ASR)', env.whisper],
+    ['output folder writable', env.output_writable],
+    ['llm: ' + (env.llm_provider || 'none') + (env.llm_ready ? (env.llm_reachable ? ' (reachable)' : ' — NOT running') : ''), env.llm_ready && env.llm_reachable],
+    ['python ' + (env.python || '?'), true]
   ];
-  envTags.innerHTML = items.map(([n,ok])=>`<span class="pill">${statusDot(ok)} ${n}</span>`).join('');
+  card.querySelector('#envTags').innerHTML = items.map(([n, ok]) => '<span class="pill">' + dot(ok) + ' ' + esc(n) + '</span>').join('');
 
-  c.querySelector('#saveCfg').onclick = async ()=>{
-    const body = {
-      movie_path: $('#movie_path').value,
-      storyboard: $('#storyboard').checked,
-      auto: $('#auto').checked,
-      auto_subtitle: $('#auto_subtitle').value,
-      voice_en: $('#voice_en').value,
-      subtitle_lang_en: $('#subtitle_lang_en').value,
-      voice_zh: $('#voice_zh').value,
-      subtitle_lang_zh: $('#subtitle_lang_zh').value,
-      llm_base_url: $('#llm_base_url').value,
-      llm_model: $('#llm_model').value,
-      llm_api_key: $('#llm_api_key').value
-    };
-    await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-    toast('Settings saved');
-    refresh();
+  // Say plainly why the movie path will not work (folder, missing, empty...)
+  const mm = card.querySelector('#movieMsg');
+  if (env.movie_error) {
+    mm.innerHTML = '<span style="color:#f87171;font-weight:600">&#9888; ' + esc(env.movie_error) + '</span>';
+  } else if (env.movie_resolved) {
+    mm.innerHTML = '<span style="color:#4ade80">OK — will recap ' + esc(env.movie_resolved) + '</span>';
+  } else {
+    mm.innerHTML = '<span class="muted">No movie set — placeholder scenes will be used.</span>';
+  }
+
+  // Switching provider also fills in that provider's endpoint + model, so you
+  // cannot end up asking DeepSeek for "qwen2.5".
+  const PRESETS = {
+    ollama:    { model:'qwen2.5',                  base:'http://localhost:11434/v1',   key:false, note:'Free and fully local. Run <b>ollama serve</b>, then <b>ollama pull qwen2.5</b>. No key. Nothing leaves your machine.' },
+    deepseek:  { model:'deepseek-chat',            base:'https://api.deepseek.com/v1', key:true,  note:'Cheap and strong, especially for the 简体中文 translation. Needs a key from platform.deepseek.com and sends your transcript to their API.' },
+    openai:    { model:'gpt-4o-mini',              base:'https://api.openai.com/v1',   key:true,  note:'Needs an OpenAI key. Works with any OpenAI-compatible endpoint by changing the base URL.' },
+    anthropic: { model:'claude-3-5-sonnet-latest', base:'',                            key:true,  note:'Needs an Anthropic key. The base URL is fixed by the SDK.' },
+    none:      { model:'',                         base:'',                            key:false, note:'No LLM. The pipeline uses the scripts in the Script editor tab (or the bundled samples).' }
   };
-  return c;
+  const provSel = card.querySelector('#llm_provider');
+  const knownModels = Object.values(PRESETS).map(p => p.model).filter(Boolean);
+  provSel.onchange = () => {
+    const p = PRESETS[provSel.value] || PRESETS.ollama;
+    const m = card.querySelector('#llm_model'), b = card.querySelector('#llm_base_url'), k = card.querySelector('#llm_api_key');
+    if (!m.value.trim() || knownModels.includes(m.value.trim())) m.value = p.model;
+    if (!b.value.trim() || Object.values(PRESETS).some(x => x.base && x.base === b.value.trim())) b.value = p.base;
+    k.disabled = !p.key;
+    k.placeholder = p.key ? 'paste your API key' : 'not needed for this provider';
+    card.querySelector('#llmNote').innerHTML = p.note;
+  };
+  provSel.onchange();
+
+  // What auto-recap needs, stated plainly before you press Run.
+  const rb = card.querySelector('#readyBox');
+  const rd = s.ready || {};
+  if (rd.auto) {
+    const lines = (rd.blocking || []).length
+      ? (rd.blocking || []).map(b => '<span style="color:#f87171">&#10007; ' + esc(b) + '</span>').join('<br>')
+      : '<span style="color:#4ade80">&#10003; Auto-recap is ready — it will read the movie and write the narration.</span>';
+    rb.innerHTML = '<b>Auto-recap check</b><br>' + lines +
+      '<br><span class="muted">dialogue source: ' + esc(rd.subtitle || (rd.whisper ? 'Whisper ASR (no .srt found)' : (rd.whisper_will_install ? 'Whisper — will be downloaded & installed automatically on first run' : 'none'))) +
+      ' · llm: ' + esc(rd.llm_provider) + '</span>';
+  } else {
+    let offMsg = '<span class="muted">Auto-recap is off — the clip narrates the script in the Script editor tab' +
+      (rd.sample_script ? ', which is currently the <b style="color:#facc15">bundled sample</b>' : '') + '.</span>';
+    if (rd.subtitle) offMsg += '<br><span style="color:#60a5fa">A subtitle was found (' + esc(rd.subtitle) +
+      '). Turn Auto-recap ON to write the narration from your movie instead of the sample.</span>';
+    rb.innerHTML = offMsg;
+  }
+
+  card.querySelector('#saveCfg').onclick = () => saveSettings(false);
+  return card;
 }
 
-async function doRun(lang){
-  await api('/api/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({langs:[lang]})});
-  toast('Started '+lang.toUpperCase()+' clip');
+function renderPanel(){
+  const s = state.status;
+  if (!s) return;
+  const cfg = s.config || {};
+  const p = $('#panel');
+  p.innerHTML = '';
+  if (state.tab === 'en' || state.tab === 'zh') p.appendChild(clipCard(state.tab, cfg, s));
+  else if (state.tab === 'script') p.appendChild(scriptCard(s));
+  else p.appendChild(settingsCard(cfg, s));
+  if (state.tab === 'script') loadScripts();
+}
+
+function selectTab(tab){
+  state.tab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  renderPanel();
+}
+
+// ---------------------------------------------------------------- actions ---
+// Reads the Settings tab into the object POST /api/config expects. Shared by the
+// Save button and by Run/Render so a run always uses what you last typed, even if
+// you never clicked Save.
+function collectSettings(){
+  // Start from what is already saved, then override only the fields that are
+  // actually on screen. Inputs that are not rendered (e.g. you pressed Run from
+  // the EN tab, where the movie field does not exist) must NOT be blanked out.
+  const base = Object.assign({}, (state.status && state.status.config) || {});
+  const v = id => { const e = $('#'+id); return e ? e.value : null; };
+  const c = id => { const e = $('#'+id); return e ? e.checked : null; };
+  const put = (k, val) => { if (val !== null) base[k] = val; };
+
+  put('movie_path', v('movie_path'));
+  const od = v('output_dir'); if (od !== null) base.output_dir = od.trim();
+  put('montage', v('montage') || 'scenes');
+  const sl = v('scene_len'); if (sl !== null) base.scene_len = parseFloat(sl) || 6.0;
+  put('storyboard', c('storyboard'));
+  put('auto', c('auto'));
+  put('auto_subtitle', v('auto_subtitle'));
+  put('voice_en', v('voice_en'));
+  put('subtitle_lang_en', v('subtitle_lang_en'));
+  put('voice_zh', v('voice_zh'));
+  put('subtitle_lang_zh', v('subtitle_lang_zh'));
+  const du = v('duration'); if (du !== null) base.duration = parseInt(du, 10) || 60;
+  const lp = v('llm_provider'); if (lp !== null) base.llm_provider = lp.trim() || 'ollama';
+  const lm = v('llm_model'); if (lm !== null) base.llm_model = lm.trim();
+  const lb = v('llm_base_url'); if (lb !== null) base.llm_base_url = lb.trim();
+  const lk = v('llm_api_key'); if (lk !== null) base.llm_api_key = lk.trim();
+  return base;
+}
+
+// Persist the Settings tab. Picked/typed values live only in the page until this
+// runs, and the 3s status poll re-renders from the saved config — so anything not
+// saved gets wiped. Browse picks and Run/Render all go through here.
+async function saveSettings(silent){
+  try {
+    await post('/api/config', collectSettings());
+    state.settingsDirty = false;
+    if (!silent) toast('Settings saved');
+    refresh();
+    return true;
+  } catch (e) {
+    if (!silent) toast('Save failed: ' + e.message, true);
+    return false;
+  }
+}
+
+async function doRun(langs){
+  if (!(await saveSettings(true))) { toast('Could not apply settings — run aborted', true); return; }
+  try {
+    await post('/api/run', { langs: langs });
+    toast('Started ' + langs.join(' + ').toUpperCase());
+    pollLogs();
+    refresh();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function doRender(){
+  const en = $('#scriptEn').value;
+  const zh = $('#scriptZh').value;
+  if (!en.trim() && !zh.trim()) { toast('Both scripts are empty', true); return; }
+  if (!(await saveSettings(true))) { toast('Could not apply settings — render aborted', true); return; }
+  try {
+    await post('/api/render', { en_script: en, zh_script: zh });
+    state.dirty = false;
+    toast('Render started');
+    pollLogs();
+    refresh();
+  } catch (e) { toast('Render failed: ' + e.message, true); }
+}
+
+async function loadScripts(){
+  if (state.tab !== 'script') return;
+  try {
+    const [en, zh] = await Promise.all([api('/api/scripts?lang=en'), api('/api/scripts?lang=zh')]);
+    const ta = $('#scriptEn'), tb = $('#scriptZh');
+    if (!ta || !tb) return;
+    ta.value = en.script || '';
+    tb.value = zh.script || '';
+    $('#scriptPath').textContent = en.path ? 'in ' + en.path.replace(/[/\\]script_[a-z]+\.txt$/, '') : '';
+    state.dirty = false;
+  } catch (e) { toast('Could not load scripts: ' + e.message, true); }
+}
+
+async function stopRun(){
+  try {
+    const r = await post('/api/stop_run', {});
+    toast(r.ok ? 'Stop requested — finishing the current step' : 'Nothing to stop', !r.ok);
+  } catch (e) { toast('Stop failed: ' + e.message, true); }
   refresh();
-  pollLogs();
 }
 
-async function generateBoth(){
-  const ok = await api('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({})});
-  return ok.ok;
+// ------------------------------------------------------- file browser ---
+// Browsers refuse to expose a chosen file's absolute path, so instead of a real
+// upload we list this machine's folders via /api/browse (same machine) and let
+// you click through to the movie / .srt.
+let _fm = { target: null, kind: 'video' };
+function _joinPath(base, name){
+  if (!base) return name;
+  const sep = base.indexOf('\\') >= 0 ? '\\' : '/';
+  return base.replace(/[\\/]+$/, '') + sep + name;
+}
+async function openBrowser(inputId, kind){
+  _fm.target = inputId; _fm.kind = kind;
+  const cur = ($('#'+inputId) || {}).value || '';
+  $('#fileModal').style.display = 'flex';
+  await browseTo(cur, kind);
+}
+async function browseTo(path, kind){
+  let d;
+  try {
+    d = await api('/api/browse?kind=' + kind + '&path=' + encodeURIComponent(path || ''));
+  } catch (e) { toast('Browse failed: ' + e.message, true); return; }
+  if (!d.ok) { toast(d.error || 'cannot open folder', true); return; }
+  $('#fmPath').textContent = d.path || 'Pick a drive:';
+  $('#fmUp').disabled = !d.parent;
+  $('#fmUp').onclick = d.parent ? () => browseTo(d.parent, kind) : null;
+  const roots = $('#fmRoots'); roots.innerHTML = '';
+  (d.roots || []).forEach(rt => {
+    const b = document.createElement('button');
+    b.className = 'btn'; b.type = 'button'; b.textContent = rt.replace(/[\\/]$/, '');
+    b.onclick = () => browseTo(rt, kind);
+    roots.appendChild(b);
+  });
+  const list = $('#fmList'); list.innerHTML = '';
+  if (!(d.dirs || []).length && !(d.files || []).length) {
+    const e = document.createElement('div');
+    e.className = 'muted'; e.style.padding = '8px'; e.textContent = '(empty folder)';
+    list.appendChild(e);
+  }
+  (d.dirs || []).forEach(nm => list.appendChild(_fmRow('📁', nm, () => browseTo(_joinPath(d.path, nm), kind))));
+  (d.files || []).forEach(nm => list.appendChild(_fmRow(kind === 'video' ? '🎬' : '📄', nm, async () => {
+    const t = $('#'+_fm.target); if (t) t.value = _joinPath(d.path, nm);
+    $('#fileModal').style.display = 'none';
+    // Save straight away so the periodic re-render (and tab switches) can't wipe
+    // the picked path before you press Run.
+    await saveSettings(true);
+    toast('Picked ' + nm);
+  })));
+}
+function _fmRow(icon, label, onclick){
+  const row = document.createElement('div');
+  row.style.cssText = 'padding:7px 8px;border-radius:8px;cursor:pointer;display:flex;gap:8px;align-items:center';
+  row.onmouseover = () => row.style.background = '#1a2130';
+  row.onmouseout = () => row.style.background = '';
+  const i = document.createElement('span'); i.textContent = icon;
+  const t = document.createElement('span');
+  t.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+  t.textContent = label;
+  row.appendChild(i); row.appendChild(t);
+  row.onclick = onclick;
+  return row;
 }
 
-function esc(x){ return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;'); }
-
-let logTimer=null;
+// ------------------------------------------------------------------ poll ---
+let logTimer = null;
 function pollLogs(){
-  if(logTimer) return;
-  logTimer=setInterval(async ()=>{
-    const d = await api('/api/logs?n=200');
-    $('#logpre').textContent = (d.logs||[]).join('\\n');
-    $('#logpre').scrollTop = $('#logpre').scrollHeight;
-    const st = await api('/api/status');
-    if(!st.job.running){ clearInterval(logTimer); logTimer=null; renderPanel(st); }
-  }, 1200);
+  if (logTimer) return;
+  logTimer = setInterval(pullLogs, 1200);
+  pullLogs();
+}
+async function pullLogs(){
+  try {
+    const d = await api('/api/logs?n=400');
+    const pre = $('#logpre');
+    const text = (d.logs || []).join('\n');
+    if (text !== pre.textContent) {
+      pre.textContent = text || '(no output yet)';
+      pre.scrollTop = pre.scrollHeight;
+    }
+  } catch (e) { /* server gone */ }
 }
 
-function toast(msg){
-  let t=document.getElementById('toast');
-  if(!t){ t=el('<div id="toast" style="position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#16a34a;color:#fff;padding:10px 18px;border-radius:9px;font-size:13px;font-weight:600;z-index:99;box-shadow:0 8px 20px rgba(0,0,0,.4)"></div>'); document.body.appendChild(t); }
-  t.textContent=msg; t.style.opacity='1';
-  clearTimeout(t._h); t._h=setTimeout(()=>{t.style.opacity='0';},2600);
+async function refresh(){
+  if (state.stopped) return;
+  let s;
+  try { s = await api('/api/status'); }
+  catch (e) {
+    $('#modeBadge').className = 'badge red';
+    $('#modeBadge').textContent = 'mode: SERVER UNREACHABLE';
+    return;
+  }
+  state.status = s;
+  const cfg = s.config || {}, env = s.env || {}, job = s.job || {};
+
+  $('#engBadge').textContent = 'engine: ' + (s.engine || 'recap');
+  const engineOk = env.ffmpeg && env.edge_tts;
+  const readyState = engineOk && (env.llm_ready || env.movie_exists);
+  const mb = $('#modeBadge');
+  mb.className = 'badge ' + (readyState ? 'green' : 'yellow');
+  mb.textContent = 'mode: ' + (readyState ? 'READY' : 'NOT READY');
+  mb.title = readyState ? 'ffmpeg + edge-tts available' : 'Missing ffmpeg or edge-tts — run setup_ui.bat';
+
+  const running = !!job.running;
+  $('#jobBadge').className = 'badge ' + (running ? 'blue' : (job.error ? 'red' : ''));
+  $('#jobBadge').textContent = 'runner: ' + (running ? 'running…' : (job.error ? 'error' : 'idle'));
+  if (job.error) $('#jobBadge').title = job.error;
+
+  // A failed run used to hide its reason in a hover-tooltip. Show it for real.
+  const ja = $('#jobAlert');
+  if (!running && job.error) {
+    ja.style.display = 'block';
+    ja.innerHTML = '<b>&#9888; Last run failed:</b> ' + esc(job.error) +
+      ' <span class="muted">— full details in the log tab.</span>';
+  } else {
+    ja.style.display = 'none';
+  }
+
+  $('#statClips').textContent = (s.outputs || []).length;
+  $('#statRuns').textContent = job.runs != null ? job.runs : (job.finished ? 1 : 0);
+  $('#statStorage').textContent = (s.outputs || []).reduce((a, o) => a + o.size_mb, 0).toFixed(1) + ' MB';
+
+  $('#generateBtn').disabled = running;
+  $('#stopRunBtn').disabled = !running;
+  $('#closeBtn').disabled = false;
+
+  // Only re-render the panel when nothing is being typed in it. Unsaved Settings
+  // edits (incl. a Browse pick not yet saved) must not be clobbered either.
+  const editing = state.tab === 'script' && state.dirty;
+  if (!editing) {
+    if (state.tab === 'settings' && (settingsEditing() || state.settingsDirty)) return;
+    renderPanel();
+  }
+  if (running) pollLogs();
+  else if (logTimer) { clearInterval(logTimer); logTimer = null; pullLogs(); }
 }
 
-document.querySelectorAll('.tab').forEach(t=>{
-  t.onclick=()=>{ document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active')); t.classList.add('active'); refresh(); };
+function settingsEditing(){
+  const el = document.activeElement;
+  return state.tab === 'settings' && el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
+}
+
+// ----------------------------------------------------------------- wiring ---
+document.querySelectorAll('.tab').forEach(t => { t.onclick = async () => {
+  // Leaving Settings with unsaved edits would drop them on the floor — save first.
+  if (state.tab === 'settings' && state.settingsDirty) await saveSettings(true);
+  selectTab(t.dataset.tab);
+}; });
+
+$('#generateBtn').onclick = () => doRun(['en', 'zh']);
+$('#stopRunBtn').onclick = stopRun;
+$('#reloadLogs').onclick = pullLogs;
+$('#fmClose').onclick = () => { $('#fileModal').style.display = 'none'; };
+$('#closeBtn').onclick = async () => {
+  if (!confirm('Shut down the Recap Studio server? Close the launcher window afterwards.')) return;
+  try { await post('/api/stop', {}); } catch (e) { /* server already gone */ }
+  state.stopped = true;
+  $('#shutdown').classList.remove('hidden');
+};
+
+document.addEventListener('input', (e) => {
+  const t = e.target;
+  if (!t) return;
+  if (t.id === 'scriptEn' || t.id === 'scriptZh') state.dirty = true;
+  if (state.tab === 'settings' && t.matches && t.matches('input,select,textarea')) state.settingsDirty = true;
+});
+document.addEventListener('change', (e) => {
+  const t = e.target;
+  if (t && state.tab === 'settings' && t.matches && t.matches('input,select')) state.settingsDirty = true;
+});
+window.addEventListener('beforeunload', (e) => {
+  if (state.dirty) { e.preventDefault(); e.returnValue = ''; }
 });
 
-// Initialize: show script panel after Generate if outputs exist
-(function init(){
-  refresh();
-  const cp = el('<div class="card mt"><div class="mk-row"><h2>Console</h2><button class="btn" id="reloadLogs">Reload</button></div><pre class="logpre" id="logpre"></pre></div>');
-  document.querySelector('.wrap').appendChild(cp);
-  $('#reloadLogs').onclick=()=>{ pollLogs(); };
-  setInterval(refresh, 4000);
-})();
-
-// Handle Generate button
-$('#generateBtn').onclick = async ()=>{
-  const ok = await generateBoth();
-  if(ok) {
-    toast('Generate started');
-    // refresh will show script panel after pipeline finishes
-  } else {
-    toast('Generate failed');
-  }
-};
-
-// Handle Render button
-$('#renderBtn').onclick = async ()=>{
-  const enScript = $('#scriptEn').value;
-  const zhScript = $('#scriptZh').value;
-  const ok = await api('/api/render', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({en_script: enScript, zh_script: zhScript})
-  });
-  if(ok.ok){
-    toast('Render started');
-    // hide script panel, wait for completion
-    $('#scriptPanel').hide();
-    $('#renderBtn').disabled = true;
-  } else {
-    toast('Render failed');
-  }
-};
-
-// Handle Close button
-$('#closeScriptBtn').onclick = ()=>{
-  $('#scriptPanel').hide();
-  $('#renderBtn').disabled = true;
-};
+selectTab('en');
+refresh();
+pullLogs();
+setInterval(refresh, 3000);
 </script>
 </body>
 </html>

@@ -39,7 +39,11 @@ PROMPT_ZH = """请把下面这份英文电影剧情解说（每行一个句子�
 def generate_online(english: str, cfg_llm: dict) -> str:
     user = PROMPT_ZH.format(english=english)
     return llm.complete(
-        cfg_llm.get("provider", ""), cfg_llm.get("model", ""), SYSTEM_ZH, user
+        cfg_llm.get("provider", ""),
+        cfg_llm.get("model", ""),
+        SYSTEM_ZH,
+        user,
+        base_url=cfg_llm.get("base_url"),
     )
 
 

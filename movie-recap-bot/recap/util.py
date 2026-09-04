@@ -33,11 +33,27 @@ def which_ffprobe() -> str:
     )
 
 
-def run(cmd: list[str], check: bool = True, capture: bool = True) -> subprocess.CompletedProcess:
-    """Run a command, echoing the call for debuggability."""
+def run(
+    cmd: list[str],
+    check: bool = True,
+    capture: bool = True,
+    cwd: str | Path | None = None,
+) -> subprocess.CompletedProcess:
+    """Run a command, echoing the call for debuggability.
+
+    ``cwd`` matters for filtergraph arguments: a Windows path like
+    ``D:\\recap\\_work\\en.ass`` contains a colon, and ffmpeg's filter parser
+    reads ``:`` as an option separator, so absolute paths in filters break.
+    Callers pass the file's folder here and use a bare relative filename.
+    """
     pretty = " ".join(str(c) for c in cmd)
     print(f"  $ {pretty}")
-    res = subprocess.run([str(c) for c in cmd], capture_output=capture, text=True)
+    res = subprocess.run(
+        [str(c) for c in cmd],
+        capture_output=capture,
+        text=True,
+        cwd=str(cwd) if cwd else None,
+    )
     if check and res.returncode != 0:
         raise RuntimeError(
             f"Command failed ({res.returncode}): {pretty}\n"
@@ -47,21 +63,40 @@ def run(cmd: list[str], check: bool = True, capture: bool = True) -> subprocess.
 
 
 def probe_duration(path: str | Path) -> float:
-    """Return media duration in seconds via ffprobe."""
+    """Return media duration in seconds.
+
+    Prefers ffprobe; if it is missing (common on Windows installs that only have
+    ffmpeg.exe) the duration is read from ffmpeg's own banner on stderr.
+    """
     p = Path(path)
+    try:
+        probe = which_ffprobe()
+    except RuntimeError:
+        return _duration_via_ffmpeg(p)
     res = run(
         [
-            which_ffprobe(),
+            probe,
             "-v", "error",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
             str(p),
-        ]
+        ],
+        check=False,
     )
     try:
         return float(res.stdout.strip())
     except ValueError:
+        return _duration_via_ffmpeg(p)
+
+
+def _duration_via_ffmpeg(path: Path) -> float:
+    """Parse 'Duration: 00:03:27.60' out of ffmpeg's stderr."""
+    res = run([which_ffmpeg(), "-hide_banner", "-i", str(path)], check=False)
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", res.stderr or "")
+    if not m:
         return 0.0
+    h, mnt, sec = m.groups()
+    return int(h) * 3600 + int(mnt) * 60 + float(sec)
 
 
 def probe_streams(path: str | Path) -> list[dict]:
