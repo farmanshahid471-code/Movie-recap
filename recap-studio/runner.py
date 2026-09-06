@@ -97,12 +97,22 @@ JOB_STATE: dict = {
 # --------------------------------------------------------------------------
 # Logging
 # --------------------------------------------------------------------------
+# Everything is ALSO written to this file so a run can be inspected even when
+# the browser Console or the launcher window is unhelpful.
+STUDIO_LOG = STUDIO_DIR / "studio.log"
+
+
 def _log(msg: str) -> None:
-    """Append one line to the shared ring buffer the UI streams."""
+    """Append one line to the shared ring buffer the UI streams (+ a log file)."""
     with LOCK:
         LOG_BUFFER.append(msg)
         if len(LOG_BUFFER) > MAX_LOG_LINES:
             del LOG_BUFFER[: len(LOG_BUFFER) - MAX_LOG_LINES]
+    try:
+        with open(STUDIO_LOG, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+    except OSError:
+        pass
 
 
 class _Tee(io.TextIOBase):
@@ -884,11 +894,11 @@ def run_semantic(langs: list[str], cfg: dict | None = None) -> list[Path]:
     whisper extraction, chunking, summaries, semantic matching — run once and
     every language reuses the result), so this returns a list of output mp4s.
     """
-    from recap import pipeline
-
     cfg = cfg if cfg is not None else load_config()
     langs = [l for l in langs if l in ("en", "zh")] or ["en"]
     _log(f">>> Semantic recap [{'+'.join(langs)}]")
+
+    from recap import pipeline
 
     try:
         clips = _resolve_clips(cfg)
@@ -910,6 +920,19 @@ def run_semantic(langs: list[str], cfg: dict | None = None) -> list[Path]:
 
     movie = clips[0]
     rc = semantic_recap_cfg(cfg, langs)
+
+    # FIX: carry the UI's subtitle choice + whisper knobs into the pipeline
+    # config, otherwise the engine can't see the browsed .srt and silently
+    # falls back to Whisper-transcribing the whole film.
+    rc.setdefault("dialogue", {})
+    sub = (cfg.get("auto_subtitle") or "").strip() or None
+    if sub:
+        rc["dialogue"]["srt_path"] = sub
+        _log(f"    dialogue subtitle: {sub}")
+    else:
+        rc["dialogue"]["srt_path"] = None
+    rc["dialogue"]["whisper_model"] = cfg.get("whisper_model", "small")
+    rc["dialogue"]["whisper_device"] = cfg.get("whisper_device", "auto")
 
     # Dialogue source: prefer a .srt next to the movie, else Whisper (install
     # on demand if nothing is present).
