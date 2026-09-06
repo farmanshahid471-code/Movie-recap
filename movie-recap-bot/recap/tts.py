@@ -25,15 +25,22 @@ class TTSError(RuntimeError):
 
 
 class TimedCue:
-    __slots__ = ("text", "start", "end")
+    __slots__ = ("text", "start", "end", "words")
 
-    def __init__(self, text: str, start: float, end: float):
+    def __init__(self, text: str, start: float, end: float, words: list | None = None):
         self.text = text
         self.start = start
         self.end = end
+        self.words = words
 
     def as_dict(self) -> dict:
-        return {"text": self.text, "start": round(self.start, 3), "end": round(self.end, 3)}
+        d = {"text": self.text, "start": round(self.start, 3), "end": round(self.end, 3)}
+        if self.words:
+            d["words"] = [
+                {"word": w[0], "start": round(w[1], 3), "end": round(w[2], 3)}
+                for w in self.words
+            ]
+        return d
 
     @property
     def duration(self) -> float:
@@ -72,18 +79,26 @@ class EdgeTTS:
         text = "\n".join(sentences)          # sentence separators -> natural pauses
         communicate = self._edge.Communicate(text, voice, rate=self.rate)
         bounds: list[tuple[float, float, str]] = []
+        words: list[tuple[float, float, str]] = []   # word-level timestamps
         audio = bytearray()
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 audio.extend(chunk["data"])
-            elif chunk["type"] == "SentenceBoundary":
+            elif chunk["type"] in ("SentenceBoundary", "WordBoundary"):
                 # edge-tts reports offsets/durations in 100-nanosecond ticks.
                 offset = chunk["offset"] / 10_000_000.0
                 duration = chunk["duration"] / 10_000_000.0
-                bounds.append((offset, duration, chunk["text"]))
+                item = (offset, duration, chunk["text"])
+                if chunk["type"] == "SentenceBoundary":
+                    bounds.append(item)
+                else:
+                    words.append(item)
         out_mp3.parent.mkdir(parents=True, exist_ok=True)
         out_mp3.write_bytes(bytes(audio))
-        self._timing = _build_cues(bounds, sentences)
+        cues = _build_cues(bounds, sentences)
+        if words:
+            _attach_words(cues, words)
+        self._timing = cues
 
     # populated by _sync
     _timing: list[TimedCue] = []
@@ -204,6 +219,29 @@ def _concat(files: list[Path], out: Path) -> None:
     with open(out, "wb") as o:
         for f in files:
             o.write(f.read_bytes())
+
+
+def _attach_words(cues: list[TimedCue], words: list[tuple[float, float, str]]) -> None:
+    """Assign word boundaries to their containing sentence cue.
+
+    Word timestamps are absolute offsets in the full narration stream; each
+    word falls inside exactly one sentence's [start, end].
+    """
+    for (offset, duration, wtext) in words:
+        w = (wtext or "").strip()
+        if not w:
+            continue
+        w_start, w_end = offset, offset + duration
+        for cue in cues:
+            # tolerance 60ms so boundary words still land in a cue
+            if cue.start - 0.06 <= w_start < cue.end + 0.06:
+                if cue.words is None:
+                    cue.words = []
+                cue.words.append((w, w_start, w_end))
+                break
+    for cue in cues:
+        if cue.words:
+            cue.words.sort(key=lambda t: t[1])
 
 
 def synthesize_language(

@@ -1,7 +1,7 @@
 {
   "engine": "semantic",
   "movie_path": "",
-  "output_dir": "D:\\recap",
+  "output_dir": "",
   "storyboard": true,
   "duration": 840,
   "montage": "scenes",
@@ -11,7 +11,7 @@
   "subtitle_lang_en": "en",
   "subtitle_lang_zh": "zh",
   "llm_provider": "ollama",
-  "llm_base_url": "http://localhost:11434/v1",
+  "llm_base_url": "http://ollama:11434/v1",
   "llm_api_key": "",
   "llm_model": "qwen2.5",
   "auto": false,

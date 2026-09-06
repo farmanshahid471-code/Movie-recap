@@ -181,6 +181,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/render":
             body = self._read_body()
+            if runner.engine_name() == "semantic":
+                # The Step A-F engine re-writes the narration from the movie on
+                # every Generate; hand-edited scripts only apply to the legacy
+                # 5-step engine (switch Engine in Settings to use this button).
+                return self._json(400, {
+                    "ok": False,
+                    "error": "The semantic engine regenerates the narration from "
+                             "the movie on every Generate. Switch Engine to "
+                             "'legacy recap' in Settings to narrate hand-edited scripts.",
+                })
             written = runner.write_scripts(body.get("en_script", ""), body.get("zh_script", ""))
             if not written:
                 return self._json(400, {"ok": False, "error": "nothing to render: both scripts are empty"})
@@ -248,6 +258,7 @@ class Handler(BaseHTTPRequestHandler):
                 "edge_tts": runner.have("edge_tts"),
                 "pysubs2": runner.have("pysubs2"),
                 "whisper": runner.whisper_available(),
+                "embeddings": runner.have("sentence_transformers"),
                 "yaml": runner.have("yaml"),
                 "output_dir": str(out),
                 "output_writable": os.access(out, os.W_OK),

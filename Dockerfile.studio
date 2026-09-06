@@ -1,0 +1,30 @@
+# Recap Studio web control panel — Docker image
+# Layout mirrors the repo so recap-studio/runner.py finds the bot at ../movie-recap-bot.
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/cache/huggingface \
+    OLLAMA_BASE_URL=http://localhost:11434/v1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /srv
+
+COPY movie-recap-bot/requirements.txt /srv/movie-recap-bot/requirements.txt
+RUN pip install --no-cache-dir -r /srv/movie-recap-bot/requirements.txt openai anthropic
+
+COPY movie-recap-bot /srv/movie-recap-bot
+COPY recap-studio /srv/recap-studio
+
+# Container-friendly defaults (output_dir "" -> /srv/recap-studio/output,
+# which the compose file mounts to ./output on the host).
+RUN cp /srv/recap-studio/config.docker.json /srv/recap-studio/config.json
+
+WORKDIR /srv/recap-studio
+VOLUME ["/srv/recap-studio/output", "/cache"]
+EXPOSE 8080
+CMD ["python", "app.py", "--host", "0.0.0.0", "--port", "8080"]

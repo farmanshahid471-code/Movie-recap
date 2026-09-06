@@ -37,6 +37,132 @@ fast, engaging, present-tense story. Rules:
 - Do not write any heading, title, or trailing notes. Only the narration lines.
 """
 
+# Step B — the exact system prompt the channel workflow uses for the final
+# narrative pass over the summarized chunks.
+SYSTEM_RECAP_WRITER = (
+    "You are a professional YouTube movie recap scriptwriter. "
+    "Do not mention that you are an AI. Do not quote dialogue. "
+    "Write entirely in the third person, focusing on character actions, "
+    "tension, and plot progression."
+)
+
+PROMPT_SCRIPT_JSON = """You are writing the narration for a full-length movie recap video (~{minutes} minutes of speech, roughly {target} words).
+
+Below is a chronological SUMMARY of the movie, built from the action beats of its dialogue.
+
+Write the complete recap script as a **JSON array of sentence strings** — one sentence per element, in chronological story order. The array is parsed by a machine, so this format is mandatory:
+
+["First sentence.", "Second sentence.", ...]
+
+Rules for the sentences:
+- Third person, present tense. Every sentence is something that HAPPENS on screen ("Rita wakes up tied to a chair.", "The van races toward the airport.").
+- Never quote dialogue. Never say "the movie", "the film", "we see", "the scene shows". No commentary or analysis.
+- Tell the ENTIRE story from opening to ending, strictly chronological, including the ending.
+- One self-contained action beat per sentence, ~8 to 22 words. Short, punchy, cinematic pacing.
+- Use character names consistently so the viewer can follow.
+- In total: about {target} words (between {mn} and {mx}) across the whole array.
+
+Respond with ONLY the JSON array. No markdown fences, no headings, no trailing notes.
+
+=== STORY SUMMARY ===
+{summary}
+=== END OF SUMMARY ===
+"""
+
+
+def render_script_json_prompt(
+    summary: str,
+    target: int,
+    mn: int,
+    mx: int,
+) -> str:
+    minutes = max(1, round(target / 150))  # ~150 words per minute of speech
+    return PROMPT_SCRIPT_JSON.format(
+        summary=summary, minutes=minutes, target=target, mn=mn, mx=mx
+    )
+
+
+def parse_sentences_json(raw: str) -> list[str]:
+    """Robustly parse a JSON-array-of-sentences response from an LLM.
+
+    Falls back through progressively looser strategies so a slightly sloppy
+    model (fences, trailing commas, prose preamble) still yields the sentence
+    list the pipeline needs.
+    """
+    import json
+    import re
+
+    if not raw:
+        return []
+
+    text = raw.strip()
+    # 1) strip markdown fences if the model wrapped the array
+    fences = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.S)
+    if fences:
+        text = fences[-1].strip()
+
+    # 2) keep only the outermost [...] region (drops any preamble/afterword)
+    start, end = text.find("["), text.rfind("]")
+    if start != -1 and end > start:
+        candidate = text[start : end + 1]
+        try:
+            data = json.loads(candidate)
+            if isinstance(data, list):
+                return _clean_sentences(data)
+        except Exception:
+            pass
+        # 3) tolerant JSON: strip trailing commas, then retry
+        try:
+            fixed = re.sub(r",\s*([\]}])", r"\1", candidate)
+            data = json.loads(fixed)
+            if isinstance(data, list):
+                return _clean_sentences(data)
+        except Exception:
+            pass
+        # 4) extract every quoted string token inside the brackets
+        tokens = re.findall(r'"((?:[^"\\]|\\.)*)"', candidate)
+        if tokens:
+            return _clean_sentences(tokens)
+
+    # 5) last resort: treat it as loose text, one sentence per line
+    return [s for s in normalize(raw.splitlines()).splitlines() if s.strip()]
+
+
+def _clean_sentences(data: list) -> list[str]:
+    out: list[str] = []
+    for item in data:
+        if isinstance(item, dict) and "sentence" in item:  # be forgiving
+            item = item["sentence"]
+        if not isinstance(item, str):
+            continue
+        s = item.strip()
+        if not s:
+            continue
+        # sentence-end punctuation is required for clean subtitle cues
+        if not s.endswith((".", "!", "?", "。", "！", "？", "…")):
+            s += "."
+        out.append(s)
+    return out
+
+
+def generate_script_json(
+    summary: str,
+    cfg_llm: dict,
+    target: int,
+    mn: int,
+    mx: int,
+) -> list[str]:
+    """Step B — final narrative pass. Returns the script as a list of sentences."""
+    user = render_script_json_prompt(summary, target, mn, mx)
+    raw = llm.complete(
+        cfg_llm.get("provider", ""),
+        cfg_llm.get("model", ""),
+        SYSTEM_RECAP_WRITER,
+        user,
+        base_url=cfg_llm.get("base_url"),
+    )
+    return parse_sentences_json(raw)
+
 
 def render_prompt(notes: str, target: int, mn: int, mx: int) -> str:
     instructions = STYLE_PRESET.format(target=target, mn=mn, mx=mx)

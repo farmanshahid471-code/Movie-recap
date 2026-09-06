@@ -177,6 +177,7 @@ function clipCard(lang, cfg, s){
   const isEn = lang === 'en';
   const voice = isEn ? cfg.voice_en : cfg.voice_zh;
   const sub  = isEn ? cfg.subtitle_lang_en : cfg.subtitle_lang_zh;
+  const sem = (s.engine || cfg.engine || 'semantic') === 'semantic';
   const rows = (s.outputs || []).filter(o => o.lang === lang);
   const table = rows.length
     ? '<table class="table"><tr><th>File</th><th>Size</th><th>Links</th><th>Direct download URL</th></tr>' +
@@ -194,19 +195,31 @@ function clipCard(lang, cfg, s){
   if (env.movie_error) {
     warns.push('<span style="color:#f87171;font-weight:600">&#9888; ' + esc(env.movie_error) + '</span>');
   }
-  if (ready.auto && !ready.auto_ready) {
-    (ready.blocking || []).forEach(b => warns.push('<span style="color:#f87171;font-weight:600">&#9888; Auto-recap cannot run: ' + esc(b) + '</span>'));
-  }
-  if (ready.sample_script) {
-    warns.push('<span style="color:#facc15">&#9888; The narration is the <b>bundled sample script</b>, not your movie. Turn on Auto-recap with a movie file, or paste your own script in the Script editor.</span>');
+  if (sem) {
+    if (!env.movie_exists && !env.movie_error) {
+      warns.push('<span style="color:#f87171;font-weight:600">&#9888; The semantic engine needs a real movie file — set one in Settings (it reads the film\'s audio and cuts its actual footage).</span>');
+    }
+  } else {
+    if (ready.auto && !ready.auto_ready) {
+      (ready.blocking || []).forEach(b => warns.push('<span style="color:#f87171;font-weight:600">&#9888; Auto-recap cannot run: ' + esc(b) + '</span>'));
+    }
+    if (ready.sample_script) {
+      warns.push('<span style="color:#facc15">&#9888; The narration is the <b>bundled sample script</b>, not your movie. Turn on Auto-recap with a movie file, or paste your own script in the Script editor.</span>');
+    }
   }
   const warn = warns.length ? '<div class="desc">' + warns.join('<br>') + '</div>' : '';
   const card = document.createElement('div');
   card.className = 'card';
   card.innerHTML =
     '<h2>' + (isEn ? 'English clip' : 'Chinese clip (中文)') + '</h2>' +
-    '<div class="desc">Dubbing in ' + (isEn ? 'English' : 'Mandarin 普通话') +
-      ', burned-in subtitles in ' + (isEn ? 'English' : '简体中文') + '.</div>' + warn +
+    '<div class="desc">' +
+      (sem
+        ? (isEn
+            ? 'Full-length recap: the narration is written from the movie\'s dialogue, then every line is matched to its exact visual moment in the film and dubbed with burned-in English subtitles.'
+            : 'Mandarin recap: the English narration is translated to 简体中文, narrated by the Chinese voice, and every line is matched to its visual moment in the film with burned-in Chinese subtitles.')
+        : 'Dubbing in ' + (isEn ? 'English' : 'Mandarin 普通话') + ', burned-in subtitles in ' + (isEn ? 'English' : '简体中文') + '.') +
+    '</div>' + warn +
+    (sem ? '' :
     '<fieldset><legend>Montage — how the footage is cut</legend>' +
       '<div class="grid2">' +
         '<div><label>Cut style</label><select id="montage">' +
@@ -216,16 +229,18 @@ function clipCard(lang, cfg, s){
         '<div><label>Seconds per beat</label><input type="number" id="scene_len" value="' + esc(cfg.scene_len) + '"></div>' +
       '</div>' +
       '<div class="desc mt">Needs a real movie file. With <b>scenes</b> the film is sliced into short beats and re-assembled in story order over the narration, the way recap channels do it. Install <code>pip install scenedetect[opencv]</code> for content-aware cut detection; otherwise beats are evenly spaced.</div>' +
-    '</fieldset>' +
+    '</fieldset>') +
 
     '<fieldset><legend>Output</legend>' + table + '</fieldset>' +
     '<div class="tags">' +
       '<span class="pill">' + dot(true) + 'voice: ' + esc(voice) + '</span>' +
       '<span class="pill">' + dot(true) + 'subtitles: ' + esc(sub) + '</span>' +
+      (sem ? '<span class="pill">' + dot(true) + 'engine: semantic beat matching</span>' : '') +
     '</div>' +
     '<div class="btnrow">' +
-      '<button class="btn primary" id="runLang"' + (s.job.running ? ' disabled' : '') + '>Run ' + lang.toUpperCase() + ' clip</button>' +
-      '<button class="btn" id="editLang">Edit script</button>' +
+      '<button class="btn primary" id="runLang"' + (s.job.running ? ' disabled' : '') + '>' +
+        (sem ? 'Recap movie — ' : 'Run ') + lang.toUpperCase() + ' clip</button>' +
+      '<button class="btn" id="editLang">' + (sem ? 'View last script' : 'Edit script') + '</button>' +
     '</div>';
   card.querySelector('#runLang').onclick = () => doRun([lang]);
   card.querySelector('#editLang').onclick = () => { selectTab('script'); loadScripts(); };
@@ -244,46 +259,57 @@ function clipCard(lang, cfg, s){
   });
   return card;
 }
-
 function scriptCard(s){
+  const sem = (s.engine || 'semantic') === 'semantic';
   const card = document.createElement('div');
   card.className = 'card';
   card.innerHTML =
     '<h2>Script editor</h2>' +
-    '<div class="desc">Edit the narration, then <b>Render</b>: the pipeline re-narrates both clips and burns these lines in as subtitles. One sentence per line; the Chinese file must stay line-aligned with the English one.</div>' +
+    (sem
+      ? '<div class="desc">The narration is <b>auto-written from the movie</b> on every Generate — this tab shows the last generated script (read-only; one sentence per line). To narrate your own hand-edited script, switch Engine to <b>legacy recap</b> in Settings.</div>'
+      : '<div class="desc">Edit the narration, then <b>Render</b>: the pipeline re-narrates both clips and burns these lines in as subtitles. One sentence per line; the Chinese file must stay line-aligned with the English one.</div>') +
     '<div class="grid2" style="gap:20px">' +
       '<div><label>English script</label><textarea id="scriptEn" rows="16" spellcheck="false"></textarea></div>' +
       '<div><label>Simplified Chinese script (简体中文)</label><textarea id="scriptZh" rows="16" spellcheck="false"></textarea></div>' +
     '</div>' +
     '<div class="btnrow" style="margin-top:16px">' +
-      '<button class="btn primary" id="renderBtn"' + (s.job.running ? ' disabled' : '') + '>Render both clips</button>' +
+      (sem ? '' : '<button class="btn primary" id="renderBtn"' + (s.job.running ? ' disabled' : '') + '>Render both clips</button>') +
       '<button class="btn" id="reloadScripts">Reload from disk</button>' +
+      (sem ? '<span class="muted">&#9888; engine: semantic — script is regenerated on Generate</span>' : '') +
       '<span class="muted" id="scriptPath"></span>' +
     '</div>';
-  card.querySelector('#renderBtn').onclick = doRender;
+  if (!sem) card.querySelector('#renderBtn').onclick = doRender;
   card.querySelector('#reloadScripts').onclick = loadScripts;
   return card;
 }
-
 function settingsCard(cfg, s){
+  const sem = (s.engine || cfg.engine || 'semantic') === 'semantic';
   const card = document.createElement('div');
   card.className = 'card';
   card.innerHTML =
     '<h2>Settings</h2>' +
-    '<div class="desc">Point the pipeline at a movie you own, pick the voices, and configure the LLM used for auto-writing the narration.</div>' +
+    '<div class="desc">Choose the recap engine, point it at a movie you own, pick the voices and configure the LLM that writes the narration.</div>' +
 
-    '<fieldset><legend>Movie</legend>' +
+    '<fieldset id="fm_engine"><legend>Engine</legend>' +
+      '<label>Recap engine</label><select id="engine">' +
+        '<option value="semantic"' + (sem ? ' selected' : '') + '>semantic — Step A–F: reads the movie (whisper → chunks → JSON script → semantic beat matching → real clips)</option>' +
+        '<option value="recap"' + (!sem ? ' selected' : '') + '>legacy recap — 5-step montage over your scripts/clips</option>' +
+      '</select>' +
+      '<div class="desc mt" id="engineNote"></div>' +
+    '</fieldset>' +
+
+    '<fieldset id="fm_movie"><legend>Movie</legend>' +
       '<label>Movie file path (owned / licensed) — a video FILE, not a folder</label>' +
       '<input type="text" id="movie_path" value="' + esc(cfg.movie_path) + '" placeholder="D:\\videos\\my_movie.mp4">' +
       '<div id="movieMsg" class="desc mt"></div>' +
-      '<label class="switch"><input type="checkbox" id="storyboard"' + (cfg.storyboard ? ' checked' : '') + '> Use placeholder scenes when no movie is set</label>' +
-      '<label class="switch"><input type="checkbox" id="auto"' + (cfg.auto ? ' checked' : '') + '> Auto-recap: write the narration from the movie\'s dialogue (needs a movie + LLM)</label>' +
+      '<label class="switch" id="sw_storyboard"><input type="checkbox" id="storyboard"' + (cfg.storyboard ? ' checked' : '') + '> Use placeholder scenes when no movie is set (legacy engine)</label>' +
+      '<label class="switch" id="sw_auto"><input type="checkbox" id="auto"' + (cfg.auto ? ' checked' : '') + '> Auto-recap: write the narration from the movie\'s dialogue (legacy engine)</label>' +
       '<label>Dialogue subtitle (.srt) — optional; blank = look for one next to the movie, else Whisper</label>' +
       '<input type="text" id="auto_subtitle" value="' + esc(cfg.auto_subtitle) + '" placeholder="D:\\videos\\my_movie.srt (or leave blank)">' +
       '<div class="desc mt" id="readyBox"></div>' +
     '</fieldset>' +
 
-    '<fieldset><legend>Montage — how the footage is cut</legend>' +
+    '<fieldset id="fm_montage"><legend>Montage — how the footage is cut (legacy engine)</legend>' +
       '<div class="grid2">' +
         '<div><label>Cut style</label><select id="montage">' +
           '<option value="scenes"' + ((cfg.montage || 'scenes') === 'scenes' ? ' selected' : '') + '>scenes — cut beats from the movie (recap style)</option>' +
@@ -294,7 +320,7 @@ function settingsCard(cfg, s){
       '<div class="desc mt">Needs a real movie file. With <b>scenes</b> the film is sliced into short beats and re-assembled in story order over the narration, the way recap channels do it. Install <code>pip install scenedetect[opencv]</code> for content-aware cut detection; otherwise beats are evenly spaced.</div>' +
     '</fieldset>' +
 
-    '<fieldset><legend>Output</legend>' +
+    '<fieldset id="fm_output"><legend>Output</legend>' +
       '<label>Save rendered clips to this folder (created if missing)</label>' +
       '<input type="text" id="output_dir" value="' + esc(cfg.output_dir) + '" placeholder="D:\\recap">' +
       '<div class="desc mt">Currently writing to <b>' + esc((s.env || {}).output_dir) + '</b>' +
@@ -302,17 +328,18 @@ function settingsCard(cfg, s){
         '. Intermediates go in its <code>_work</code> subfolder. Leave blank to use <code>recap-studio\\output</code>.</div>' +
     '</fieldset>' +
 
-    '<fieldset><legend>Clip voices &amp; subtitles</legend>' +
+    '<fieldset id="fm_voices"><legend>Clip voices &amp; subtitles</legend>' +
       '<div class="grid2">' +
         '<div><label>English voice</label><input type="text" id="voice_en" value="' + esc(cfg.voice_en) + '"></div>' +
         '<div><label>English subtitle lang</label><input type="text" id="subtitle_lang_en" value="' + esc(cfg.subtitle_lang_en) + '"></div>' +
         '<div><label>Chinese voice</label><input type="text" id="voice_zh" value="' + esc(cfg.voice_zh) + '"></div>' +
         '<div><label>Chinese subtitle lang</label><input type="text" id="subtitle_lang_zh" value="' + esc(cfg.subtitle_lang_zh) + '"></div>' +
-        '<div><label>Target clip length (seconds)</label><input type="number" id="duration" value="' + esc(cfg.duration) + '"></div>' +
+        '<div><label>Target recap length (seconds)</label><input type="number" id="duration" value="' + esc(cfg.duration) + '"></div>' +
       '</div>' +
+      '<div class="desc mt">Target length shapes the narration (~2.5 spoken words/second). 840 ≈ 14 min (full-length); 300 ≈ 5 min.</div>' +
     '</fieldset>' +
 
-    '<fieldset><legend>LLM — Ollama + Qwen (free, local, no key)</legend>' +
+    '<fieldset id="fm_llm"><legend>LLM — Ollama + Qwen (free, local, no key)</legend>' +
       '<div class="grid2">' +
         '<div><label>Provider</label><select id="llm_provider">' +
           ['ollama','deepseek','openai','anthropic','none'].map(p =>
@@ -326,7 +353,18 @@ function settingsCard(cfg, s){
       '<div class="btnrow"><button class="btn primary" id="saveCfg">Save settings</button></div>' +
     '</fieldset>' +
 
-    '<fieldset><legend>Environment</legend><div class="tags" id="envTags"></div></fieldset>';
+    '<fieldset id="fm_env"><legend>Environment</legend><div class="tags" id="envTags"></div></fieldset>';
+
+  if (sem) {
+    // The semantic engine needs a real movie; hide legacy-only controls.
+    const q = sel => { const e = card.querySelector(sel); if (e) e.remove(); };
+    q('#fm_montage'); q('#sw_storyboard'); q('#sw_auto');
+    const note = card.querySelector('#engineNote');
+    if (note) note.innerHTML = 'The semantic engine (recommended) runs the full Step A–F flow: extract the film\'s dialogue, write the recap as a JSON script, then match every narration line to its exact visual moment in the movie. Missing <b>faster-whisper</b> and <b>sentence-transformers</b> are installed automatically on first run.';
+  } else {
+    const note = card.querySelector('#engineNote');
+    if (note) note.innerHTML = 'The legacy engine builds the 5-step recap (script → translate → narrate → subtitles → montage). Best when you hand-write or edit the narration yourself.';
+  }
 
   // Attach a "Browse…" picker beside the two path fields (built via DOM so the
   // template string stays simple). Browsers won't reveal a picked file's full
@@ -349,7 +387,7 @@ function settingsCard(cfg, s){
   const items = [
     ['ffmpeg', env.ffmpeg], ['edge-tts', env.edge_tts], ['pysubs2', env.pysubs2], ['pyyaml', env.yaml],
     ['scene detect', env.scene_detect], ['movie set', env.movie_set], ['movie file readable', env.movie_exists],
-    ['whisper (ASR)', env.whisper],
+    ['whisper (ASR)', env.whisper], ['embeddings (semantic)', env.embeddings],
     ['output folder writable', env.output_writable],
     ['llm: ' + (env.llm_provider || 'none') + (env.llm_ready ? (env.llm_reachable ? ' (reachable)' : ' — NOT running') : ''), env.llm_ready && env.llm_reachable],
     ['python ' + (env.python || '?'), true]
@@ -363,7 +401,9 @@ function settingsCard(cfg, s){
   } else if (env.movie_resolved) {
     mm.innerHTML = '<span style="color:#4ade80">OK — will recap ' + esc(env.movie_resolved) + '</span>';
   } else {
-    mm.innerHTML = '<span class="muted">No movie set — placeholder scenes will be used.</span>';
+    mm.innerHTML = sem
+      ? '<span class="muted" style="color:#facc15">No movie set — the semantic engine cannot run until you choose a real movie file.</span>'
+      : '<span class="muted">No movie set — placeholder scenes will be used.</span>';
   }
 
   // Switching provider also fills in that provider's endpoint + model, so you
@@ -388,14 +428,22 @@ function settingsCard(cfg, s){
   };
   provSel.onchange();
 
-  // What auto-recap needs, stated plainly before you press Run.
+  // What the chosen engine needs, stated plainly before you press Run.
   const rb = card.querySelector('#readyBox');
   const rd = s.ready || {};
-  if (rd.auto) {
-    const lines = (rd.blocking || []).length
-      ? (rd.blocking || []).map(b => '<span style="color:#f87171">&#10007; ' + esc(b) + '</span>').join('<br>')
-      : '<span style="color:#4ade80">&#10003; Auto-recap is ready — it will read the movie and write the narration.</span>';
-    rb.innerHTML = '<b>Auto-recap check</b><br>' + lines +
+  const rdLines = (rd.blocking || []).length
+    ? (rd.blocking || []).map(x => '<span style="color:#f87171">&#10007; ' + esc(x) + '</span>').join('<br>')
+    : '<span style="color:#4ade80">&#10003; Ready — press Generate (or a per-clip Recap button).</span>';
+  if (sem) {
+    const src = rd.subtitle
+      ? 'found subtitle: ' + esc(rd.subtitle)
+      : (rd.whisper ? 'Whisper ASR (no .srt found)' : (rd.whisper_will_install ? 'Whisper — will be installed automatically on first run' : 'none'));
+    rb.innerHTML = '<b>Semantic engine check</b><br>' + rdLines +
+      '<br><span class="muted">dialogue source: ' + src +
+      (rd.embeddings_will_install ? ' · embeddings will be downloaded & installed on first run' : (rd.embeddings ? ' · embeddings ready' : '')) +
+      ' · llm: ' + esc(rd.llm_provider) + '</span>';
+  } else if (rd.auto) {
+    rb.innerHTML = '<b>Auto-recap check</b><br>' + rdLines +
       '<br><span class="muted">dialogue source: ' + esc(rd.subtitle || (rd.whisper ? 'Whisper ASR (no .srt found)' : (rd.whisper_will_install ? 'Whisper — will be downloaded & installed automatically on first run' : 'none'))) +
       ' · llm: ' + esc(rd.llm_provider) + '</span>';
   } else {
@@ -409,7 +457,6 @@ function settingsCard(cfg, s){
   card.querySelector('#saveCfg').onclick = () => saveSettings(false);
   return card;
 }
-
 function renderPanel(){
   const s = state.status;
   if (!s) return;
@@ -457,6 +504,7 @@ function collectSettings(){
   const lm = v('llm_model'); if (lm !== null) base.llm_model = lm.trim();
   const lb = v('llm_base_url'); if (lb !== null) base.llm_base_url = lb.trim();
   const lk = v('llm_api_key'); if (lk !== null) base.llm_api_key = lk.trim();
+  const eg = v('engine'); if (eg !== null) base.engine = eg;
   return base;
 }
 

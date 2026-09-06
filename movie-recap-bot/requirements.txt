@@ -18,7 +18,15 @@ openai>=1.30.0          # OpenAI + DeepSeek (openai-compatible)
 anthropic>=0.34.0       # Anthropic Claude
 # requests>=2.31.0      # Ollama (if you don't want the SDK)
 
+# ---- Step A-F semantic engine (the `auto` command) ----
+# Speech-to-text for dialogue extraction (falls back to a .srt next to the movie):
+faster-whisper>=1.0.0
+# Local embeddings for Step D semantic timestamp mapping:
+sentence-transformers>=2.2.0
+numpy>=1.24.0
+# Optional: auto-bootstrap the Supabase schema when SUPABASE_DB_URL is set:
+# psycopg2-binary>=2.9.0
+
 # ---- Optional: higher-quality TTS / forced alignment ----
 # elevenlabs>=1.0.0    # ElevenLabs multilingual TTS (best quality, paid)
 # whisperx            # ASR-based subtitle timing fallback (heavy, GPU helpful)
-# faster-whisper

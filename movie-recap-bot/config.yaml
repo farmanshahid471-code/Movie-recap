@@ -1,21 +1,57 @@
-# Active config (copy of config.example.yaml; adjust freely)
+# Active config (Step A-F semantic engine; EN first, languages plug in later)
 project:
-  name: "pinocchio-recap"
+  name: "recap"            # used to name output files: <name>_<lang>.mp4
   output_dir: "output"
 
 language:
-  target_languages: ["en", "zh"]
+  # en = English (master). zh = Simplified Chinese (line-aligned translation).
+  # Add languages by wiring them in recap/pipeline.py::_resolve_narration_lines.
+  target_languages: ["en"]
   zh_variant: "zh-CN"
 
 narration:
-  words_target: 1400
-  words_min: 500
-  words_max: 2600
+  # Full-length recap style (~10-16 min of speech at ~150 wpm).
+  words_target: 2000
+  words_min: 600
+  words_max: 4200
   lang_voice:
     en: "en-US-ChristopherNeural"
     zh: "zh-CN-YunxiNeural"
-  tts_provider: "edge"
+  tts_provider: "edge"     # edge | elevenlabs | openai
   rate: "+0%"
+
+# Step A1-A2 — Whisper ASR tuning (used when no .srt sits next to the movie).
+dialogue:
+  whisper_model: "small"   # tiny/base/small/medium/large-v3
+  whisper_device: "auto"   # auto | cpu | cuda
+  whisper_language: null   # e.g. "en"; null = auto-detect
+  word_timestamps: true    # per-word times in transcript.json
+  max_chars: null
+
+# Step A3 — contextual chunking (LLM context windows never overflow).
+chunking:
+  window_seconds: 300      # 5-minute logical blocks
+  overlap_seconds: 30      # 30s of carry between blocks
+  parallel: false          # true parallelizes chunk summaries (remote LLMs)
+
+# Step D — semantic timestamp mapping (recap line -> film moment).
+semantic:
+  enabled: true
+  embedding_model: "all-MiniLM-L6-v2"   # local, 384-dim
+  # vector store: auto | local | supabase
+  #   auto      -> Supabase when SUPABASE_URL + SUPABASE_SERVICE_KEY (or
+  #                SUPABASE_DB_URL) are set in .env, else a local SQLite store.
+  #   supabase  -> hosted Postgres + pgvector (apply migrations/001_pgvector.sql
+  #                once in the Supabase SQL editor).
+  store: "auto"
+  top_k: 3                 # candidates considered per line (de-duplicated)
+  min_score: 0.10          # below this the line falls back to even spacing
+  pre_roll: 0.5            # seconds of footage shown before the matched cue
+  clip_pad: 0.15           # extra footage after each narration line
+  min_clip: 0.8            # never cut a beat shorter than this
+  max_clip: 10.0           # nor longer than this
+  clip:
+    mode: "copy"           # copy = fast stream copy | reencode = frame-exact
 
 subtitles:
   font: "Noto Serif CJK SC"
@@ -33,19 +69,17 @@ video:
   width: 1920
   height: 1080
   concat_mode: "fit"
-  # "scenes" cuts a recap-channel-style montage of beats from the movie;
-  # "continuous" plays it straight through and loops to cover the narration.
-  montage: "scenes"
-  scene_len: 6.0        # seconds per beat when PySceneDetect is not installed
+  montage: "scenes"        # legacy engine only; semantic engine cuts real beats
+  scene_len: 6.0
   scene_min_len: 2.0
   scene_max_len: 20.0
-  scene_threshold: 27.0 # PySceneDetect ContentDetector threshold
+  scene_threshold: 27.0
   codec: "libx264"
   audio_codec: "aac"
   bgm: ""
   bgm_volume: 0.12
 
 llm:
-  provider: ollama      # free, local, no key. Start with `ollama serve`
-  model: qwen2.5        # pull with `ollama pull qwen2.5`
+  provider: ollama         # free, local, no key. Start with `ollama serve`
+  model: qwen2.5           # pull with `ollama pull qwen2.5`
   base_url: "http://localhost:11434/v1"

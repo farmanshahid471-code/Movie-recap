@@ -94,16 +94,18 @@ def _from_whisper(
     device: str,
     language: str | None,
     tmp_dir: Path | None = None,
+    *,
+    word_timestamps: bool = False,
 ) -> list[dict]:
     """Transcribe with Whisper (openai-whisper, faster-whisper, or whisperx)."""
     audio = _extract_audio(video, tmp_dir)
     # Try faster-whisper first (fast, CPU-friendly), then openai-whisper, then whisperx.
     try:
-        return _faster_whisper(audio, model_size, device, language)
+        return _faster_whisper(audio, model_size, device, language, word_timestamps)
     except ImportError:
         pass
     try:
-        return _openai_whisper(audio, model_size, language)
+        return _openai_whisper(audio, model_size, language, word_timestamps)
     except ImportError:
         pass
     try:
@@ -140,7 +142,13 @@ def _extract_audio(video: Path, tmp_dir: Path | None = None) -> Path:
     return audio
 
 
-def _faster_whisper(audio: Path, model_size: str, device: str, language: str | None) -> list[dict]:
+def _faster_whisper(
+    audio: Path,
+    model_size: str,
+    device: str,
+    language: str | None,
+    word_timestamps: bool = False,
+) -> list[dict]:
     from faster_whisper import WhisperModel  # type: ignore
 
     device = device or "auto"
@@ -148,7 +156,12 @@ def _faster_whisper(audio: Path, model_size: str, device: str, language: str | N
           f"This is the slow step — on CPU a full movie can take many minutes; the log "
           f"prints progress below so you know it is alive ...")
     model = WhisperModel(model_size, device=device, compute_type="int8")
-    segments, _info = model.transcribe(str(audio), language=language, beam_size=1)
+    segments, _info = model.transcribe(
+        str(audio),
+        language=language,
+        beam_size=1,
+        word_timestamps=word_timestamps,
+    )
     cues: list[dict] = []
     n = 0
     for seg in segments:
@@ -156,22 +169,53 @@ def _faster_whisper(audio: Path, model_size: str, device: str, language: str | N
         if n % 25 == 0:
             print(f"    ... {n} segments, ~{seg.end / 60:.1f} min of audio transcribed")
         text = (seg.text or "").strip()
-        if text:
-            cues.append({"text": text, "start": float(seg.start), "end": float(seg.end)})
+        if not text:
+            continue
+        cue: dict = {"text": text, "start": float(seg.start), "end": float(seg.end)}
+        if word_timestamps:
+            words = []
+            for w in (getattr(seg, "words", None) or []):
+                wt = (getattr(w, "word", "") or "").strip()
+                if wt:
+                    words.append(
+                        {"word": wt, "start": float(w.start), "end": float(w.end)}
+                    )
+            if words:
+                cue["words"] = words
+        cues.append(cue)
     print(f"  * Whisper finished: {n} segments.")
     return cues
 
 
-def _openai_whisper(audio: Path, model_size: str, language: str | None) -> list[dict]:
+def _openai_whisper(
+    audio: Path,
+    model_size: str,
+    language: str | None,
+    word_timestamps: bool = False,
+) -> list[dict]:
     import whisper  # type: ignore
 
     model = whisper.load_model(model_size)
-    out = model.transcribe(str(audio), language=language)
+    out = model.transcribe(
+        str(audio),
+        language=language,
+        word_timestamps=word_timestamps,
+    )
     cues: list[dict] = []
     for s in out.get("segments", []):
         text = (s.get("text") or "").strip()
-        if text:
-            cues.append({"text": text, "start": float(s["start"]), "end": float(s["end"])})
+        if not text:
+            continue
+        cue: dict = {"text": text, "start": float(s["start"]), "end": float(s["end"])}
+        words = s.get("words") or []
+        if words:
+            cue["words"] = [
+                {"word": w.get("word", "").strip(),
+                 "start": float(w["start"]), "end": float(w["end"])}
+                for w in words
+                if w.get("word", "").strip()
+            ]
+        cues.append(cue)
     return cues
 
 
@@ -198,12 +242,15 @@ def extract_dialogue(
     whisper_model: str = "small",
     whisper_device: str = "cpu",
     whisper_language: str | None = None,
+    word_timestamps: bool = False,
     whitelist: bool = True,
     tmp_dir: Path | None = None,
 ) -> list[dict]:
     """Return a list of timed cues from the film's dialogue.
 
     Prefers an existing subtitle; else transcribes the audio with Whisper.
+    With ``word_timestamps`` every ASR cue also carries a ``words`` list of
+    ``{"word", "start", "end"}`` — used for the transcript sidecar files.
     """
     video = Path(video)
     srt = find_subtitle_near(video, str(srt_path) if srt_path else None)
@@ -212,9 +259,59 @@ def extract_dialogue(
         return _maybe_whitelist(cues, whitelist)
     # No subtitles -> transcribe.
     return _maybe_whitelist(
-        _from_whisper(video, whisper_model, whisper_device, whisper_language, tmp_dir),
+        _from_whisper(
+            video,
+            whisper_model,
+            whisper_device,
+            whisper_language,
+            tmp_dir,
+            word_timestamps=word_timestamps,
+        ),
         whitelist,
     )
+
+
+def write_cues_srt(cues: list[dict], path: Path) -> Path:
+    """Write timed cues as a standard .srt file (no third-party dependency).
+
+    The pipeline also produces .srt via ``subtitles.write_srt`` for the final
+    subtitle track; this one is the raw dialogue export used for re-alignment
+    and debugging, so it is kept dependency-free here.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    for i, c in enumerate(cues, start=1):
+        text = (c.get("text") or "").strip().replace("\n", " ")
+        if not text:
+            continue
+        start, end = float(c.get("start", 0.0)), float(c.get("end", 0.0))
+        lines.append(str(i))
+        lines.append(f"{_fmt_ts_srt(start)} --> {_fmt_ts_srt(end)}")
+        lines.append(text)
+        lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def write_cues_json(cues: list[dict], path: Path) -> Path:
+    """Write timed cues (with optional per-word data) as JSON for the matcher."""
+    import json
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(cues, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return path
+
+
+def _fmt_ts_srt(seconds: float) -> str:
+    ms = int(round(max(seconds, 0.0) * 1000))
+    h, rem = divmod(ms, 3600_000)
+    m, rem = divmod(rem, 60_000)
+    s, ms = divmod(rem, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
 def _maybe_whitelist(cues: list[dict], whitelist: bool) -> list[dict]:

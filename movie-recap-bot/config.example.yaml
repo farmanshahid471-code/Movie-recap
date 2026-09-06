@@ -1,53 +1,88 @@
-# Movie-Recaps-style summary bot — configuration
-# Copy to config.yaml and adjust. Values here are sensible defaults.
+# Movie Recap Bot — configuration template (copy to config.yaml and adjust).
+# Values here match the shipped defaults and are documented inline.
 
 project:
-  name: "recap-project"        # used to name output files/folders
+  name: "recap-project"     # used to name output files: <name>_<lang>.mp4
   output_dir: "output"
 
 language:
-  # en = English, zh = Simplified Chinese + mainland Mandarin (普通话)
-  # The pipeline currently produces separate videos per language.
-  target_languages: ["en", "zh"]
-  zh_variant: "zh-CN"          # language tag used by TTS / subtitles
+  # en = English (master). zh = Simplified Chinese (line-aligned translation).
+  # Add more languages by wiring them in recap/pipeline.py::_resolve_narration_lines.
+  target_languages: ["en"]
+  zh_variant: "zh-CN"
 
 narration:
-  # Movie-Recaps style: present tense, beat-by-beat storytelling.
-  # Keep sentences short; one per line so each maps to a subtitle cue.
-  words_target: 1400           # approximate narration word count (~10-13 min)
-  words_min: 500
-  words_max: 2600
-  # voice for each language (edge-tts neural voices)
+  # Full-length recap style (~10-16 min of speech at ~150 wpm).
+  words_target: 2000
+  words_min: 600
+  words_max: 4200
   lang_voice:
-    en: "en-US-ChristopherNeural"   # calm male narrator
-    zh: "zh-CN-YunxiNeural"         # male Mandarin narrator
-  tts_provider: "edge"         # edge | elevenlabs | openai
-  rate: "+0%"                  # edge-tts speaking rate, e.g. "+10%"
+    en: "en-US-ChristopherNeural"
+    zh: "zh-CN-YunxiNeural"
+  tts_provider: "edge"      # edge | elevenlabs | openai
+  rate: "+0%"
+
+# Step A1-A2 — Whisper ASR tuning (used when no .srt sits next to the movie).
+dialogue:
+  whisper_model: "small"    # tiny/base/small/medium/large-v3
+  whisper_device: "auto"    # auto | cpu | cuda
+  whisper_language: null    # e.g. "en"; null = auto-detect
+  word_timestamps: true     # per-word times in transcript.json
+  max_chars: null
+
+# Step A3 — contextual chunking (LLM context windows never overflow).
+chunking:
+  window_seconds: 300       # 5-minute logical blocks
+  overlap_seconds: 30       # 30s of carry between blocks
+  parallel: false           # true parallelizes chunk summaries (remote LLMs)
+
+# Step D — semantic timestamp mapping (recap line -> film moment).
+semantic:
+  enabled: true
+  embedding_model: "all-MiniLM-L6-v2"   # local, 384-dim
+  # vector store: auto | local | supabase
+  #   auto      -> Supabase when SUPABASE_URL + SUPABASE_SERVICE_KEY (or
+  #                SUPABASE_DB_URL) are set in .env, else a local SQLite store.
+  #   supabase  -> hosted Postgres + pgvector (apply migrations/001_pgvector.sql
+  #                once in the Supabase SQL editor).
+  store: "auto"
+  top_k: 3                  # candidates considered per line (de-duplicated)
+  min_score: 0.10           # below this the line falls back to even spacing
+  pre_roll: 0.5             # seconds of footage shown before the matched cue
+  clip_pad: 0.15            # extra footage after each narration line
+  min_clip: 0.8             # never cut a beat shorter than this
+  max_clip: 10.0            # nor longer than this
+  clip:
+    mode: "copy"            # copy = fast stream copy | reencode = frame-exact
 
 subtitles:
-  # Burned-in subtitles, in the language of each output video.
-  font: "Noto Serif CJK SC"    # covers both Latin + CJK glyphs
-  fontsize: 56                 # at 1080p
-  margin_v: 96                 # distance from bottom
-  margin_x: 40                 # left/right safe margin
+  font: "Noto Serif CJK SC" # covers Latin + CJK glyphs
+  fontsize: 56
+  margin_v: 96
+  margin_x: 40
   outline: 3
   shadow: 1
-  max_combo_duration: 6.0      # merge two short lines if together under this
-  line_width_units: 30         # ~30 CJK (or ~60 Latin) glyphs per line
-  display_lang: "en"           # language of the burned subtitle in each video
+  max_combo_duration: 6.0
+  line_width_units: 30      # ~30 CJK (or ~60 Latin) glyphs per line
+  display_lang: "en"
 
 video:
   fps: 30
   width: 1920
   height: 1080
-  concat_mode: "fit"           # "fit" narration length (loop/trim as needed)
+  concat_mode: "fit"
+  montage: "scenes"         # legacy engine only; semantic engine cuts real beats
+  scene_len: 6.0
+  scene_min_len: 2.0
+  scene_max_len: 20.0
+  scene_threshold: 27.0
   codec: "libx264"
   audio_codec: "aac"
-  bgm: ""                      # optional background music path (audio only)
+  bgm: ""
   bgm_volume: 0.12
 
 llm:
-  provider: ollama             # free & local (no key). Start `ollama serve`
-  model: qwen2.5               # `ollama pull qwen2.5`
-  base_url: "http://localhost:11434/v1"   # Ollama OpenAI-compatible endpoint
+  provider: ollama          # free, local, no key. Start `ollama serve`
+  model: qwen2.5            # `ollama pull qwen2.5`
+  base_url: "http://localhost:11434/v1"
   # Keys are read from environment (see .env.example)

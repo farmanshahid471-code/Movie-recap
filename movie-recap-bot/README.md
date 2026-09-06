@@ -1,19 +1,78 @@
-# Movie Recap Bot (EN + 简体中文)
+# Movie Recap Bot (EN first — semantic Step A-F engine)
 
-A pipeline that turns **a movie you own** into a short, continuously-narrated
-recap video in the style of the *Movie Recaps* YouTube channel — with
-burned-in subtitles and full narration voiceover, in **English** and
-**Simplified Chinese**.
+A pipeline that turns **a movie you own** into a full-length recap video in the
+style of the *Movie Recaps* YouTube channel (~10–16 minutes of continuously
+narrated, present-tense storytelling over the film's own footage) with
+burned-in subtitles and a full voiceover.
 
-It reproduces the format of the reference video:
+It reproduces the format of the reference channel videos:
 * fast, **present-tense**, beat-by-beat narration over a background montage
 * a single voiceover as the "dub" on top of the visual
 * **one sentence per subtitle cue**, timed to the narration
 * `title + thumbnail + description` recipe for each upload
 
+> **Status:** English is the primary output. Simplified Chinese (简体中文) is
+> supported through line-aligned translation (`--langs en,zh`); more languages
+> plug into `recap/pipeline.py::_resolve_narration_lines`.
+
 ---
 
-## How the flow works
+## 🎞️ The Step A-F semantic engine (recommended)
+
+The `auto` command implements the production workflow in six steps. It never
+lets the movie transcript overflow the LLM context window, and it chooses each
+visual beat of the final video by **semantic similarity** to the dialogue that
+inspired it.
+
+```
+movie.mp4
+ ├─ A. ffmpeg audio -> faster-whisper -> timestamped transcript (transcript.json/.srt)
+ │      -> 5-min chunks w/ 30s overlap  -> per-chunk "action" summaries (LLM)
+ ├─ B. summaries -> Qwen 2.5 -> STRICT JSON array of narration sentences
+ ├─ C. sentences -> TTS (edge) -> en.mp3 + sentence (+word) timestamps
+ ├─ D. embed transcript + script (all-MiniLM-L6-v2) -> pgvector store
+ │      -> cosine match per sentence -> the film moment for that story beat
+ ├─ E. ffmpeg loop: -ss/-to -> seg_NNN.mp4 (stream copy = fast, no re-encode)
+ └─ F. concat demuxer -> burn .ass subtitles -> mux narration -> <name>_en.mp4
+```
+
+### Run it
+
+```bash
+cd movie-recap-bot
+pip install -r requirements.txt            # + faster-whisper, sentence-transformers
+ollama serve                               # keep running
+ollama pull qwen2.5
+
+python -m recap.cli auto --movie "C:\Movies\my_movie.mp4" --minutes 14 --name my-recap
+```
+
+Step D vector store:
+
+| Store | When | Setup |
+|-------|------|-------|
+| **local** (SQLite fallback) | no Supabase credentials yet | nothing — exact same search logic |
+| **supabase** (pgvector) | `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` in `.env` | run `migrations/001_pgvector.sql` once in the SQL editor (or set `SUPABASE_DB_URL` and the pipeline bootstraps it) |
+
+Intermediates land in `output/<name>/_work/`: `transcript.json`/`.srt`,
+`chunks/`, `script/summaries.txt`, `script/script_en.json` (the sentence
+array), `script/script_en.txt`, `en.mp3`, `en.timing.json` (word-level when
+edge-tts provides it), `beats.json` (the semantic line→timestamp map) and
+`beats/seg_NNN.mp4` (the raw film cuts).
+
+Useful flags: `--minutes` (target length), `--langs en,zh`,
+`--subtitle movie.srt` (skip Whisper), `--whisper-model`,
+`--whisper-device auto|cpu|cuda`.
+
+> The extraction step is cached per movie file (`transcript.json` + a file
+> fingerprint) so EN/ZH runs don't transcribe twice. Delete it to force a
+> re-extract.
+
+---
+
+## How the flow works (classic 5-step engine)
+
+The legacy `run` command (used by Recap Studio) works like this:
 
 ```
   ┌────────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
@@ -68,6 +127,7 @@ flow:
 ```bash
 python -m recap.cli run \
   --storyboard \
+  --langs en,zh \
   --script-file inputs/text/script_en.txt \
   --zh-file inputs/text/script_zh.txt \
   --name pinocchio-recap
@@ -228,19 +288,29 @@ movie-recap-bot/
 ├── config.example.yaml         # documented template
 ├── requirements.txt
 ├── .env.example                # secrets template (copy to .env)
+├── migrations/
+│   └── 001_pgvector.sql        # Supabase schema for Step D (pgvector)
 ├── inputs/text/
 │   ├── plot_notes.txt          # sample plot summary (for LLM mode)
 │   ├── script_en.txt           # sample EN recap (one sentence/line)
 │   └── script_zh.txt           # sample 简体中文 translation (aligned)
+├── tests/
+│   ├── test_semantic_engine.py # chunking / JSON script / semantic matcher
+│   └── test_engine_integration.py  # full A-F orchestration (stubbed externals)
 └── recap/
     ├── cli.py                  # `python -m recap.cli` entry point
     ├── config.py               # YAML + env config loader
-    ├── script.py               # write/load the EN recap
-    ├── translate.py            # EN → 简体中文
-    ├── tts.py                  # narration + per-sentence timing
+    ├── dialogue.py             # audio rip + faster-whisper / .srt dialogue
+    ├── chunk.py                # Step A: contextual 5-min chunking (30s overlap)
+    ├── summarize.py            # Step A: per-chunk "action" summaries
+    ├── script.py               # Step B: JSON-array recap script (or load file)
+    ├── translate.py            # EN → 简体中文 (line-aligned)
+    ├── tts.py                  # Step C: narration + sentence/word timestamps
+    ├── match.py                # Step D: embeddings + pgvector/local cosine match
+    ├── clip.py                 # Step E/F: ffmpeg beat clipping + concat
     ├── subtitles.py            # SRT + ASS generation, CJK-aware wrap
-    ├── video.py                # montage, bgm, subtitle burn, mux
-    ├── pipeline.py             # orchestrates the 5 steps
+    ├── video.py                # bgm, subtitle burn, mux (shared assembly)
+    ├── pipeline.py             # orchestrates run() + auto_recap() (Steps A-F)
     └── util.py                 # ffmpeg/ffprobe helpers
 ```
 
@@ -264,3 +334,44 @@ for movie in $(ls ./incoming/*.mkv); do
   python -m recap.cli run --movie "$movie" --name "$(basename "$movie" .mkv)"
 done
 ```
+
+---
+
+## 🐳 Docker (package the whole codebase)
+
+The repo root ships `Dockerfile` (CLI), `Dockerfile.studio` (web control panel)
+and `docker-compose.yml` (Ollama + panel + optional CLI container):
+
+```bash
+docker compose up --build          # Ollama + Recap Studio on http://localhost:8080
+# headless CLI on demand:
+docker compose run --rm recap auto --movie /movies/my_movie.mp4 --minutes 14
+```
+
+Volumes: put movies you own in `./movies`, rendered clips land in `./output`,
+model weights cache in `./cache`. Pass `SUPABASE_URL` / `SUPABASE_SERVICE_KEY`
+as environment variables when your Supabase pgvector project is ready — until
+then the pipeline uses the built-in local vector store.
+
+## 🧪 Testing (no movie, no network, no ffmpeg needed)
+
+```bash
+python tests/test_semantic_engine.py     # chunking, JSON parsing, matching
+python tests/test_engine_integration.py  # full Steps A-F orchestration
+```
+
+## 🎛️ Tuning the semantic mapping (Step D)
+
+After a run, inspect `output/_work/beats.json`: every narration line lists the
+matched dialogue cue (`cue_idx`), the film timestamps to cut, the cosine
+`score`, and whether it fell back to even spacing (`fallback: true`). Adjust in
+`config.yaml`:
+
+* `semantic.min_score` — raise it if lines are matched to unrelated moments,
+  lower it if too many lines fall back.
+* `semantic.pre_roll` — seconds of footage before the matched cue (0.3–0.8s).
+* `semantic.clip.max_clip` — cap per-beat length so one shot never drags.
+* `semantic.clip.mode` — `copy` (fast, keyframe cuts) vs `reencode`
+  (frame-exact, slower).
+* `semantic.store` — `supabase` once your project is deployed (with
+  `migrations/001_pgvector.sql` applied once in the SQL editor).

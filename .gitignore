@@ -5,3 +5,9 @@ samplemovie/
 venv/
 __pycache__/
 *.pyc
+
+# local secrets — never commit .env files (Supabase keys, API keys)
+.env
+**/.env
+!.env.example
+**/.env.example

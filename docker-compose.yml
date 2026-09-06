@@ -1,0 +1,82 @@
+# Movie Recap — compose: Ollama (LLM) + Recap Studio panel (+ CLI container).
+#
+# Quick start:
+#   1. create a folder ./movies and drop a movie you own into it
+#   2. docker compose up --build
+#   3. open http://localhost:8080  (Recap Studio — set Movie path to /movies/<file>.mp4)
+#
+# Headless CLI instead:  docker compose run --rm recap auto --movie /movies/my_movie.mp4
+#   (the `recap` service runs on demand via the "cli" profile)
+#
+# Folders:
+#   ./movies  -> your owned movies, mounted read-only at /movies
+#   ./output  -> rendered mp4s + intermediates
+#   ./cache   -> whisper / embedding model weights (persisted between runs)
+#
+# Supabase (Step D pgvector): export SUPABASE_URL and SUPABASE_SERVICE_KEY (and
+# optionally SUPABASE_DB_URL) before `docker compose up` — they are passed
+# through. Until then the pipeline transparently uses the local vector store.
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: movie-recap-ollama
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "11434:11434"          # host access for local runs too
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  studio:
+    build:
+      context: .
+      dockerfile: Dockerfile.studio
+    container_name: movie-recap-studio
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434/v1
+      LLM_PROVIDER: ollama
+      MODEL_NAME: qwen2.5
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY:-}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL:-}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./movies:/movies:ro
+      - ./output:/srv/recap-studio/output
+      # Persist panel settings on the host (container-friendly defaults):
+      - ./recap-studio/config.docker.json:/srv/recap-studio/config.json
+      - model-cache:/cache
+
+  # Headless CLI runner (used on demand; not started by default):
+  recap:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["cli"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434/v1
+      LLM_PROVIDER: ollama
+      MODEL_NAME: qwen2.5
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY:-}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL:-}
+    volumes:
+      - ./movies:/movies:ro
+      - ./output:/app/output
+      - model-cache:/cache
+    command: ["--help"]
+
+volumes:
+  ollama-models:
+  model-cache:
