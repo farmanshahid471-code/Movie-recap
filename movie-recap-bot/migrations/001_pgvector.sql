@@ -4,21 +4,21 @@
 -- Run this ONCE in the Supabase SQL editor (or the pipeline auto-runs it when
 -- SUPABASE_DB_URL is configured). It creates:
 --   1. the pgvector extension
---   2. jsonb -> vector casts (so the REST API can insert embeddings as arrays)
---   3. transcript_cues      — every dialogue cue of the movie, embedded
---   4. match_cues()         — the RPC the pipeline calls per narration line
+--   2. transcript_cues      — every dialogue cue of the movie, embedded
+--   3. match_cues()         — the RPC the pipeline calls per narration line
+--
+-- NOTE ON CASTS: no json/jsonb -> vector casts are needed here. The pipeline
+-- talks to Supabase through the PostgREST API (like supabase-js does) and
+-- sends embeddings as plain JSON arrays, which PostgREST accepts directly for
+-- vector columns and vector function arguments (see the official Supabase
+-- vector docs). Hosted Supabase additionally *blocks* custom casts on built-in
+-- types ("ERROR 42501: must be owner of type json or type vector"), so they
+-- cannot be created anyway — do not add them back.
 --
 -- NOTE: embeddings come from all-MiniLM-L6-v2, which produces 384 dimensions.
 -- If you switch embedding models, recreate the table with the right vector size.
 
 create extension if not exists vector;
-
--- PostgREST (the Supabase REST API) sends JSON arrays for vector columns and
--- function arguments. pgvector has no implicit json/jsonb -> vector cast, so
--- inserts/RPC calls would fail with "column is of type vector but expression
--- is of type jsonb". These inout casts fix that; harmless to re-run.
-create cast (json as vector)  with inout as implicit;
-create cast (jsonb as vector) with inout as implicit;
 
 drop table if exists public.transcript_cues;
 create table public.transcript_cues (

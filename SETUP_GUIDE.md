@@ -80,12 +80,17 @@ Expected result: `Success. No rows returned`.
 That file creates, in one shot:
 
 - the `vector` extension,
-- two `jsonb/json -> vector` casts (without these, the REST API rejects
-  embedding inserts with *"expression is of type jsonb"*),
 - the `transcript_cues` table (`idx`, `text`, `start_ms`, `end_ms`,
   `session`, `embedding vector(384)`) with an HNSW cosine index,
 - the `match_cues(query_embedding, match_count, match_threshold,
   session_name)` RPC the pipeline calls for every narration line.
+
+> **Why no `json -> vector` casts?** Newer hosted Supabase blocks custom casts
+> on built-in types (`ERROR 42501: must be owner of type json or type
+> vector`), and they are not needed: the pipeline inserts embeddings as plain
+> JSON arrays through the PostgREST API, which accepts them directly for
+> vector columns/arguments — the same mechanism supabase-js uses in the
+> official Supabase vector docs.
 
 > **Re-running is safe.** It drops and recreates the table. The pipeline
 > clears the table at the start of each movie run anyway, so there is never
@@ -351,7 +356,7 @@ docker compose down -v     # ALSO delete Ollama model + cache volumes (re-downlo
 |---|---|
 | `[X] No Supabase credentials found` (verify script) | Fill `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` in `movie-recap-bot\.env` and re-run. |
 | `PGRST202 ... could not find function public.match_cues` | You didn't run the migration, or it errored midway. Re-paste `001_pgvector.sql` in the SQL Editor and Run. |
-| `column "embedding" is of type vector but expression is of type jsonb` | Old schema without the casts. Re-run the migration (or just its two `create cast ... as implicit;` lines). |
+| `column "embedding" is of type vector but expression is of type jsonb` | You are inserting over REST with a non-array JSON value. The pipeline sends real arrays (fine); this error usually means the migration never ran or you are testing with a hand-built request. Re-run `001_pgvector.sql`. |
 | `401/403` on insert or RPC | Wrong key. Use the **service_role** key (not anon), copy the whole `eyJ...` value with no spaces. |
 | `invalid input syntax for type vector` / dimension errors | All rows must be exactly 384 floats. If you changed `embedding_model` in config, recreate the table at the new dimension (edit the `vector(384)` in the migration to match). |
 | RPC returns nothing even though rows exist | Check the `session` filter — the pipeline inserts with `session='default'` and queries the same. If you ever add session tagging, keep them in sync. |
