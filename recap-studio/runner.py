@@ -99,7 +99,9 @@ JOB_STATE: dict = {
 # --------------------------------------------------------------------------
 # Everything is ALSO written to this file so a run can be inspected even when
 # the browser Console or the launcher window is unhelpful.
-STUDIO_LOG = STUDIO_DIR / "studio.log"
+# RECAP_LOG_DIR points it at a non-C: folder when set (see storage policy).
+_LOG_DIR = os.environ.get("RECAP_LOG_DIR")
+STUDIO_LOG = Path(_LOG_DIR) / "studio.log" if _LOG_DIR else STUDIO_DIR / "studio.log"
 
 
 def _log(msg: str) -> None:
@@ -109,6 +111,7 @@ def _log(msg: str) -> None:
         if len(LOG_BUFFER) > MAX_LOG_LINES:
             del LOG_BUFFER[: len(LOG_BUFFER) - MAX_LOG_LINES]
     try:
+        STUDIO_LOG.parent.mkdir(parents=True, exist_ok=True)
         with open(STUDIO_LOG, "a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
     except OSError:

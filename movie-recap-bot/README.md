@@ -249,12 +249,28 @@ You can also swap the **TTS provider** via `TTS_PROVIDER`/`.env`:
 `edge` (free, default) · `elevenlabs` · `openai`. `eleven_multilingual_v2`
 and OpenAI `tts-1` both support Chinese.
 
+### 📁 Storage — keep everything off the C: drive
+
+Two settings control where **every** byte goes; both accept absolute paths, so
+nothing has to live on C::
+
+| Setting (config.yaml / .env) | Holds | Example |
+|---|---|---|
+| `project.output_dir` / `OUTPUT_DIR` | final videos + `_work/` | `D:\recap\output` |
+| `project.cache_dir` / `CACHE_DIR` | model weights (Whisper/HF), static-ffmpeg, temp | `D:\recap\cache` |
+
+Leave `cache_dir: ""` and the cache auto-places itself next to `output_dir`
+(same drive). At startup the engine also re-points `HF_HOME`,
+`WHISPER_CACHE_DIR`, `STATIC_FFMPEG_CACHE_DIR` and the Python `TEMP` at the
+cache root, so the heavy downloads never touch `C:\Users\...`. See
+`.env.example` and `SETUP_GUIDE.md → PART 0`.
+
 ---
 
 ## Outputs & re-use
 
-`output/<name>_<lang>.mp4` is your deliverable. For maximum flexibility the
-pipeline keeps intermediates in `output/_work/`:
+`output/<name>_<lang>.mp4` is your deliverable (`output` = `project.output_dir`).
+For maximum flexibility the pipeline keeps intermediates in `output/_work/`:
 
 * `en.mp3`, `zh.mp3` — narration audio
 * `en.srt`, `zh.srt` — standard subtitles

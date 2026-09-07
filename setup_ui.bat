@@ -27,6 +27,27 @@ echo  ==========================================
 echo.
 
 :: ---------------------------------------------------------
+:: 0. Data location -- keep EVERY byte off the C: drive
+:: ---------------------------------------------------------
+:: All outputs, model weights, ffmpeg binaries, pip cache and temp files go
+:: under RECAP_DATA. Defaults to D:\recap-data when a D: drive exists; edit
+:: RECAP_DATA below if your big drive has another letter.
+set "RECAP_DATA=D:\recap-data"
+if not exist "D:\nul" set "RECAP_DATA=%ROOT%\.recap-data"
+if not exist "%RECAP_DATA%" mkdir "%RECAP_DATA%"
+if not exist "%RECAP_DATA%\cache" mkdir "%RECAP_DATA%\cache"
+if not exist "%RECAP_DATA%\tmp"   mkdir "%RECAP_DATA%\tmp"
+set "TEMP=%RECAP_DATA%\tmp"
+set "TMP=%RECAP_DATA%\tmp"
+set "PIP_CACHE_DIR=%RECAP_DATA%\pip-cache"
+set "CACHE_DIR=%RECAP_DATA%\cache"
+set "STATIC_FFMPEG_CACHE_DIR=%RECAP_DATA%\cache\static-ffmpeg"
+set "HF_HOME=%RECAP_DATA%\cache\huggingface"
+set "WHISPER_CACHE_DIR=%RECAP_DATA%\cache\whisper"
+set "RECAP_LOG_DIR=%RECAP_DATA%"
+echo  Data root : %RECAP_DATA%   (nothing is stored on the C: drive)
+
+:: ---------------------------------------------------------
 :: 1. Find a Python interpreter (py launcher first, then python)
 :: ---------------------------------------------------------
 set "PY="
@@ -76,19 +97,14 @@ if not defined MISSING (
 echo.
 
 :: ---------------------------------------------------------
-:: 3. Verify ffmpeg / ffprobe (static-ffmpeg fetches them on first use)
+:: 3. Verify ffmpeg / ffprobe (static-ffmpeg fetches them into the data root)
 :: ---------------------------------------------------------
-%PY% -c "import static_ffmpeg; static_ffmpeg.add_paths(); import shutil,sys; sys.exit(0 if shutil.which('ffmpeg') else 1)" >nul 2>&1
+%PY% recap-studio\tools\ensure_ffmpeg.py
 if not errorlevel 1 (
-    echo  [OK] ffmpeg available via static-ffmpeg.
+    echo  [OK] ffmpeg + ffprobe ready (binaries kept in %RECAP_DATA%, not C:).
 ) else (
-    where ffmpeg >nul 2>&1
-    if errorlevel 1 (
-        echo  [!] ffmpeg not found yet - static-ffmpeg downloads it on the
-        echo      first render, so keep an internet connection available.
-    ) else (
-        echo  [OK] ffmpeg found on PATH.
-    )
+    echo  [!] ffmpeg unavailable right now - setup continues; the first render
+    echo      will fetch it (keep an internet connection available).
 )
 echo.
 

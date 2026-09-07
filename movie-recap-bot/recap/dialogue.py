@@ -9,6 +9,7 @@ Returns a timestamped transcript in a compact text form the LLM can read.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Iterable
@@ -195,7 +196,10 @@ def _openai_whisper(
 ) -> list[dict]:
     import whisper  # type: ignore
 
-    model = whisper.load_model(model_size)
+    # Keep the ~GB model weights off the OS user profile: bootstrap() points
+    # WHISPER_CACHE_DIR at the configured cache root (see recap/storage.py).
+    download_root = os.environ.get("WHISPER_CACHE_DIR") or None
+    model = whisper.load_model(model_size, download_root=download_root)
     out = model.transcribe(
         str(audio),
         language=language,

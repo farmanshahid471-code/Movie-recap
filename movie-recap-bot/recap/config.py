@@ -8,10 +8,12 @@ from typing import Any
 
 import yaml
 
+from . import storage
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 _DEFAULTS: dict[str, Any] = {
-    "project": {"name": "recap-project", "output_dir": "output"},
+    "project": {"name": "recap-project", "output_dir": "output", "cache_dir": ""},
     "language": {"target_languages": ["en"], "zh_variant": "zh-CN"},
     "narration": {
         "words_target": 2000,      # ~13-14 min at ~150 wpm (full-length recap)
@@ -162,16 +164,39 @@ def load_config(path: str | Path | None = None) -> dict:
         langs.append({"code": lang, "tag": tag})
     cfg["language"]["_resolved"] = langs
 
-    # Resolve output dir absolute
+    # Output root: env OUTPUT_DIR > config project.output_dir > default.
+    # Relative paths resolve against the bot folder; absolute paths (e.g.
+    # "D:\\recap\\output") are honored verbatim so nothing has to live on C:.
+    if os.environ.get("OUTPUT_DIR"):
+        cfg["project"]["output_dir"] = os.environ["OUTPUT_DIR"]
     out = Path(cfg["project"]["output_dir"])
-    cfg["project"]["_out"] = (BASE_DIR / out).resolve()
-    cfg["project"]["_base"] = BASE_DIR
+    out_abs = out if storage.is_abs(out) else BASE_DIR / out
+    cfg["project"]["_out"] = out_abs.resolve()
+
+    # Cache root: env CACHE_DIR > config project.cache_dir > sibling "cache"
+    # folder of the output root (so all data follows output_dir's drive).
+    if os.environ.get("CACHE_DIR"):
+        cfg["project"]["cache_dir"] = os.environ["CACHE_DIR"]
+    raw_cache = (cfg["project"].get("cache_dir") or "").strip()
+    if raw_cache:
+        cache = Path(raw_cache)
+        if not storage.is_abs(cache):
+            cache = BASE_DIR / cache
+    else:
+        cache = out_abs.resolve().parent / "cache"
+    cfg["project"]["_cache"] = cache.resolve()
+    storage.bootstrap(cfg["project"]["_cache"])
+
     cfg["project"]["name"] = cfg["project"].get("name", "recap-project")
     return cfg
 
 
 def out_dir(cfg: dict) -> Path:
     return Path(cfg["project"]["_out"])
+
+
+def cache_dir(cfg: dict) -> Path:
+    return Path(cfg["project"]["_cache"])
 
 
 def work_dir(cfg: dict) -> Path:

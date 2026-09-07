@@ -1,7 +1,13 @@
 # Active config (Step A-F semantic engine; EN first, languages plug in later)
 project:
   name: "recap"            # used to name output files: <name>_<lang>.mp4
+  # Where final videos + _work intermediates go. Absolute paths are fine and
+  # recommended so nothing is written to the C: drive, e.g. "D:\\recap\\output"
+  # (a relative path resolves against this bot folder). Env override: OUTPUT_DIR
   output_dir: "output"
+  # Where model weights / ffmpeg binaries / scratch go. Leave "" (default) and
+  # the cache lives next to output_dir (same drive). Env override: CACHE_DIR
+  cache_dir: ""
 
 language:
   # en = English (master). zh = Simplified Chinese (line-aligned translation).

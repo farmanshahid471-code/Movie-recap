@@ -11,3 +11,10 @@ __pycache__/
 **/.env
 !.env.example
 **/.env.example
+
+# generated run output / media (recreated on each run; never commit)
+movie-recap-bot/output/
+recap-studio/output/
+scenes_out/
+movie-recap-bot/cache/
+recap-studio/cache/

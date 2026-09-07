@@ -3,7 +3,13 @@
 
 project:
   name: "recap-project"     # used to name output files: <name>_<lang>.mp4
+  # Final videos + _work intermediates. Absolute paths are fine and recommended
+  # to keep everything off the C: drive, e.g. "D:\\recap\\output"
+  # (relative resolves against this bot folder). Env override: OUTPUT_DIR
   output_dir: "output"
+  # Model weights / ffmpeg binaries / scratch. Leave "" and the cache sits next
+  # to output_dir, so all data follows the same drive. Env override: CACHE_DIR
+  cache_dir: ""
 
 language:
   # en = English (master). zh = Simplified Chinese (line-aligned translation).

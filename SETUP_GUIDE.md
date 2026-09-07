@@ -29,6 +29,47 @@ locally, or follow Part 2 if you want the Docker flow — you can also do both
 
 ---
 
+# PART 0 — Keep everything off the C: drive (small-C: / slow-PC setup)
+
+If your C: drive is short on space (or you simply don't want build data on it),
+every byte this app persists can live on another drive. Nothing is hard-coded
+to C: — outputs, model weights, ffmpeg binaries and scratch all follow two
+settings.
+
+**The two roots (env or config):**
+
+| Setting | Holds | Example |
+|---|---|---|
+| `project.output_dir` (env `OUTPUT_DIR`) | final `<name>_<lang>.mp4` + `_work/` | `D:\recap\output` |
+| `project.cache_dir` (env `CACHE_DIR`) | Whisper / HuggingFace model weights, static-ffmpeg binaries, temp | `D:\recap\cache` (leave `""` in config.yaml to auto-place it next to `output_dir`) |
+
+Absolute paths are supported in `config.yaml` (see `movie-recap-bot/config.yaml`)
+or `movie-recap-bot/.env` (template: `.env.example`). At startup the code also
+re-points the library caches (`HF_HOME`, `WHISPER_CACHE_DIR`,
+`STATIC_FFMPEG_CACHE_DIR`, Python `TEMP`) at the cache root automatically.
+
+**Fastest path (Studio UI):** just keep the project on a non-C drive and run
+`setup_ui.bat` — it now sets `RECAP_DATA=D:\recap-data` (edit the letter at the
+top of the file if your big drive is different) and routes pip cache, temp,
+ffmpeg binaries and the studio log there. Panel outputs already default to
+`D:\recap` (`recap-studio/config.json → output_dir`).
+
+**Three things only you can move (not the code):**
+
+1. **Python + installed packages** (biggest C: user — torch/whisper stacks are
+   several GB). On a fresh setup, install Python itself **on D:** and then
+   `python -m pip install ...` lands there too. Moving an existing install is
+   possible but easiest done by reinstalling on D:.
+2. **Ollama model weights** (several GB per model). Stop Ollama, then set the
+   env var **`OLLAMA_MODELS`** to e.g. `D:\recap-data\ollama` and start Ollama
+   again — new pulls go there. Existing weights can be copied from
+   `%USERPROFILE%\.ollama\models` into that folder (or just re-pull with
+   `ollama pull qwen2.5:3b` and `ollama rm qwen2.5` to drop the old copy).
+3. **System ffmpeg** if you installed one — install it on D:. Without a system
+   ffmpeg the code downloads static binaries into the cache root on D: instead.
+
+---
+
 # PART 1 — Supabase pgvector
 
 ## 1.1 Create the Supabase project
@@ -387,3 +428,8 @@ docker compose down -v     # ALSO delete Ollama model + cache volumes (re-downlo
 | Recap sentence array | `output\_work\script\script_en.json` | same |
 | Transcript | `output\_work\transcript.json` / `.srt` | same |
 | Supabase rows | `public.transcript_cues` | same database |
+
+All local paths above sit under `project.output_dir` (env `OUTPUT_DIR`) —
+absolute paths like `D:\recap\output` work everywhere; model caches follow
+`project.cache_dir` (env `CACHE_DIR`, default: sibling `cache/` of the output
+dir). See PART 0 above.
