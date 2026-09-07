@@ -55,18 +55,15 @@ Movie-recap/
 │   └── tools/                ← ensure_ffmpeg / portcheck / shutdown helpers
 │
 ├── setup_ui.bat / stop_ui.bat   ← Windows one-click open/close
-├── Dockerfile (CLI) / Dockerfile.studio (panel) / docker-compose.yml
-├── SETUP_GUIDE.md            ← Supabase + Docker setup, storage policy, troubleshooting
-│
-└── (legacy / leftovers, not part of the engine)
-    ├── movie-narrator-jobs/  ← configs for a DIFFERENT 3rd-party tool (zcbacxc/movie-narrator)
-    ├── demo/, uploads/, sdtest/, output/Sample Movie/, recap-studio/autovideo/
+├── Dockerfile (CLI) / Dockerfile.studio (panel) / docker-compose.yml  ← optional (container users only)
+├── SETUP_GUIDE.md            ← storage policy + legacy Supabase/Docker notes, troubleshooting
 ```
 
-**Important:** `movie-narrator-jobs/` and `.movie-narrator/.env` belong to an unrelated
-external pip package (`movie-narrator`), kept as historical reference. They are **not**
-used by any code in this repo. `demo/`, `uploads/`, `sdtest/`, `autovideo/` and
-`output/Sample Movie/` are stale test artifacts.
+**Important:** Earlier snapshots of this repo shipped `.movie-narrator/` and
+`movie-narrator-jobs/` (configs for an unrelated 3rd-party pip package) plus
+stale demo artifacts (`demo/`, `uploads/`, `sdtest/`, `output/Sample Movie/`,
+`recap-studio/autovideo/`). None of them were used by any code in this repo
+and they have been removed.
 
 ---
 

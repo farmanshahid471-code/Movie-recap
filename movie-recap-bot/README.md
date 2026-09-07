@@ -40,7 +40,7 @@ movie.mp4
         -> <name>_<lang>.mp4
 ```
 
-### Run it (DeepSeek)
+### Run it locally (no Docker needed)
 
 ```bash
 cd movie-recap-bot
@@ -49,6 +49,17 @@ pip install -r requirements.txt            # + faster-whisper (auto-recap needs 
 
 python -m recap.cli auto --movie "C:\Movies\my_movie.mp4" --minutes 14 --name my-recap
 ```
+
+**Windows one-click alternative:** open Recap Studio instead — double-click
+`..\setup_ui.bat` (it installs missing deps, fetches ffmpeg, and opens the
+panel at http://localhost:8080), paste the DeepSeek key under **Settings →
+LLM**, set the movie path, and press **Generate**. Everything stays on your
+machine; no Docker, no containers.
+
+> Slow PC tip (e.g. older laptops/desktops): the only heavy local step is
+> Whisper transcription. Drop a `.srt` next to the movie (or use
+> `--subtitle movie.srt`) and Whisper is skipped entirely — the rest of the
+> pipeline only needs internet for DeepSeek + the free edge-tts voice servers.
 
 Intermediates land in `output/<name>/_work/`: `transcript.json`/`.srt`,
 `chunks/`, `script/summaries.txt`, `script/script_en.json` (the sentence
@@ -360,11 +371,12 @@ done
 
 ---
 
-## 🐳 Docker (package the whole codebase)
+## 🐳 Docker (optional — not needed to run locally)
 
-The repo root ships `Dockerfile` (CLI), `Dockerfile.studio` (web control panel)
-and `docker-compose.yml` (Recap Studio + headless CLI container), all wired to
-the **DeepSeek API**:
+Everything above runs on a normal local Python install; containers are only
+for people who prefer Docker. The repo ships `Dockerfile` (CLI),
+`Dockerfile.studio` (web control panel) and `docker-compose.yml` (Recap Studio
++ headless CLI container), all wired to the **DeepSeek API**:
 
 ```bash
 export DEEPSEEK_API_KEY=sk-...            # required by docker compose

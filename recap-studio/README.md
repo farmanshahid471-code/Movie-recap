@@ -26,7 +26,11 @@ Dashboard-style panel:
 
 ---
 
-## Install / run
+## Install / run (local Python — no Docker required)
+
+Recap Studio is a normal local Python app: install the deps once, run it, and
+it talks to DeepSeek over the internet. Containers are an optional extra (see
+`../docker-compose.yml`); you do not need them.
 
 ### Windows — one click
 
@@ -48,7 +52,9 @@ python recap-studio/app.py                      # listens on 0.0.0.0:8080
 python recap-studio/app.py --port 9000 --open-browser
 ```
 
-Open <http://localhost:8080>.
+Open <http://localhost:8080>, then paste your DeepSeek key under
+**Settings → LLM** (it is saved in `config.json`; alternatively set
+`DEEPSEEK_API_KEY` in `../movie-recap-bot/.env` and it is picked up too).
 
 > The server itself is stdlib-only, so nothing to install for the UI. `ffmpeg` is
 > resolved automatically through `static-ffmpeg` (it downloads its binaries on
@@ -255,4 +261,5 @@ when length matters.
   the wrong (sample) narration. Only the **legacy** engine falls back to the bundled
   sample scripts (`../movie-recap-bot/inputs/text/`).
 - Use only footage you own / are licensed to use. Edge-TTS is for personal/non-commercial
-  testing; for a monetized channel switch TTS backend (see `movie-narrator` docs).
+  testing; for a monetized channel, check edge-tts' usage terms or switch `TTS_PROVIDER`
+  to a commercial backend (`openai` / `elevenlabs`) in Settings.
