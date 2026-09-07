@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Protocol
 
@@ -72,8 +73,30 @@ class EdgeTTS:
         self.rate = rate
 
     def synthesize(self, sentences: list[str], voice: str, out_mp3: Path) -> list[TimedCue]:
-        asyncio.run(self._sync(sentences, voice, out_mp3))
-        return self._timing
+        """Synthesize with a few automatic retries for transient network faults.
+
+        edge-tts talks to Microsoft's speech servers (speech.platform.bing.com),
+        so a flaky DNS or a dropped connection mid-stream aborts the call. We
+        retry a handful of times with a short backoff; only a persistent failure
+        is surfaced, as an actionable message.
+        """
+        import time
+
+        last: Exception | None = None
+        attempts = int(os.environ.get("TTS_RETRIES", "3"))
+        for attempt in range(max(1, attempts)):
+            try:
+                asyncio.run(self._sync(sentences, voice, out_mp3))
+                return self._timing
+            except Exception as exc:  # network blips surface as aiohttp/OSErrors
+                last = exc
+                if not _edge_retryable(exc) or attempt >= max(1, attempts) - 1:
+                    break
+                wait = 2.0 * (attempt + 1)
+                print(f"  * edge TTS attempt {attempt + 1} failed "
+                      f"({type(exc).__name__}) — retrying in {wait:.0f}s ...", flush=True)
+                time.sleep(wait)
+        raise TTSError(_edge_friendly(str(last or "unknown error")))
 
     async def _sync(self, sentences: list[str], voice: str, out_mp3: Path) -> None:
         text = "\n".join(sentences)          # sentence separators -> natural pauses
@@ -102,6 +125,38 @@ class EdgeTTS:
 
     # populated by _sync
     _timing: list[TimedCue] = []
+
+
+def _edge_retryable(exc: Exception) -> bool:
+    """True when an edge-tts error is a transient network/DNS problem worth retrying."""
+    s = str(exc)
+    markers = (
+        "getaddrinfo", "Cannot connect", "ClientConnector", "Connection reset",
+        "Connection aborted", "Timeout", "timed out", "Name or service not known",
+        "Temporary failure in name resolution", "OSError", "Server disconnected",
+        "EOF occurred in violation",
+    )
+    return any(m.lower() in s.lower() for m in markers)
+
+
+def _edge_friendly(msg: str) -> str:
+    """Turn a raw edge-tts error into an actionable message."""
+    if any(k in msg.lower() for k in ("getaddrinfo", "name or service not known",
+                                       "temporary failure in name resolution",
+                                       "cannot connect to host")):
+        return (
+            "edge TTS could not reach Microsoft's voice servers "
+            "(speech.platform.bing.com) — DNS/network failure. This is usually "
+            "temporary. Try:\n"
+            "  1. Just re-run: completed steps resume, only TTS re-runs.\n"
+            "  2. ipconfig /flushdns   then re-run.\n"
+            "  3. If it persists, your ISP/VPN/firewall may be blocking that "
+            "host — switch TTS_PROVIDER (e.g. openai with a key) or retry later."
+        )
+    return (
+        "edge TTS failed: " + msg[:400] + "\n"
+        "  Tip: re-run to retry — everything before TTS is cached and resumes."
+    )
 
 
 def _build_cues(bounds: list[tuple[float, float, str]], sentences: list[str]) -> list[TimedCue]:

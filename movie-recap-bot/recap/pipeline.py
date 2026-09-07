@@ -11,9 +11,15 @@ Two engines:
   chunk summarization -> JSON-array script -> TTS with timing -> semantic
   timestamp mapping (pgvector) -> ffmpeg clipping -> final assembly.
   Used by the ``auto`` CLI command.
+
+Interrupted runs resume: transcript, chunk summaries, the generated script,
+the narration and the final renders are all gated by content-signature marker
+files under ``_work``, so a network or power failure never forces a re-run of
+the expensive steps that already finished.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -22,6 +28,32 @@ from . import (chunk, clip, dialogue, llm, match, scenes, script, subtitles,
 from .config import out_dir, work_dir
 from .dialogue import DialogueError
 from .util import count_words, probe_duration
+
+
+def _sig(*parts: object) -> str:
+    """Short content signature over the inputs that shape an expensive step."""
+    h = hashlib.sha1()
+    for p in parts:
+        s = p if isinstance(p, str) else json.dumps(p, ensure_ascii=False, sort_keys=True)
+        h.update(s.encode("utf-8", "replace"))
+        h.update(b"\x00")
+    return h.hexdigest()[:20]
+
+
+def _marker_ok(marker: Path, sig: str) -> bool:
+    try:
+        return marker.exists() and json.loads(
+            marker.read_text(encoding="utf-8")
+        ).get("sig") == sig
+    except Exception:
+        return False
+
+
+def _write_marker(marker: Path, sig: str) -> None:
+    try:
+        marker.write_text(json.dumps({"sig": sig}), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _get_plot(cfg: dict, workdir: Path) -> str:
@@ -450,26 +482,47 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
     # ------------------------------------------------------------- Step B
     print("== Step B: Script generation (JSON array of sentences) ==")
     llm.verify_model(cfg["llm"])   # fail fast if the main model is missing
-    if (cfg["llm"].get("provider") or "").lower() == "ollama":
-        print("  * (writing the full script is one long LLM call — on CPU this "
-              "can take 10-40 min; no output until it returns. Speed up with "
-              "MODEL_NAME=qwen2.5:3b in .env, or switch to deepseek.)")
     nar = cfg["narration"]
     target = int(nar.get("words_target", 2000))
     mn = int(nar.get("words_min", 600))
     mx = int(nar.get("words_max", 4200))
-    sentences = script.generate_script_json(merged, cfg["llm"], target, mn, mx)
-    if len(sentences) < 10:
-        raise DialogueError(
-            f"LLM returned only {len(sentences)} sentences — the recap looks "
-            "broken. Retry with a larger model or check the Ollama context."
+
+    # Resume: reuse the existing script when the summaries + LLM settings are
+    # unchanged (e.g. the previous run failed later at TTS). The signature
+    # covers the LLM provider/model too, so switching models regenerates.
+    b_marker = tdir / "script_en.marker.json"
+    b_sig = _sig(merged, cfg["llm"].get("provider"), cfg["llm"].get("model"), target)
+    if _marker_ok(b_marker, b_sig) and (tdir / "script_en.json").exists():
+        try:
+            sentences = json.loads((tdir / "script_en.json").read_text(encoding="utf-8"))
+        except Exception:
+            sentences = []
+        if sentences:
+            print(f"  * Reusing existing EN script ({len(sentences)} sentences — "
+                  f"matches this movie/summaries/LLM). Delete script_en.json + "
+                  f"script_en.marker.json to force a new script.")
+        else:
+            sentences = None
+    else:
+        sentences = None
+    if sentences is None:
+        if (cfg["llm"].get("provider") or "").lower() == "ollama":
+            print("  * (writing the full script is one long LLM call — on CPU this "
+                  "can take 10-40 min; no output until it returns. Speed up with "
+                  "MODEL_NAME=qwen2.5:3b in .env, or switch to deepseek.)")
+        sentences = script.generate_script_json(merged, cfg["llm"], target, mn, mx)
+        if len(sentences) < 10:
+            raise DialogueError(
+                f"LLM returned only {len(sentences)} sentences — the recap looks "
+                "broken. Retry with a larger model or check the Ollama context."
+            )
+        script.write_script_file("\n".join(sentences), tdir / "script_en.txt")
+        (tdir / "script_en.json").write_text(
+            json.dumps(sentences, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-    script.write_script_file("\n".join(sentences), tdir / "script_en.txt")
-    (tdir / "script_en.json").write_text(
-        json.dumps(sentences, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    print(f"  * EN recap: {len(sentences)} sentences, "
-          f"{count_words(' '.join(sentences))} words (script_en.json/.txt)")
+        _write_marker(b_marker, b_sig)
+        print(f"  * EN recap: {len(sentences)} sentences, "
+              f"{count_words(' '.join(sentences))} words (script_en.json/.txt)")
 
     # ------------------------------------------------ Step C (narration)
     print("== Step C: Voiceover (TTS) ==")
@@ -480,10 +533,36 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
     for code in codes:
         voice = lang_voice.get(code) or lang_voice.get("en", "en-US-ChristopherNeural")
         lines = _resolve_narration_lines(cfg, code, sentences, wd)
+        mp3 = wd / f"{code}.mp3"
+        tj = wd / f"{code}.timing.json"
+        # Resume: skip re-narrating when the mp3 + timing exist for these exact
+        # lines/voice/provider (e.g. a run that failed later in clipping).
+        c_marker = wd / f".nar_{code}.marker.json"
+        c_sig = _sig(lines, voice, tts_cfg.get("tts_provider", "edge"),
+                     tts_cfg.get("rate", "+0%"))
+        if _marker_ok(c_marker, c_sig) and mp3.exists() and tj.exists():
+            try:
+                cues = [
+                    tts.TimedCue(
+                        d.get("text", ""), float(d.get("start", 0.0)),
+                        float(d.get("end", 0.0)),
+                        [(w["word"], float(w["start"]), float(w["end"]))
+                         for w in d.get("words") or []],
+                    )
+                    for d in json.loads(tj.read_text(encoding="utf-8"))
+                ]
+            except Exception:
+                cues = []
+            if cues:
+                audios[code] = (mp3, cues)
+                print(f"  * Reusing narration {code} ({voice}) — {len(cues)} lines "
+                      f"already narrated. Delete {code}.mp3 to re-narrate.")
+                continue
         print(f"  * Narrating {code} ({voice}) — {len(lines)} lines ...")
         audios[code] = tts.synthesize_language(
             lines, {"code": code, "voice": voice}, wd, prov, False
         )
+        _write_marker(c_marker, c_sig)
         print(f"    -> {audios[code][0]}  ({audios[code][1][-1].end:.1f}s total)")
 
     # ------------------------------------------------ Step D (semantic map)
@@ -525,6 +604,20 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
 
     results: list[Path] = []
     for code, (mp3, cues_t) in audios.items():
+        out_mp4 = outd / f"{name}_{code}.mp4"
+        # Resume: if the final render already exists for these exact inputs
+        # (narration + beats + movie + subtitle/assembly settings), skip the
+        # expensive ffmpeg clipping + burn entirely.
+        ef_marker = wd / f".render_{code}.marker.json"
+        ef_sig = _sig(
+            str(out_mp4), [c.as_dict() for c in cues_t], beats,
+            str(movie.resolve()), clip_mode, dict(cfg.get("subtitles", {})),
+            vcfg.get("bgm", ""), float(vcfg.get("bgm_volume", 0.12)),
+        )
+        if _marker_ok(ef_marker, ef_sig) and out_mp4.exists() and out_mp4.stat().st_size > 0:
+            results.append(out_mp4)
+            print(f"  * Reusing existing render {out_mp4.name}. Delete it to re-render.")
+            continue
         lines = [c.text for c in cues_t]
         anchors = _anchors_for_lines(beats or [], len(lines))
         if not anchors:
@@ -558,6 +651,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         ass = wd / f"{code}.ass"
         out_mp4 = outd / f"{name}_{code}.mp4"
         video.burn_and_mux(base, mp3, ass, out_mp4, vcfg)
+        _write_marker(ef_marker, ef_sig)
         results.append(out_mp4)
         print(f"  + {out_mp4}  ({probe_duration(out_mp4):.1f}s)")
 
