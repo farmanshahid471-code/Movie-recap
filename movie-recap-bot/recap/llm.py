@@ -125,9 +125,16 @@ def verify_model(cfg_llm: dict) -> None:
             f"  Pull the model:  ollama pull {model}"
         ) from exc
     ids = {m.get("id", "") for m in data.get("data", [])}
-    if model not in ids:
+    # Ollama reports pulled models as "<name>:latest" on the OpenAI-compatible
+    # endpoint while the config may say "qwen2.5" — the same model. Compare both
+    # the raw id and the id minus a trailing ":latest" tag.
+    known = set(ids)
+    known |= {i.rsplit(":", 1)[0] for i in ids if i.rsplit(":", 1)[-1] == "latest"}
+    if model not in known:
+        shown = ", ".join(sorted(ids)) or "(none — first run: ollama pull <model>)"
         raise LLMError(
             f"Ollama is running but does not have model '{model}' yet.\n"
+            f"  Models available right now: {shown}\n"
             f"  Run once:  ollama pull {model}\n"
             "(check with: ollama list)"
         )
