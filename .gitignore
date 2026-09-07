@@ -5,3 +5,17 @@ samplemovie/
 venv/
 __pycache__/
 *.pyc
+
+# local secrets — never commit .env files (Supabase keys, API keys)
+.env
+**/.env
+!.env.example
+**/.env.example
+
+# generated run output / media (recreated on each run; never commit)
+movie-recap-bot/output/
+recap-studio/output/
+scenes_out/
+movie-recap-bot/cache/
+recap-studio/cache/
+recap-studio/studio.log

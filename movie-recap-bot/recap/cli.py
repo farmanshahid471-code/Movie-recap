@@ -73,7 +73,8 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 
 def cmd_auto(args: argparse.Namespace) -> None:
-    """Auto-recap a movie: extract dialogue -> LLM writes EN recap -> translate -> clips."""
+    """Auto-recap a movie with the Step A-F engine (whisper -> chunks ->
+    summaries -> JSON script -> TTS -> semantic match -> clips)."""
     cfg = load_config(args.config)
     cfg["project"]["name"] = args.name or cfg["project"]["name"]
     if args.langs:
@@ -92,19 +93,29 @@ def cmd_auto(args: argparse.Namespace) -> None:
     # Whisper tuning via CLI.
     if args.whisper_model:
         cfg.setdefault("dialogue", {})["whisper_model"] = args.whisper_model
+    if args.whisper_device:
+        cfg.setdefault("dialogue", {})["whisper_device"] = args.whisper_device
+    # Target narration length (full-length ~10-16 min by default).
+    if args.minutes:
+        mins = max(1, int(args.minutes))
+        nar = cfg.setdefault("narration", {})
+        words = int(mins * 150)
+        words = max(words, int(nar.get("words_min", 600)))
+        words = min(words, int(nar.get("words_max", 4200)))
+        nar["words_target"] = words
+        print(f"  * Target narration: ~{mins} min -> {words} words")
 
     movie = Path(args.movie)
     if not movie.exists():
         raise SystemExit(f"Movie not found: {movie}")
-    clips = [movie]
 
-    # Auto mode must be driven by the movie's dialogue, not a stale staged script.
-    # Clear any pre-written script so `_get_script` takes the dialogue path.
+    # The semantic engine regenerates the script from the film's dialogue every
+    # run — never reuse a stale staged script.
     sdir = work_dir(cfg) / "script"
     (sdir / "script_en.txt").unlink(missing_ok=True)
     (sdir / "script_zh.txt").unlink(missing_ok=True)
 
-    pipeline.run(cfg, clips, storyboard=False)
+    pipeline.auto_recap(cfg, movie)
 
 
 def cmd_script(args: argparse.Namespace) -> None:
@@ -178,6 +189,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_auto.add_argument("--movie", required=True, help="movie file path")
     p_auto.add_argument("--subtitle", default=None, help="explicit dialogue subtitle (.srt)")
     p_auto.add_argument("--whisper-model", default=None, help="whisper model size")
+    p_auto.add_argument("--whisper-device", default=None,
+                        help="whisper device: auto | cpu | cuda | cuda:0")
+    p_auto.add_argument("--minutes", default=None, type=int,
+                        help="target narration length in minutes (~150 wpm)")
     p_auto.add_argument("--langs", default=None, help="comma list, e.g. en,zh")
     p_auto.add_argument("--name", default=None, help="output name")
     p_auto.set_defaults(func=cmd_auto)

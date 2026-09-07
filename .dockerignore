@@ -1,0 +1,30 @@
+.git
+.gitignore
+**/__pycache__
+**/*.pyc
+*.pyo
+.venv
+venv
+node_modules
+
+# generated media / heavy artifacts
+output
+**/output
+**/autovideo
+demo
+uploads
+sdtest
+scenes_out
+recap-studio/static/preview
+movie-recap-bot/tests
+
+# local env / secrets
+.env
+**/.env
+.movie-narrator
+movie-narrator-jobs
+*.log
+
+# scratch
+setup_ui.bat
+stop_ui.bat

@@ -27,6 +27,29 @@ echo  ==========================================
 echo.
 
 :: ---------------------------------------------------------
+:: 0. Data location -- keep EVERY byte off the C: drive
+:: ---------------------------------------------------------
+:: All outputs, model weights, ffmpeg binaries, pip cache and temp files go
+:: under RECAP_DATA. Defaults to D:\recap-data when a D: drive exists; edit
+:: RECAP_DATA below if your big drive has another letter.
+set "RECAP_DATA=D:\recap-data"
+if not exist "D:\nul" set "RECAP_DATA=%ROOT%\.recap-data"
+mkdir "%RECAP_DATA%" 2>nul
+if not exist "%RECAP_DATA%\" set "RECAP_DATA=%ROOT%\.recap-data"
+mkdir "%RECAP_DATA%" 2>nul
+mkdir "%RECAP_DATA%\cache" 2>nul
+mkdir "%RECAP_DATA%\tmp"   2>nul
+set "TEMP=%RECAP_DATA%\tmp"
+set "TMP=%RECAP_DATA%\tmp"
+set "PIP_CACHE_DIR=%RECAP_DATA%\pip-cache"
+set "CACHE_DIR=%RECAP_DATA%\cache"
+set "STATIC_FFMPEG_CACHE_DIR=%RECAP_DATA%\cache\static-ffmpeg"
+set "HF_HOME=%RECAP_DATA%\cache\huggingface"
+set "WHISPER_CACHE_DIR=%RECAP_DATA%\cache\whisper"
+set "RECAP_LOG_DIR=%RECAP_DATA%"
+echo  Data root : %RECAP_DATA%   (nothing is stored on the C: drive)
+
+:: ---------------------------------------------------------
 :: 1. Find a Python interpreter (py launcher first, then python)
 :: ---------------------------------------------------------
 set "PY="
@@ -76,19 +99,14 @@ if not defined MISSING (
 echo.
 
 :: ---------------------------------------------------------
-:: 3. Verify ffmpeg / ffprobe (static-ffmpeg fetches them on first use)
+:: 3. Verify ffmpeg / ffprobe (static-ffmpeg fetches them into the data root)
 :: ---------------------------------------------------------
-%PY% -c "import static_ffmpeg; static_ffmpeg.add_paths(); import shutil,sys; sys.exit(0 if shutil.which('ffmpeg') else 1)" >nul 2>&1
+%PY% recap-studio\tools\ensure_ffmpeg.py
 if not errorlevel 1 (
-    echo  [OK] ffmpeg available via static-ffmpeg.
+    echo  [OK] ffmpeg + ffprobe ready - binaries kept in %RECAP_DATA%, not C:.
 ) else (
-    where ffmpeg >nul 2>&1
-    if errorlevel 1 (
-        echo  [!] ffmpeg not found yet - static-ffmpeg downloads it on the
-        echo      first render, so keep an internet connection available.
-    ) else (
-        echo  [OK] ffmpeg found on PATH.
-    )
+    echo  [!] ffmpeg unavailable right now - setup continues; the first render
+    echo      will fetch it - keep an internet connection available.
 )
 echo.
 
@@ -108,13 +126,23 @@ echo  [OK] Project structure looks good.
 echo.
 
 :: ---------------------------------------------------------
-:: 5. Already running on this port? Then just open it.
+:: 5. Already running on this port? Restart it FRESH.
 :: ---------------------------------------------------------
+:: A leftover instance from an older code copy is the classic cause of a
+:: dead panel: the old process still serves, but its log stream is broken,
+:: so the Console stays empty and buttons do nothing.
 %PY% recap-studio\tools\portcheck.py %PORT% >nul 2>&1
 if not errorlevel 1 (
-    echo  [OK] Recap Studio is already running - opening %URL%
-    start "" "%URL%"
-    goto :end
+    echo  [..] An instance is already running on port %PORT%.
+    echo       Restarting it with the current code - any in-progress run stops.
+    %PY% recap-studio\tools\shutdown.py %PORT%
+    if errorlevel 1 (
+        echo.
+        echo  [X] Port %PORT% is still occupied. Close the other Recap Studio
+        echo      window or run stop_ui.bat, then start setup_ui.bat again.
+        pause
+        exit /b 1
+    )
 )
 
 :: ---------------------------------------------------------

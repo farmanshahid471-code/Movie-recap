@@ -38,7 +38,34 @@ if str(STUDIO_DIR) not in sys.path:
 
 import runner  # noqa: E402
 
-_SERVER: ThreadingHTTPServer | None = None
+_SERVER: "RecapStudioServer | None" = None
+
+
+class RecapStudioServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that does not spam tracebacks for aborted polls.
+
+    The panel's Console polls /api/logs every ~1.2s over keep-alive; browsers
+    routinely abort such connections (ConnectionAbortedError / BrokenPipe /
+    ConnectionReset) and the stdlib default handle_error() prints a full
+    traceback to the launcher console for every one. Those are expected, not
+    errors — swallow them (log anything else so real faults stay visible).
+    """
+
+    daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:
+        import traceback as _tb
+
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionAbortedError, ConnectionResetError,
+                            BrokenPipeError, TimeoutError)):
+            return
+        try:
+            runner._log(f"!!! server error at {client_address}: "
+                        f"{type(exc).__name__}: {exc}")
+        except Exception:
+            pass
+        _tb.print_exc()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -181,6 +208,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/render":
             body = self._read_body()
+            if runner.engine_name() == "semantic":
+                # The Step A-F engine re-writes the narration from the movie on
+                # every Generate; hand-edited scripts only apply to the legacy
+                # 5-step engine (switch Engine in Settings to use this button).
+                return self._json(400, {
+                    "ok": False,
+                    "error": "The semantic engine regenerates the narration from "
+                             "the movie on every Generate. Switch Engine to "
+                             "'legacy recap' in Settings to narrate hand-edited scripts.",
+                })
             written = runner.write_scripts(body.get("en_script", ""), body.get("zh_script", ""))
             if not written:
                 return self._json(400, {"ok": False, "error": "nothing to render: both scripts are empty"})
@@ -248,6 +285,7 @@ class Handler(BaseHTTPRequestHandler):
                 "edge_tts": runner.have("edge_tts"),
                 "pysubs2": runner.have("pysubs2"),
                 "whisper": runner.whisper_available(),
+                "embeddings": runner.have("sentence_transformers"),
                 "yaml": runner.have("yaml"),
                 "output_dir": str(out),
                 "output_writable": os.access(out, os.W_OK),
@@ -349,8 +387,7 @@ def _open_browser_when_ready(url: str, timeout: float = 20.0) -> None:
 
 def main(host: str = "0.0.0.0", port: int = 8080, open_browser: bool = False):
     global _SERVER
-    _SERVER = ThreadingHTTPServer((host, port), Handler)
-    _SERVER.daemon_threads = True
+    _SERVER = RecapStudioServer((host, port), Handler)
     local = "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
     url = f"http://{local}:{port}"
     print(f"Recap Studio control panel listening on http://{host}:{port}")

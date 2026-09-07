@@ -8,18 +8,52 @@ from typing import Any
 
 import yaml
 
+from . import storage
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 _DEFAULTS: dict[str, Any] = {
-    "project": {"name": "recap-project", "output_dir": "output"},
-    "language": {"target_languages": ["en", "zh"], "zh_variant": "zh-CN"},
+    "project": {"name": "recap-project", "output_dir": "output", "cache_dir": ""},
+    "language": {"target_languages": ["en"], "zh_variant": "zh-CN"},
     "narration": {
-        "words_target": 1400,
-        "words_min": 500,
-        "words_max": 2600,
+        "words_target": 2000,      # ~13-14 min at ~150 wpm (full-length recap)
+        "words_min": 600,
+        "words_max": 4200,
         "lang_voice": {"en": "en-US-ChristopherNeural", "zh": "zh-CN-YunxiNeural"},
         "rate": "+0%",
         "tts_provider": "edge",
+    },
+    # Whisper ASR tuning (auto-recap from the movie's own audio).
+    "dialogue": {
+        "whisper_model": "small",
+        "whisper_device": "auto",
+        "whisper_language": None,
+        "word_timestamps": True,   # per-word times on every cue (dialogue sidecar)
+        "max_chars": None,         # cap for transcript text sent to an LLM
+        "srt_path": None,          # optional pre-existing subtitle instead of ASR
+    },
+    # Step A — contextual chunking of the long transcript so LLM context
+    # windows never overflow. Windows of `window_seconds` sliding by
+    # `window_seconds - overlap_seconds`, each carrying 30s of context.
+    "chunking": {
+        "window_seconds": 300.0,   # 5-minute logical blocks
+        "overlap_seconds": 30.0,   # overlap between adjacent blocks
+        "parallel": False,         # Ollama is single-user; keep serial by default
+        "model": None,             # optional smaller/faster model for the
+                                   # chunk-summary pass, e.g. "qwen2.5:3b"
+    },
+    # Step D — semantic timestamp mapping (recap sentence -> movie moment).
+    "semantic": {
+        "enabled": True,           # auto-recap maps each line to a film moment
+        "embedding_model": "all-MiniLM-L6-v2",  # 384-dim, runs locally
+        "store": "auto",           # auto | local | supabase (auto: supabase when creds exist)
+        "top_k": 3,                # candidates considered per recap line
+        "min_score": 0.10,         # below this -> even-beat fallback for that line
+        "pre_roll": 0.5,           # seconds of footage before the matched cue
+        "clip_pad": 0.15,          # extra footage after the narration of a line
+        "min_clip": 0.8,           # never cut a beat shorter than this
+        "max_clip": 10.0,          # nor longer than this
+        "clip": {"mode": "copy"},  # copy (fast, keyframe) | reencode (frame-exact)
     },
     "subtitles": {
         "font": "Noto Serif CJK SC",
@@ -130,16 +164,39 @@ def load_config(path: str | Path | None = None) -> dict:
         langs.append({"code": lang, "tag": tag})
     cfg["language"]["_resolved"] = langs
 
-    # Resolve output dir absolute
+    # Output root: env OUTPUT_DIR > config project.output_dir > default.
+    # Relative paths resolve against the bot folder; absolute paths (e.g.
+    # "D:\\recap\\output") are honored verbatim so nothing has to live on C:.
+    if os.environ.get("OUTPUT_DIR"):
+        cfg["project"]["output_dir"] = os.environ["OUTPUT_DIR"]
     out = Path(cfg["project"]["output_dir"])
-    cfg["project"]["_out"] = (BASE_DIR / out).resolve()
-    cfg["project"]["_base"] = BASE_DIR
+    out_abs = out if storage.is_abs(out) else BASE_DIR / out
+    cfg["project"]["_out"] = out_abs.resolve()
+
+    # Cache root: env CACHE_DIR > config project.cache_dir > sibling "cache"
+    # folder of the output root (so all data follows output_dir's drive).
+    if os.environ.get("CACHE_DIR"):
+        cfg["project"]["cache_dir"] = os.environ["CACHE_DIR"]
+    raw_cache = (cfg["project"].get("cache_dir") or "").strip()
+    if raw_cache:
+        cache = Path(raw_cache)
+        if not storage.is_abs(cache):
+            cache = BASE_DIR / cache
+    else:
+        cache = out_abs.resolve().parent / "cache"
+    cfg["project"]["_cache"] = cache.resolve()
+    storage.bootstrap(cfg["project"]["_cache"])
+
     cfg["project"]["name"] = cfg["project"].get("name", "recap-project")
     return cfg
 
 
 def out_dir(cfg: dict) -> Path:
     return Path(cfg["project"]["_out"])
+
+
+def cache_dir(cfg: dict) -> Path:
+    return Path(cfg["project"]["_cache"])
 
 
 def work_dir(cfg: dict) -> Path:

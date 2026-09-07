@@ -2,20 +2,63 @@
 from __future__ import annotations
 
 import os
+import platform
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
-try:
-    import static_ffmpeg  # type: ignore
+_STATIC_READY = False
 
-    static_ffmpeg.add_paths()
-except Exception:  # pragma: no cover - static_ffmpeg may be absent
-    pass
+
+def _static_platform_key() -> str:
+    """Match static_ffmpeg's zip layout (binaries live in a <platform>/ dir)."""
+    machine = platform.machine().lower()
+    is_arm = machine in ("arm64", "aarch64")
+    if sys.platform == "win32":
+        return "win32"
+    if sys.platform == "darwin":
+        return "darwin_arm64" if is_arm else "darwin"
+    if sys.platform.startswith("linux"):
+        return "linux_arm64" if is_arm else "linux"
+    return sys.platform
+
+
+def _ensure_static_ffmpeg() -> None:
+    """Make the static-ffmpeg binaries available when no system ffmpeg exists.
+
+    Downloads (one time) into STATIC_FFMPEG_CACHE_DIR when set — recap.storage
+    points that at the configured cache root so the ~100 MB binaries never land
+    in the OS user profile / on C:. Falls back to the library default location.
+    """
+    global _STATIC_READY
+    if _STATIC_READY:
+        return
+    _STATIC_READY = True
+    try:
+        import static_ffmpeg  # type: ignore
+
+        cache = os.environ.get("STATIC_FFMPEG_CACHE_DIR")
+        if cache:
+            # static_ffmpeg treats download_dir as the *platform* folder, e.g.
+            # <cache>/static-ffmpeg/win32, so the platform zip extracts beside
+            # it. The env var is the parent; append the platform key here.
+            key = _static_platform_key()
+            target = str(Path(cache) / key)
+            Path(target).mkdir(parents=True, exist_ok=True)
+            static_ffmpeg.add_paths(weak=True, download_dir=target)
+        else:
+            static_ffmpeg.add_paths(weak=True)
+    except Exception:  # pragma: no cover - static_ffmpeg may be absent
+        pass
 
 
 def which_ffmpeg() -> str:
+    p = shutil.which("ffmpeg")
+    if p:
+        return p
+    _ensure_static_ffmpeg()
     p = shutil.which("ffmpeg")
     if p:
         return p
@@ -25,6 +68,10 @@ def which_ffmpeg() -> str:
 
 
 def which_ffprobe() -> str:
+    p = shutil.which("ffprobe")
+    if p:
+        return p
+    _ensure_static_ffmpeg()
     p = shutil.which("ffprobe")
     if p:
         return p

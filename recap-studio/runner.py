@@ -53,12 +53,15 @@ _REAL_STDOUT = sys.stdout
 # --- config that persists between page loads ---
 CONFIG_PATH = STUDIO_DIR / "config.json"
 DEFAULT_CONFIG = {
-    "engine": "recap",
-    "movie_path": "",                       # optional owned movie file
+    # "semantic" = Step A-F engine (whisper -> chunks -> summaries -> JSON script
+    #              -> TTS -> semantic timestamp matching -> real-film clipping).
+    # "recap"    = legacy 5-step engine (script file/LLM -> montage -> mux).
+    "engine": "semantic",
+    "movie_path": "",                       # required for the semantic engine
     "output_dir": r"D:\recap",              # where the clips + _work go; "" = recap-studio/output
-    "storyboard": True,                     # use placeholder scenes when no movie
-    "duration": 60,                         # target clip length (seconds)
-    "montage": "scenes",                    # "scenes" = cut beats from the movie
+    "storyboard": True,                     # legacy engine only: placeholder scenes
+    "duration": 840,                        # target recap length in seconds (~14 min full-length)
+    "montage": "scenes",                    # legacy engine only
     "scene_len": 6.0,                       # seconds per beat
     "voice_en": "en-US-ChristopherNeural",
     "voice_zh": "zh-CN-YunxiNeural",
@@ -77,7 +80,10 @@ DEFAULT_CONFIG = {
     "whisper_device": "auto",        # auto = GPU when available, else CPU
 }
 
-LOCK = threading.Lock()
+# Reentrant lock: log calls and status() must be safe to invoke from code that
+# already holds the lock (a plain Lock caused a self-deadlock in the run worker
+# when a run logged while the caller still held LOCK).
+LOCK = threading.RLock()
 LOG_BUFFER: list[str] = []
 MAX_LOG_LINES = 600
 JOB_STATE: dict = {
@@ -94,12 +100,25 @@ JOB_STATE: dict = {
 # --------------------------------------------------------------------------
 # Logging
 # --------------------------------------------------------------------------
+# Everything is ALSO written to this file so a run can be inspected even when
+# the browser Console or the launcher window is unhelpful.
+# RECAP_LOG_DIR points it at a non-C: folder when set (see storage policy).
+_LOG_DIR = os.environ.get("RECAP_LOG_DIR")
+STUDIO_LOG = Path(_LOG_DIR) / "studio.log" if _LOG_DIR else STUDIO_DIR / "studio.log"
+
+
 def _log(msg: str) -> None:
-    """Append one line to the shared ring buffer the UI streams."""
+    """Append one line to the shared ring buffer the UI streams (+ a log file)."""
     with LOCK:
         LOG_BUFFER.append(msg)
         if len(LOG_BUFFER) > MAX_LOG_LINES:
             del LOG_BUFFER[: len(LOG_BUFFER) - MAX_LOG_LINES]
+    try:
+        STUDIO_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(STUDIO_LOG, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+    except OSError:
+        pass
 
 
 class _Tee(io.TextIOBase):
@@ -223,21 +242,24 @@ def output_dir(cfg: dict | None = None) -> Path:
     """
     if cfg is None:
         cfg = load_config()
-    raw = (cfg.get("output_dir") or "").strip().strip('"')
-    cached = _OUTPUT_CACHE.get(raw)
+    raw0 = (cfg.get("output_dir") or "").strip().strip('"')
+    cached = _OUTPUT_CACHE.get(raw0)
     if cached is not None:
         return cached
 
     resolved = DEFAULT_OUTPUT_DIR
+    raw = raw0
     if raw:
         # "D:\recap" is a perfectly legal *filename* on Linux/macOS, so without
         # this check it silently creates a folder named "D:\recap" instead of
         # telling you the path makes no sense on this OS.
         if re.match(r"^[A-Za-z]:[\\/]", raw) and os.name != "nt":
-            _log(
-                f"! output folder {raw} is a Windows path but this is not Windows "
-                f"({sys.platform}); falling back to {DEFAULT_OUTPUT_DIR}"
-            )
+            if raw0 not in _RESOLVE_LOGGED:
+                _RESOLVE_LOGGED.add(raw0)
+                _log(
+                    f"! output folder {raw} is a Windows path but this is not Windows "
+                    f"({sys.platform}); falling back to {DEFAULT_OUTPUT_DIR}"
+                )
             raw = ""
     if raw:
         target = Path(raw).expanduser()
@@ -257,6 +279,9 @@ def output_dir(cfg: dict | None = None) -> Path:
     except Exception:
         resolved = DEFAULT_OUTPUT_DIR
         resolved.mkdir(parents=True, exist_ok=True)
+    # Cache under both the raw key and the normalized key so repeat calls with
+    # the same configured path don't re-log the fallback warning every poll.
+    _OUTPUT_CACHE[raw0] = resolved
     _OUTPUT_CACHE[raw] = resolved
     return resolved
 
@@ -407,6 +432,12 @@ def ollama_up(cfg: dict) -> bool:
 # --------------------------------------------------------------------------
 # Recap config assembly (the single place UI settings reach the pipeline)
 # --------------------------------------------------------------------------
+def engine_name(cfg: dict | None = None) -> str:
+    """Which pipeline engine the panel is set to drive: semantic | recap."""
+    cfg = cfg if cfg is not None else load_config()
+    return str(cfg.get("engine") or "semantic").strip().lower() or "semantic"
+
+
 def _base_recap(cfg: dict | None = None) -> dict:
     """Load movie-recap-bot/config.yaml and point its output at the studio folder."""
     from recap.config import load_config as recap_load_config
@@ -419,32 +450,27 @@ def _base_recap(cfg: dict | None = None) -> dict:
     return rc
 
 
-def recap_cfg(cfg: dict, lang: str) -> dict:
-    """Build the recap config for a single-language run from panel settings."""
-    lang = "zh" if lang.startswith("zh") else "en"
-    rc = _base_recap(cfg)
-
-    rc["language"]["target_languages"] = [lang]
-    tag = rc["language"].get("zh_variant", "zh-CN") if lang.startswith("zh") else lang
-    rc["language"]["_resolved"] = [{"code": lang, "tag": tag}]
-
+def _apply_common(rc: dict, cfg: dict, lang: str | None = None) -> None:
+    """Push the panel settings that both engines share into the recap config."""
     rc["narration"]["lang_voice"]["en"] = cfg.get("voice_en") or "en-US-ChristopherNeural"
     rc["narration"]["lang_voice"]["zh"] = cfg.get("voice_zh") or "zh-CN-YunxiNeural"
     rc["narration"]["rate"] = "+0%"
 
-    # Target clip length only shapes the LLM prompt (auto mode); narration is
-    # roughly 2.5 words/second for edge-tts voices.
+    # Target clip length only shapes the narration length; edge-tts narrates
+    # roughly 2.5 words/second.
     try:
         secs = int(cfg.get("duration") or 0)
     except (TypeError, ValueError):
         secs = 0
     if secs > 0:
-        words = min(max(int(secs * 2.5), 120), int(rc["narration"].get("words_max", 2600)))
+        words = min(max(int(secs * 2.5), 120), int(rc["narration"].get("words_max", 4200)))
         rc["narration"]["words_target"] = words
 
-    rc["subtitles"]["display_lang"] = cfg.get(f"subtitle_lang_{lang}", lang) or lang
+    if lang is not None:
+        rc["subtitles"]["display_lang"] = cfg.get(f"subtitle_lang_{lang}", lang) or lang
 
-    # Recap-style montage: cut real beats from the film instead of looping it.
+    # Legacy montage knobs (the semantic engine ignores these; it cuts real
+    # beats via semantic matching).
     montage = str(cfg.get("montage") or "scenes").strip().lower()
     rc["video"]["montage"] = montage if montage in ("scenes", "continuous") else "scenes"
     try:
@@ -453,6 +479,39 @@ def recap_cfg(cfg: dict, lang: str) -> dict:
         rc["video"]["scene_len"] = 6.0
 
     _apply_llm(rc, cfg)
+
+
+def recap_cfg(cfg: dict, lang: str) -> dict:
+    """Legacy engine: build the recap config for a single-language run."""
+    lang = "zh" if lang.startswith("zh") else "en"
+    rc = _base_recap(cfg)
+
+    rc["language"]["target_languages"] = [lang]
+    tag = rc["language"].get("zh_variant", "zh-CN") if lang.startswith("zh") else lang
+    rc["language"]["_resolved"] = [{"code": lang, "tag": tag}]
+
+    _apply_common(rc, cfg, lang)
+    return rc
+
+
+def semantic_recap_cfg(cfg: dict, langs: list[str]) -> dict:
+    """Step A-F engine: full recap config for the requested language set.
+
+    One run covers every requested language (EN master, ZH line-aligned), so
+    the whisper extraction, chunking and semantic matching happen exactly once.
+    """
+    langs = [l for l in langs if l in ("en", "zh")] or ["en"]
+    rc = _base_recap(cfg)
+
+    rc["language"]["target_languages"] = list(langs)
+    resolved = []
+    for code in langs:
+        tag = rc["language"].get("zh_variant", "zh-CN") if code.startswith("zh") else code
+        resolved.append({"code": code, "tag": tag})
+    rc["language"]["_resolved"] = resolved
+
+    _apply_common(rc, cfg, langs[0])
+    rc["semantic"]["enabled"] = True
     return rc
 
 
@@ -460,6 +519,8 @@ _KEY_ENV = {
     "openai": "OPENAI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "gemini": "GEMINI_API_KEY",
 }
 
 # Sensible model when the provider changes and nothing better is configured.
@@ -468,6 +529,11 @@ PROVIDER_PRESETS = {
     "deepseek": {"model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1", "key": True},
     "openai": {"model": "gpt-4o-mini", "base_url": "https://api.openai.com/v1", "key": True},
     "anthropic": {"model": "claude-3-5-sonnet-latest", "base_url": "", "key": True},
+    # Free cloud tiers (no credit card):
+    #   groq   -> console.groq.com  (very fast Llama; ~30 req/min free)
+    #   gemini -> aistudio.google.com (Flash models; ~1500 requests/day free)
+    "groq": {"model": "llama-3.3-70b-versatile", "base_url": "https://api.groq.com/openai/v1", "key": True},
+    "gemini": {"model": "gemini-3.6-flash", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "key": True},
     "none": {"model": "", "base_url": "", "key": False},
 }
 
@@ -559,6 +625,63 @@ def whisper_available() -> bool:
     return any(have(m) for m in ("faster_whisper", "whisper", "whisperx"))
 
 
+def _run_pip_install(pkg: str, label: str, timeout: int = 1800) -> tuple[bool, str]:
+    """pip install one package, streaming its output into the panel log.
+
+    The old capture_output version left the Console silent for minutes during
+    the big downloads (faster-whisper, sentence-transformers + torch), which
+    read as "the UI does nothing". Every pip line is forwarded to _log so the
+    Console shows live progress, and failures report the real pip error.
+    """
+    import subprocess
+
+    cmd = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", pkg]
+    _log(f"    pip: {' '.join(cmd)}")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+    except Exception as exc:
+        return False, f"could not start pip: {exc}"
+
+    lines: list[str] = []
+
+    def reader() -> None:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            # pip's download progress uses \r; split on both so every visible
+            # update becomes a log line instead of one giant \r-joined blob.
+            for seg in raw.replace("\r", "\n").split("\n"):
+                s = seg.strip()
+                if s:
+                    lines.append(s)
+                    _log(f"    pip: {s}")
+
+    th = threading.Thread(target=reader, daemon=True, name=f"pip-{label}")
+    th.start()
+    try:
+        rc = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return False, f"pip install {label} timed out after {timeout // 60} min"
+    th.join(timeout=5)
+    if rc != 0:
+        tail = [ln for ln in lines if "error" in ln.lower() or "no matching" in ln.lower()]
+        detail = (tail[-1] if tail else (lines[-1] if lines else "unknown error")).strip()
+        if sys.version_info >= (3, 13) and "no matching distribution" in detail.lower():
+            detail += (" — your Python is 3.13, and some AI packages (torch/whisper) "
+                       "lag behind new Python releases. Install Python 3.12 on D: and "
+                       "run setup_ui.bat again.")
+        return False, f"pip install {label} failed: {detail}"
+    return True, "installed"
+
+
 def ensure_whisper() -> tuple[bool, str]:
     """Make a Whisper implementation available, installing it if missing.
 
@@ -572,25 +695,40 @@ def ensure_whisper() -> tuple[bool, str]:
         return True, "already installed"
 
     _log("    Whisper not installed -> downloading & installing faster-whisper "
-         "(one-time; this can take a couple of minutes) ...")
-    import subprocess
-
-    cmd = [sys.executable, "-m", "pip", "install", "faster-whisper"]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
-    except subprocess.TimeoutExpired:
-        return False, "pip install faster-whisper timed out"
-    except Exception as exc:
-        return False, f"could not start pip: {exc}"
-
-    if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
-        return False, f"pip install faster-whisper failed: {tail[-1] if tail else 'unknown error'}"
+         "(one-time; can take several minutes on a slow connection) ...")
+    ok, why = _run_pip_install("faster-whisper", "faster-whisper", timeout=2400)
+    if not ok:
+        return False, why
 
     if whisper_available():
         _log("    faster-whisper installed.")
         return True, "installed"
     return False, "faster-whisper was installed but could not be imported"
+
+
+def ensure_embeddings() -> tuple[bool, str]:
+    """Make sentence-transformers available, installing it if missing.
+
+    The Step D semantic matcher embeds the transcript + narration with a local
+    model (all-MiniLM-L6-v2). Like Whisper, rather than sending the user to
+    pip we install it into the interpreter that runs the panel. It pulls
+    PyTorch (CPU) so it is a large download — done once, on the first run that
+    needs it. Returns (ok, message).
+    """
+    if have("sentence_transformers"):
+        return True, "already installed"
+
+    _log("    sentence-transformers not installed -> installing (one-time, "
+         "large download: it includes a CPU PyTorch build; see live pip output "
+         "below) ...")
+    ok, why = _run_pip_install("sentence-transformers", "sentence-transformers", timeout=3600)
+    if not ok:
+        return False, why
+
+    if have("sentence_transformers"):
+        _log("    sentence-transformers installed.")
+        return True, "installed"
+    return False, "sentence-transformers was installed but could not be imported"
 
 
 def subtitle_for(movie: Path | None, explicit: str = "") -> Path | None:
@@ -606,36 +744,65 @@ def subtitle_for(movie: Path | None, explicit: str = "") -> Path | None:
 
 
 def readiness(cfg: dict | None = None) -> dict:
-    """Why auto-recap can or cannot run — the panel shows this before Run."""
+    """What the chosen engine needs to run — the panel shows this before Run."""
     cfg = cfg if cfg is not None else load_config()
+    eng = engine_name(cfg)
     movie, movie_err = check_movie(cfg.get("movie_path", ""))
-    wants_auto = bool(cfg.get("auto"))
+    wants_auto = bool(cfg.get("auto"))          # legacy engine only
     llm_ok = llm_ready(cfg)
     srt = subtitle_for(movie, cfg.get("auto_subtitle", ""))
     whisper = whisper_available()
     sample = sample_script_in_use()
+    embeddings = have("sentence_transformers")
 
     blocking = []
-    if wants_auto:
-        if movie is None:
-            blocking.append(movie_err or "no movie file set")
-        if not llm_ok:
-            blocking.append("no LLM configured (pick one in Settings -> LLM)")
-        if llm_ok and not ollama_up(cfg):
-            blocking.append(
-                "Ollama is not running — open a terminal and run: ollama serve, then "
-                "ollama pull qwen2.5 (or switch provider in Settings -> LLM)"
-            )
-        # A missing Whisper is no longer a blocker: when the run starts and no
-        # .srt is found, ensure_whisper() downloads & installs faster-whisper.
+    llm_block = "no LLM configured (pick one in Settings -> LLM)"
+    if not llm_ok:
+        blocking.append(llm_block)
+    elif not ollama_up(cfg):
+        blocking.append(
+            "Ollama is not running — open a terminal and run: ollama serve, then "
+            "ollama pull qwen2.5 (or switch provider in Settings -> LLM)"
+        )
 
-    whisper_will_install = bool(wants_auto) and movie is not None and not srt and not whisper
+    if eng == "semantic":
+        # The Step A-F engine *always* reads the movie: it needs a real file,
+        # an LLM to write the recap, dialogue (subtitle or auto-installed
+        # Whisper) and the local embedding model.
+        if movie is None:
+            blocking.append(movie_err or "no movie file set (semantic engine recaps a real movie)")
+        if not srt and not whisper:
+            blocking.append(
+                "no .srt next to the movie and Whisper not installed — it will be "
+                "downloaded & installed automatically on run"
+            )
+        if not embeddings:
+            blocking.append(
+                "sentence-transformers not installed — it will be downloaded & "
+                "installed automatically on first run (large download)"
+            )
+        auto_ready = movie is not None and not blocking
+    else:
+        if wants_auto:
+            if movie is None:
+                blocking.append(movie_err or "no movie file set")
+            # A missing Whisper is no longer a blocker: when the run starts and
+            # no .srt is found, ensure_whisper() downloads & installs it.
+        auto_ready = (wants_auto or not sample) and movie is not None and not blocking
+
+    whisper_will_install = (
+        (eng == "semantic" or wants_auto)
+        and movie is not None and not srt and not whisper
+    )
 
     return {
+        "engine": eng,
         "whisper_will_install": whisper_will_install,
+        "embeddings": embeddings,
+        "embeddings_will_install": eng == "semantic" and not embeddings,
         "llm_reachable": ollama_up(cfg),
         "auto": wants_auto,
-        "auto_ready": wants_auto and not blocking,
+        "auto_ready": auto_ready,
         "blocking": blocking,
         "movie_ok": movie is not None,
         "movie_resolved": str(movie) if movie else "",
@@ -777,6 +944,87 @@ def run_language(lang: str, cfg: dict | None = None) -> Path | None:
     return None
 
 
+def run_semantic(langs: list[str], cfg: dict | None = None) -> list[Path]:
+    """Run the Step A-F engine once for every requested language.
+
+    One ``pipeline.auto_recap`` call covers all languages (the expensive steps —
+    whisper extraction, chunking, summaries, semantic matching — run once and
+    every language reuses the result), so this returns a list of output mp4s.
+    """
+    cfg = cfg if cfg is not None else load_config()
+    langs = [l for l in langs if l in ("en", "zh")] or ["en"]
+    _log(f">>> Semantic recap [{'+'.join(langs)}]")
+
+    from recap import pipeline
+
+    try:
+        clips = _resolve_clips(cfg)
+    except MoviePathError as exc:
+        _log(f"    ERROR: {exc}")
+        _log("    Fix it in Settings -> Movie file path, then run again.")
+        raise
+    if not clips:
+        _, why = check_movie(cfg.get("movie_path", ""))
+        msg = (
+            "The semantic (Step A-F) engine recaps a REAL movie — it reads the "
+            "film's audio/dialogue and cuts its actual footage. "
+            + (f"{why}. " if why else "")
+            + "Set Movie file path to a video FILE in Settings, or switch Engine "
+            "to 'legacy recap' in Settings to narrate a script over placeholder scenes."
+        )
+        _log(f"    ERROR: {msg}")
+        raise MoviePathError(msg)
+
+    movie = clips[0]
+    rc = semantic_recap_cfg(cfg, langs)
+
+    # FIX: carry the UI's subtitle choice + whisper knobs into the pipeline
+    # config, otherwise the engine can't see the browsed .srt and silently
+    # falls back to Whisper-transcribing the whole film.
+    rc.setdefault("dialogue", {})
+    sub = (cfg.get("auto_subtitle") or "").strip() or None
+    if sub:
+        rc["dialogue"]["srt_path"] = sub
+        _log(f"    dialogue subtitle: {sub}")
+    else:
+        rc["dialogue"]["srt_path"] = None
+    rc["dialogue"]["whisper_model"] = cfg.get("whisper_model", "small")
+    rc["dialogue"]["whisper_device"] = cfg.get("whisper_device", "auto")
+
+    # Dialogue source: prefer a .srt next to the movie, else Whisper (install
+    # on demand if nothing is present).
+    if subtitle_for(movie, cfg.get("auto_subtitle", "")) is None:
+        ok, why = ensure_whisper()
+        if not ok:
+            msg = (
+                "Auto-recap needs the movie's dialogue, but Whisper could not be "
+                f"made available ({why}). Drop an .srt next to the movie, or fix "
+                "your network/pip and run again."
+            )
+            _log(f"    ERROR: {msg}")
+            raise RuntimeError(msg)
+
+    # Step D needs the local embedding model (install on demand, large).
+    ok, why = ensure_embeddings()
+    if not ok:
+        msg = (
+            "Semantic timestamp mapping needs sentence-transformers, but it "
+            f"could not be installed ({why}). Fix your network/pip and run again."
+        )
+        _log(f"    ERROR: {msg}")
+        raise RuntimeError(msg)
+
+    try:
+        with redirect_stdout(_Tee(_REAL_STDOUT)):
+            outs = pipeline.auto_recap(rc, movie)
+    except Exception as exc:  # surface errors to the panel log stream
+        _log(f"    ERROR: {type(exc).__name__}: {exc}")
+        raise
+    if outs:
+        _log(f">>> Done [{'+'.join(langs)}] -> {', '.join(str(p) for p in outs)}")
+    return [Path(p) for p in outs]
+
+
 def list_outputs() -> list[dict]:
     res = []
     out = output_dir()
@@ -812,11 +1060,22 @@ def start_run(langs: list[str], cfg: dict | None = None) -> bool:
 
     def worker():
         try:
-            for lang in langs:
+            if engine_name(cfg) == "semantic":
+                # One pass covers every language (shared whisper/chunks/beats).
+                # NOTE: never hold LOCK while running — run_semantic logs
+                # immediately, and LOCK is not reentrant, so nesting it here
+                # used to self-deadlock the worker on its first _log() call
+                # (UI showed running:true forever and an empty Console).
                 with LOCK:
-                    if JOB_STATE["cancel"]:
-                        break
-                run_language(lang, cfg)
+                    cancelled = JOB_STATE["cancel"]
+                if not cancelled:
+                    run_semantic(langs, cfg)
+            else:
+                for lang in langs:
+                    with LOCK:
+                        if JOB_STATE["cancel"]:
+                            break
+                    run_language(lang, cfg)
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}"
             with LOCK:

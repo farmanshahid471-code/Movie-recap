@@ -57,6 +57,20 @@ Open <http://localhost:8080>.
 
 ---
 
+## 🧠 Engines (Settings → Engine)
+
+The panel can drive either pipeline engine:
+
+| Engine | Flow | Needs |
+|--------|------|-------|
+| `semantic` (default) | **Step A–F**: extract the film's dialogue (faster-whisper or a `.srt`) → 5-min overlapping chunks → per-chunk action summaries → LLM writes a JSON-array recap → TTS narration with timestamps → each narration line is embedded and **semantically matched to the film moment** (pgvector/Supabase or the local fallback) → ffmpeg clips + concat + burn subtitles + mux narration | a real movie file, the LLM, dialogue (auto-installs faster-whisper), embeddings (auto-installs sentence-transformers on first run — large download) |
+| `recap` (legacy) | the original 5-step montage engine over your scripts/clips | script file or LLM; movie optional (placeholder scenes) |
+
+On first run the panel auto-installs anything missing (like it already did for
+Whisper): **faster-whisper** when no `.srt` exists and **sentence-transformers**
+for the semantic matching. The Settings → Environment pills and the readiness
+box under Movie show exactly what is installed/blocking before you press Run.
+
 ## API
 
 | Endpoint | Method | Purpose |
@@ -70,12 +84,12 @@ Open <http://localhost:8080>.
 | `/api/config` | POST | save/update persisted settings (JSON body) |
 | `/api/run` | POST | start a background run, body `{"langs":["en","zh"]}` |
 | `/api/generate` | POST | the **Generate** button: run both clips |
-| `/api/render` | POST | save edited scripts, then re-render (never calls the LLM) |
+| `/api/render` | POST | save edited scripts, then re-render (legacy engine only — returns `400` with guidance when the engine is `semantic`) |
 | `/api/stop_run` | POST | cancel the running job; the server stays up |
 | `/api/stop` | POST | cancel any run and shut the server down |
 
 A run in progress makes `/api/run`, `/api/generate` and `/api/render` return
-`409`; `/api/render` still saves your scripts in that case.
+`409`; `/api/render` still saves your scripts in that case (legacy engine).
 
 ### Examples
 
@@ -133,16 +147,21 @@ Stored in `config.json` (next to the code). Key fields:
 
 | Field | Meaning |
 |-------|---------|
-| `movie_path` | path to an owned movie **file** (empty → placeholder scenes). A folder is rejected with a message naming the videos inside it — ffmpeg would only say "Permission denied" |
+| `engine` | `semantic` (default, Step A–F) or `recap` (legacy 5-step) |
+| `movie_path` | path to an owned movie **file**. The semantic engine **requires** one; the legacy engine uses placeholder scenes when empty. A folder is rejected with a message naming the videos inside it |
 | `output_dir` | folder for the rendered clips + the `_work` intermediates (default `D:\recap`; created on demand, falls back to `recap-studio/output` with a warning if it can't be written) |
-| `storyboard` | use placeholder scenes when no movie is set |
-| `duration` | target clip length in seconds (shapes the LLM prompt in auto mode) |
-| `auto` | write the narration from the movie's dialogue (needs movie + LLM) |
-| `auto_subtitle` | optional explicit `.srt`; blank = look next to the movie, else Whisper |
-| `whisper_model` | Whisper model size used when no subtitle exists (default `small`) |
+| `storyboard` | legacy engine only: use placeholder scenes when no movie is set |
+| `duration` | target recap length in seconds (~2.5 spoken words/sec → `840` ≈ 14 min full-length) |
+| `auto` | legacy engine only: write the narration from the movie's dialogue |
+| `auto_subtitle` | optional explicit `.srt`/`.ass`/`.vtt`; blank = look next to the movie, else Whisper (both engines) |
+| `whisper_model` / `whisper_device` | Whisper model size + device used when no subtitle exists (default `small` / `auto`) |
 | `voice_en` / `voice_zh` | narrator voices (edge-tts) |
 | `subtitle_lang_en` / `subtitle_lang_zh` | subtitle languages (default `en` / `zh`) |
 | `llm_provider` / `llm_base_url` / `llm_api_key` / `llm_model` | LLM used for auto scripting (default Ollama + Qwen, no key) |
+
+Semantic-matching knobs (Step D) live in `../movie-recap-bot/config.yaml` under
+`semantic:` (`min_score`, `pre_roll`, `clip_pad`, `clip.mode`, `store: auto |
+local | supabase`). Inspect `<output>/_work/beats.json` after a run to tune them.
 
 Everything in this table is applied to the pipeline by `runner.recap_cfg()` —
 including the LLM fields, which are pushed into both the recap config and the
@@ -153,10 +172,15 @@ environment (`OLLAMA_BASE_URL`, `OPENAI_API_KEY`, …) that `recap/llm.py` reads
 
 ## How the two clips are produced
 
-Everything is driven by a single `lang` per run. The pipeline generates the English
-story script, then (for the ZH clip) the Chinese translation, narrates each with its own
-voice, burns subtitles in the same language as the dubbing, and renders to
-1920×1080 H.264 + AAC:
+> Below describes the **legacy engine** flow (one `lang` per run). With the
+> default **semantic** engine a single run covers all requested languages:
+> whisper extraction, chunking, the JSON-array recap and the semantic
+> line→film-moment matching all happen **once**, then each language is
+> narrated, subtitled and assembled from those shared beats.
+
+The legacy engine generates the English story script, then (for the ZH clip) the Chinese
+translation, narrates each with its own voice, burns subtitles in the same language as the
+dubbing, and renders to 1920×1080 H.264 + AAC:
 
 - **EN clip:** `mn`-style narration in `en`, subtitles in `en`.
 - **ZH clip:** narration in `zh-CN` Mandarin, subtitles in `简体中文`.
