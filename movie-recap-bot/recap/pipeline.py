@@ -245,7 +245,7 @@ def run(cfg: dict, clips: list[Path], storyboard: bool = False) -> list[Path]:
             en_lines, {"code": "en", "voice": en_voice}, wd, provider, split_seg
         )
     if need_zh:
-        zh_voice = lang_voice.get("zh", "zh-CN-YunxiNeural")
+        zh_voice = lang_voice.get("zh", "zh-CN-YunjianNeural")
         print(f"  * Narrating ZH ({zh_voice}) ...")
         audios["zh"] = tts.synthesize_language(
             zh_lines, {"code": "zh", "voice": zh_voice}, wd, provider, split_seg

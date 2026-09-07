@@ -69,7 +69,7 @@ DEFAULT_CONFIG = {
     "montage": "scenes",                    # legacy engine only
     "scene_len": 6.0,                       # seconds per beat
     "voice_en": "en-US-ChristopherNeural",
-    "voice_zh": "zh-CN-YunxiNeural",
+    "voice_zh": "zh-CN-YunjianNeural",
     "voice_ar": "ar-SA-HamedNeural",     # Modern Standard Arabic (male)
     "voice_es": "es-MX-JorgeNeural",     # Latin American Spanish (Mexico, male)
     "rate": "-8%",                       # edge-tts pace: +X% faster, -X% slower

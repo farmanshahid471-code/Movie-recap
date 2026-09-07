@@ -38,7 +38,7 @@ narration:
   words_per_minute: 150    # speech rate used for every length calculation
   lang_voice:
     en: "en-US-ChristopherNeural"   # warm, deep male — "storytelling" narrator
-    zh: "zh-CN-YunxiNeural"         # Mandarin Chinese (male)
+    zh: "zh-CN-YunjianNeural"         # Mandarin Chinese (male)
     ar: "ar-SA-HamedNeural"         # Arabic (Modern Standard, Saudi) — male
     es: "es-MX-JorgeNeural"         # Spanish (Mexico / Latin America) — male
   tts_provider: "edge"     # edge | elevenlabs | openai

@@ -27,7 +27,7 @@ _DEFAULTS: dict[str, Any] = {
         "words_per_minute": 150,   # speech rate used for all length maths
         # Default edge-tts narrators per language (all warm, deep male).
         "lang_voice": {"en": "en-US-ChristopherNeural",
-                       "zh": "zh-CN-YunxiNeural",
+                       "zh": "zh-CN-YunjianNeural",
                        "ar": "ar-SA-HamedNeural",    # Modern Standard Arabic
                        "es": "es-MX-JorgeNeural"},   # Latin American Spanish
         "rate": "+0%",

@@ -31,7 +31,7 @@ NAMES: dict[str, str] = {
 # narration.lang_voice).
 VOICE_DEFAULTS: dict[str, str] = {
     "en": "en-US-ChristopherNeural",
-    "zh": "zh-CN-YunxiNeural",
+    "zh": "zh-CN-YunjianNeural",
     "ar": "ar-SA-HamedNeural",      # Modern Standard Arabic (Saudi), male
     "es": "es-MX-JorgeNeural",      # Latin American Spanish (Mexico), male
 }

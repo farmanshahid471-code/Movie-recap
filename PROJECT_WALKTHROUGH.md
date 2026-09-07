@@ -164,7 +164,7 @@ Outputs `script/script_en.json` + `script/script_en.txt`.
 `recap/tts.py`
 
 Default provider **EdgeTTS** (free Microsoft neural voices, `en-US-ChristopherNeural` /
-`zh-CN-YunxiNeural`). All sentences are joined with `\n` and streamed in one call so the
+`zh-CN-YunjianNeural`). All sentences are joined with `\n` and streamed in one call so the
 pauses are natural. From the stream it collects:
 
 * `audio` chunks → written to `<lang>.mp3`
