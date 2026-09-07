@@ -519,6 +519,8 @@ _KEY_ENV = {
     "openai": "OPENAI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "gemini": "GEMINI_API_KEY",
 }
 
 # Sensible model when the provider changes and nothing better is configured.
@@ -527,6 +529,11 @@ PROVIDER_PRESETS = {
     "deepseek": {"model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1", "key": True},
     "openai": {"model": "gpt-4o-mini", "base_url": "https://api.openai.com/v1", "key": True},
     "anthropic": {"model": "claude-3-5-sonnet-latest", "base_url": "", "key": True},
+    # Free cloud tiers (no credit card):
+    #   groq   -> console.groq.com  (very fast Llama; ~30 req/min free)
+    #   gemini -> aistudio.google.com (Flash models; ~1500 requests/day free)
+    "groq": {"model": "llama-3.3-70b-versatile", "base_url": "https://api.groq.com/openai/v1", "key": True},
+    "gemini": {"model": "gemini-2.5-flash", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "key": True},
     "none": {"model": "", "base_url": "", "key": False},
 }
 

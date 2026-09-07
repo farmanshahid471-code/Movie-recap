@@ -5,7 +5,8 @@ configured. If you prefer to hand-write the script / translation (or have no
 API key), the pipeline reads them from files instead — see script.py and
 translate.py for the fallback paths.
 
-Supports: OpenAI, Anthropic, DeepSeek (OpenAI-compatible), and Ollama.
+Supports: OpenAI, Anthropic, DeepSeek (OpenAI-compatible), Ollama, and the
+free-tier OpenAI-compatible clouds Groq and Google Gemini (Flash).
 """
 from __future__ import annotations
 
@@ -28,6 +29,8 @@ DEFAULT_MODELS = {
     "deepseek": "deepseek-chat",
     "anthropic": "claude-3-5-sonnet-latest",
     "ollama": "qwen2.5",
+    "groq": "llama-3.3-70b-versatile",
+    "gemini": "gemini-2.5-flash",
 }
 
 
@@ -47,8 +50,8 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
     if provider in ("", "none"):
         raise LLMError(
             "No LLM provider configured. Set LLM_PROVIDER (openai/anthropic/"
-            "deepseek/ollama) and the matching API key, OR provide a pre-written "
-            "script/translation file (see README)."
+            "deepseek/groq/gemini/ollama) and the matching API key, OR provide "
+            "a pre-written script/translation file (see README)."
         )
 
     if provider == "openai":
@@ -73,6 +76,39 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
             timeout=timeout,
         )
         model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["deepseek"]
+        return client, model
+
+    if provider == "groq":
+        # Free tier (no credit card): console.groq.com -> API Keys.
+        # Very fast Llama on custom hardware; ~30 req/min is plenty for a recap
+        # (~25 LLM calls per movie).
+        import openai  # type: ignore
+
+        client = openai.OpenAI(
+            api_key=os.environ.get("GROQ_API_KEY"),
+            base_url=base_url
+            or os.environ.get("GROQ_BASE_URL")
+            or "https://api.groq.com/openai/v1",
+            timeout=timeout,
+        )
+        model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["groq"]
+        return client, model
+
+    if provider == "gemini":
+        # Google AI Studio free API key (aistudio.google.com -> Get API key).
+        # Flash models keep a generous free tier (~1500 requests/day). This is
+        # Google's OpenAI-compatible endpoint; model names like
+        # gemini-2.5-flash / gemini-2.0-flash work here.
+        import openai  # type: ignore
+
+        client = openai.OpenAI(
+            api_key=os.environ.get("GEMINI_API_KEY"),
+            base_url=base_url
+            or os.environ.get("GEMINI_BASE_URL")
+            or "https://generativelanguage.googleapis.com/v1beta/openai/",
+            timeout=timeout,
+        )
+        model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["gemini"]
         return client, model
 
     if provider == "anthropic":
@@ -196,4 +232,8 @@ def provider_configured(provider: str) -> bool:
         return bool(os.environ.get("DEEPSEEK_API_KEY"))
     if p == "anthropic":
         return bool(os.environ.get("ANTHROPIC_API_KEY"))
+    if p == "groq":
+        return bool(os.environ.get("GROQ_API_KEY"))
+    if p == "gemini":
+        return bool(os.environ.get("GEMINI_API_KEY"))
     return False
