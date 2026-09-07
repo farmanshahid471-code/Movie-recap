@@ -219,6 +219,10 @@ Rules:
   entire scene and never jump backwards; where the budget cannot fit every
   minor beat, drop only the least visual sub-steps and keep one sentence per
   distinct scene, with the scene's key detail intact.
+- COVER THE SECTION EVENLY: spread your ~{nsent} sentences across the whole
+  {t0}→{t1} stretch — sentence 1 about its opening beats, the middle sentences
+  about the middle beats, the last about the closing beats — so every scene
+  gets narrated and no one moment hogs the section.
 - Be SPECIFIC like a top recap channel: keep the character names and proper
   nouns from the beats ("Jessie hops onto Bullseye and rides to the twins'
   house", not "she goes to help"). About 10 to 20 words per sentence.
@@ -268,6 +272,104 @@ def _parse_segment(raw: str) -> list[str]:
     return parse_sentences_json(text)
 
 
+def _fmt_beat_lines(c: dict) -> str:
+    """Render a chunk's beats for the writer prompt: '[HH:MM:SS] beat'.
+
+    Uses the structured beat list when present (it keeps the film time of
+    every beat); otherwise falls back to the raw summary text.
+    """
+    beats = c.get("beats")
+    if beats:
+        lines = []
+        for b in beats:
+            text = (b.get("text") or "").strip()
+            if not text:
+                continue
+            t = b.get("t")
+            if t is None:
+                t = b.get("time")
+            if t is not None:
+                lines.append(f"[{_fmt_clock(float(t))}] {text}")
+            else:
+                lines.append(text)
+        if lines:
+            return "\n".join(lines)
+    return (c.get("summary") or "").strip()
+
+
+def _anchor_windows(
+    chunk_start: float,
+    chunk_end: float,
+    beats: list[dict],
+    nsent: int,
+) -> list[tuple[float, float]]:
+    """Map each narration sentence of one chunk to a tight film window.
+
+    The sentences are written in beat order and evenly spread over the chunk,
+    so sentence *k* of *N* describes the beats around story position
+    ``k/(N-1)``. This returns, per sentence, the window of film that moment
+    lives in — centred on the beat's own timestamp — instead of handing every
+    sentence the whole chunk window. When the summarizer produced no usable
+    timecodes (or there are no beats), the whole chunk window is returned for
+    every sentence (the old behaviour: the timeline then spreads them).
+    """
+    times = [
+        float(b["t"])
+        for b in (beats or [])
+        if b.get("t") is not None and (b.get("text") or "").strip()
+    ]
+    times.sort()
+    if not times or nsent <= 0:
+        return [(chunk_start, chunk_end)] * max(nsent, 1)
+
+    b, n = len(times), nsent
+
+    def _anchor(k: int) -> float:
+        if n == 1:
+            return times[b // 2]
+        return times[min(b - 1, int(round(k * (b - 1) / (n - 1))))]
+
+    anchors = [_anchor(k) for k in range(n)]
+    wins: list[tuple[float, float]] = []
+    prev_lo: float | None = None
+    k = 0
+    while k < n:
+        a = anchors[k]
+        # Consecutive sentences anchored to the SAME beat (more sentences than
+        # beats in a quiet chunk) form a run; split the beat's footage zone so
+        # each one shows a different sliver of the moment instead of repeating.
+        m = 1
+        while k + m < n and anchors[k + m] == a:
+            m += 1
+        # Footage zone for the run: the anchor moment ±6s, compressed to the
+        # midpoint toward the nearest earlier/later anchor so two close beats
+        # never show overlapping footage and the film order holds.
+        lb = a - 6.0
+        for j in range(k - 1, -1, -1):
+            if anchors[j] < a:
+                lb = max(lb, (a + anchors[j]) / 2.0)
+                break
+        rb = a + 6.0
+        for j in range(k + m, n):
+            if anchors[j] > a:
+                rb = min(rb, (a + anchors[j]) / 2.0)
+                break
+        lo0 = max(chunk_start, lb)
+        hi0 = min(chunk_end, rb)
+        if hi0 - lo0 < m:  # degenerate: squeeze many sentences into a moment
+            hi0 = min(chunk_end, max(hi0, lo0 + m))
+        step = (hi0 - lo0) / m
+        for r in range(m):
+            wl = lo0 + r * step
+            wh = lo0 + (r + 1) * step
+            if prev_lo is not None and wl < prev_lo:
+                wl = prev_lo
+            wins.append((round(wl, 3), round(max(wh, wl + 0.8), 3)))
+            prev_lo = wl
+        k += m
+    return wins
+
+
 def generate_segmented_script(
     chunk_summaries: list[dict],
     cfg_llm: dict,
@@ -278,19 +380,31 @@ def generate_segmented_script(
 ) -> list[dict]:
     """Write the recap chunk-by-chunk, in film order, hitting the word target.
 
-    ``chunk_summaries`` — ``[{"index", "start", "end", "summary"}]`` in order.
+    ``chunk_summaries`` — ``[{"index", "start", "end", "summary",
+    "beats": [{"t": seconds, "text": ...}, ...]}]`` in order (the ``beats``
+    list is optional; when present every beat keeps its film time).
 
     Returns ``[{"sentence", "film_start", "film_end"}]``: every sentence knows
-    which stretch of film it describes, so the visual timeline is chronological
-    by construction and needs no vector search at all.
+    which moment of film it describes (see ``_anchor_windows``), so the visual
+    timeline is chronological by construction and the footage shown matches
+    the moment being narrated — not just its whole chunk.
     """
     usable = [c for c in chunk_summaries if (c.get("summary") or "").strip()]
     if not usable:
         return []
 
-    # Distribute the word budget across chunks by how much story each holds,
-    # so a dense 5 minutes gets more narration than a quiet one.
-    weights = [max(len((c.get("summary") or "").split()), 20) for c in usable]
+    # Distribute the word budget across chunks by how much story each holds:
+    # beat count when available (a 20-beat chunk gets more narration room than
+    # a 5-beat one even if their summaries are similar in length), otherwise
+    # the summary's own word count.
+    def _weight(c: dict) -> float:
+        beats = c.get("beats") or []
+        if beats:
+            n = len([b for b in beats if (b.get("text") or "").strip()])
+            return float(max(n, 1))
+        return float(max(len((c.get("summary") or "").split()), 20))
+
+    weights = [_weight(c) for c in usable]
     wsum = float(sum(weights)) or 1.0
 
     out: list[dict] = []
@@ -299,6 +413,7 @@ def generate_segmented_script(
         budget = max(40, int(round(target_words * (w / wsum))))
         nsent = max(3, int(round(budget / 15)))
         t0, t1 = float(c.get("start", 0.0)), float(c.get("end", 0.0))
+        beats = c.get("beats") or []
 
         continuity = (
             f'This section continues directly from: "{tail}" — pick up from there '
@@ -310,7 +425,7 @@ def generate_segmented_script(
 
         user = PROMPT_SEGMENT_JSON.format(
             t0=_fmt_clock(t0), t1=_fmt_clock(t1), budget=budget, nsent=nsent,
-            continuity=continuity, beats=(c.get("summary") or "").strip(),
+            continuity=continuity, beats=_fmt_beat_lines(c),
         )
         raw = llm.complete(
             cfg_llm.get("provider", ""),
@@ -343,8 +458,11 @@ def generate_segmented_script(
             if count_words(" ".join(retry)) > got:
                 sents = retry
 
-        for s in sents:
-            out.append({"sentence": s, "film_start": t0, "film_end": t1})
+        # Anchor each sentence to the film moment(s) it narrates (beat
+        # timecodes) instead of giving the whole chunk to every sentence.
+        wins = _anchor_windows(t0, t1, beats, len(sents)) if sents else []
+        for s, (lo, hi) in zip(sents, wins):
+            out.append({"sentence": s, "film_start": lo, "film_end": hi})
         if sents:
             tail = sents[-1]
 

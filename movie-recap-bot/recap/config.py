@@ -45,7 +45,7 @@ _DEFAULTS: dict[str, Any] = {
     # windows never overflow. Windows of `window_seconds` sliding by
     # `window_seconds - overlap_seconds`, each carrying 30s of context.
     "chunking": {
-        "window_seconds": 300.0,   # 5-minute logical blocks
+        "window_seconds": 180.0,   # 3-minute blocks (maximum-precision mode)
         "overlap_seconds": 30.0,   # overlap between adjacent blocks
         "parallel": False,         # Ollama is single-user; keep serial by default
         "model": None,             # optional smaller/faster model for the

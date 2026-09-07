@@ -1,7 +1,8 @@
 """Step A (pass 2) — summarize the action of each transcript chunk.
 
-Each 5-minute block of raw dialogue is distilled by the LLM into *what
-actually happens* in that block (action beats, present tense, third person).
+Each 3-minute block of raw dialogue is distilled by the LLM into *what
+actually happens* in that block — timestamped action beats (present tense,
+third person) that keep the film time of every moment.
 The per-chunk summaries are then concatenated in order and handed to the final
 script writer, so a full 2-hour film never has to fit one context window.
 
@@ -30,24 +31,30 @@ SYSTEM_SUMMARY = (
     "and you never repeat raw lines — you say what the characters do."
 )
 
-PROMPT_SUMMARY = """Below is a TIMESTAMPED DIALOGUE BLOCK from a movie (what the characters say, with timecodes).
+PROMPT_SUMMARY = """Below is a TIMESTAMPED DIALOGUE BLOCK from a movie (what the characters say, with [HH:MM:SS] timecodes).
 Read it and write out the ACTION that is happening on screen — the full story-beat list of this block, in exact order.
 
-Why this matters: your output is the ONLY source the final recap narration is written from.
-Every beat you omit is a moment the recap can never show. Completeness first.
+Why this matters: your output is the ONLY source the final recap narration is written from, and its
+timecodes decide which film footage each narration line is shown over. Every beat you omit is a
+moment the recap can never show. Completeness and correct timecodes first.
 
 Rules:
 - ONE LINE PER STORY BEAT. Cover EVERY distinct moment in order: each arrival, departure,
   decision, discovery, confrontation, reveal, reaction, plan, trick, and scene change.
   Never merge two different moments into one line; never drop a beat to keep it short.
+- START EVERY LINE WITH THE TIME OF THAT BEAT as [HH:MM:SS] — use the nearest timecode from the
+  transcript block where the beat happens (round to the nearest listed one). Times must increase
+  down the list. The dialogue may discuss the past: use the time the flashback/recollection
+  happens on screen, not the time it is spoken about.
 - Name the characters who act (use the name the dialogue uses — "Buzz", "Jessie", "Lilypad").
   Keep proper nouns: places, devices, objects, and app names when they matter.
 - Present tense, third person, VISIBLE action only ("Jessie hops onto Bullseye and rides off"),
   inferred from what is said — never quote dialogue verbatim.
-- If characters talk about something that happened off screen, say what that was.
-- Keep each line dense and short (under ~30 words). No "the movie", "the scene shows", "we see".
-- Aim for roughly {budget} characters of output. Dense blocks may use the full budget; thin
-  blocks should be short. Never pad with invented events.
+- Keep each line dense (under ~35 words) but specific. No "the movie", "the scene shows", "we see".
+
+Example of the required format:
+[00:02:05] Bonnie plays with Forky and Rex in her room.
+[00:03:40] Jessie rides Bullseye across the yard.
 
 === TIMESTAMPED DIALOGUE BLOCK ===
 {transcript}
@@ -55,22 +62,51 @@ Rules:
 """
 
 
+def parse_beats(text: str) -> list[dict]:
+    """Parse timestamped beat lines ('[00:02:05] Jessie hops ...') into records.
+
+    Returns ``[{"t": float|None, "text": str}]`` in file order. ``t`` is the
+    beat's film time in seconds when the line carries a [HH:MM:SS] / [MM:SS]
+    prefix, else None (caller falls back to spreading evenly). Never raises:
+    anything that is not parseable is kept as an untimed beat so no beat is
+    lost to formatting drift.
+    """
+    out: list[dict] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        t: float | None = None
+        body = line
+        m = re.match(r"^\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]\s*(.*)$", line)
+        if m:
+            h, mi, s = m.group(1), m.group(2), m.group(3)
+            body = m.group(4).strip()
+            try:
+                t = int(h) * 3600 + int(mi) * 60 + int(s or 0)
+            except ValueError:
+                t = None
+        if body:
+            out.append({"t": t, "text": body})
+    return out
+
+
 def _summary_budget(text_chars: int) -> int:
     """Character budget for one chunk summary (maximum-detail mode).
 
-    The old ~0.22x ratio compressed a dense 5-minute block so hard that whole
-    scenes vanished before the script writer ever saw them. Default now keeps
-    ~0.42x of the raw transcript as story beats — near-complete beat coverage.
-    Tune with RECAP_SUMMARY_RATIO (e.g. 0.25 = lighter / cheaper) without
+    The old ~0.22x ratio compressed a dense block so hard that whole scenes
+    vanished before the script writer ever saw them. The default now keeps
+    ~0.6x of the raw transcript as story beats — near-complete beat coverage.
+    Tune with RECAP_SUMMARY_RATIO (e.g. 0.3 = lighter / cheaper) without
     touching code; the floor/ceiling keep degenerate inputs sane.
     """
     import os
 
     try:
-        ratio = float(os.environ.get("RECAP_SUMMARY_RATIO", "0.42"))
+        ratio = float(os.environ.get("RECAP_SUMMARY_RATIO", "0.6"))
     except ValueError:
-        ratio = 0.42
-    return max(350, min(5200, int(text_chars * ratio)))
+        ratio = 0.6
+    return max(400, min(8000, int(text_chars * ratio)))
 
 
 def _summary_max_tokens(budget_chars: int) -> int:
@@ -80,7 +116,7 @@ def _summary_max_tokens(budget_chars: int) -> int:
     ~4 chars/token, Chinese ~1; using ~0.9 tokens/char + padding caps a
     rambling summary at ~2x what the job needs without truncating a good one.
     """
-    return max(512, min(4096, int(budget_chars * 0.9) + 256))
+    return max(512, min(8192, int(budget_chars * 0.9) + 256))
 
 
 def _read_partial(path: Path) -> dict[int, str]:

@@ -178,12 +178,15 @@ Timeline knobs (Step D) live in `../movie-recap-bot/config.yaml` under
 them.
 
 **Narration precision & detail** — the script is only ever as precise as the
-story beats it is written from. The Step A summary pass now keeps ~42% of each
-dialogue block as ordered beats (maximum detail: names, objects, scene changes,
-every beat preserved) instead of a loose ~22% compression, and the script-writer
-prompt forces per-scene coverage with the beats' exact names/details. Trade
-detail vs DeepSeek tokens with the `RECAP_SUMMARY_RATIO` env var (default
-`0.42`; `0.25` = lighter/cheaper) in `../movie-recap-bot/.env`.
+story beats it is written from. The Step A summary pass keeps ~60% of each
+dialogue block as ordered, **timestamped** beats (maximum detail: names,
+objects, scene changes, every beat preserved and tagged with its film time),
+and each narration sentence is then anchored to the exact film moment of the
+beats it narrates (the timeline shows that moment ± a few seconds instead of
+spreading footage across a 5-minute chunk). Chunks are 3 minutes
+(`chunking.window_seconds` in `movie-recap-bot/config.yaml`). Trade detail vs
+DeepSeek tokens with the `RECAP_SUMMARY_RATIO` env var (default `0.6`; `0.35`
+= lighter/cheaper) in `../movie-recap-bot/.env`.
 
 Everything in this table is applied to the pipeline by `runner.recap_cfg()` —
 including the LLM fields, which are pushed into both the recap config and the

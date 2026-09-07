@@ -513,11 +513,12 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
     print(f"  * Target: {target} words ≈ {target / max(wpm, 1) * 60:.0f}s of speech "
           f"at {wpm} wpm")
 
-    # Pair each chunk with its summary so every sentence keeps the film window
-    # it was written from — that is what makes Step D chronological.
+    # Pair each chunk with its summary (and its timestamped beat list, which
+    # lets every narration sentence be anchored to the exact film moment it
+    # describes instead of the whole chunk window — Step D's input).
     chunk_summaries = [
         {"index": c["index"], "start": c["start"], "end": c["end"],
-         "summary": s}
+         "summary": s, "beats": summarize.parse_beats(s)}
         for c, s in zip(chunks, summaries)
     ]
 
@@ -526,7 +527,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
     # covers the LLM provider/model too, so switching models regenerates.
     b_marker = tdir / "script_en.marker.json"
     b_sig = _sig(merged, cfg["llm"].get("provider"), cfg["llm"].get("model"),
-                 target, "segmented-v2")
+                 target, "segmented-v3")
     seg_path = tdir / "script_en.segments.json"
     segments = None
     if _marker_ok(b_marker, b_sig) and seg_path.exists():
