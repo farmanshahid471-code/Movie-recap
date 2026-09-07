@@ -19,9 +19,19 @@ _DEFAULTS: dict[str, Any] = {
         "words_target": 2000,      # ~13-14 min at ~150 wpm (full-length recap)
         "words_min": 600,
         "words_max": 4200,
+        "words_per_minute": 150,   # speech rate used for all length maths
         "lang_voice": {"en": "en-US-ChristopherNeural", "zh": "zh-CN-YunxiNeural"},
         "rate": "+0%",
         "tts_provider": "edge",
+    },
+    # Step D — chronological timeline (replaces semantic vector matching).
+    # Beats advance monotonically through the film and every beat's visual is
+    # locked to its narration cue, so video length == audio length exactly.
+    "timeline": {
+        "micro_cut_seconds": 3.0,  # aim for a new shot roughly every 3s
+        "max_cuts_per_beat": 3,    # a long sentence becomes up to 3 micro-shots
+        "min_cut_seconds": 1.2,    # never flash a shot shorter than this
+        "pre_roll": 0.4,           # start each shot slightly before its moment
     },
     # Whisper ASR tuning (auto-recap from the movie's own audio).
     "dialogue": {
@@ -53,7 +63,7 @@ _DEFAULTS: dict[str, Any] = {
         "clip_pad": 0.15,          # extra footage after the narration of a line
         "min_clip": 0.8,           # never cut a beat shorter than this
         "max_clip": 10.0,          # nor longer than this
-        "clip": {"mode": "copy"},  # copy (fast, keyframe) | reencode (frame-exact)
+        "clip": {"mode": "reencode"},  # reencode = frame-exact (required for A/V lock)
     },
     "subtitles": {
         "font": "Noto Serif CJK SC",
@@ -83,7 +93,8 @@ _DEFAULTS: dict[str, Any] = {
         "bgm": "",
         "bgm_volume": 0.12,
     },
-    "llm": {"provider": "ollama", "model": "qwen2.5", "base_url": "http://localhost:11434/v1"},
+    "llm": {"provider": "deepseek", "model": "deepseek-chat",
+            "base_url": "https://api.deepseek.com/v1"},
 }
 
 
@@ -144,12 +155,26 @@ def load_config(path: str | Path | None = None) -> dict:
     cfg["llm"]["provider"] = os.environ.get(
         "LLM_PROVIDER", cfg["llm"].get("provider", "")
     )
-    cfg["llm"]["model"] = os.environ.get("MODEL_NAME", cfg["llm"].get("model", "qwen2.5"))
-    # Ollama base URL (OpenAI-compatible).
-    cfg["llm"]["base_url"] = os.environ.get(
-        "OLLAMA_BASE_URL", cfg["llm"].get("base_url", "http://localhost:11434/v1")
+    cfg["llm"]["model"] = os.environ.get(
+        "MODEL_NAME", cfg["llm"].get("model", "deepseek-chat")
     )
-    if cfg["llm"]["provider"] == "ollama":
+    # Base URL is per-provider. Previously OLLAMA_BASE_URL was applied to every
+    # provider, so a stale env var silently pointed DeepSeek at localhost:11434.
+    _prov = (cfg["llm"].get("provider") or "").strip().lower()
+    _PROVIDER_BASE_ENV = {
+        "ollama": ("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+        "deepseek": ("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+        "openai": ("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        "groq": ("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+        "gemini": ("GEMINI_BASE_URL",
+                   "https://generativelanguage.googleapis.com/v1beta/openai/"),
+    }
+    _env_key, _fallback = _PROVIDER_BASE_ENV.get(_prov, ("", ""))
+    if _env_key and os.environ.get(_env_key):
+        cfg["llm"]["base_url"] = os.environ[_env_key]
+    elif not cfg["llm"].get("base_url") and _fallback:
+        cfg["llm"]["base_url"] = _fallback
+    if _prov == "ollama" and cfg["llm"].get("base_url"):
         os.environ.setdefault("OLLAMA_BASE_URL", cfg["llm"]["base_url"])
     cfg["narration"]["tts_provider"] = os.environ.get(
         "TTS_PROVIDER", cfg["narration"].get("tts_provider", "edge")

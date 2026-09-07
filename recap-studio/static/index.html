@@ -339,15 +339,15 @@ function settingsCard(cfg, s){
       '<div class="desc mt">Target length shapes the narration (~2.5 spoken words/second). 840 ≈ 14 min (full-length); 300 ≈ 5 min.</div>' +
     '</fieldset>' +
 
-    '<fieldset id="fm_llm"><legend>LLM — Ollama + Qwen (free, local, no key)</legend>' +
+    '<fieldset id="fm_llm"><legend>LLM — DeepSeek (recommended: fast, cheap, reliable JSON)</legend>' +
       '<div class="grid2">' +
         '<div><label>Provider</label><select id="llm_provider">' +
-          ['ollama','deepseek','groq','gemini','openai','anthropic','none'].map(p =>
-            '<option value="' + p + '"' + ((cfg.llm_provider || 'ollama') === p ? ' selected' : '') + '>' + p + '</option>').join('') +
+          ['deepseek','ollama','groq','gemini','openai','anthropic','none'].map(p =>
+            '<option value="' + p + '"' + ((cfg.llm_provider || 'deepseek') === p ? ' selected' : '') + '>' + p + '</option>').join('') +
         '</select></div>' +
         '<div><label>Model</label><input type="text" id="llm_model" value="' + esc(cfg.llm_model) + '"></div>' +
         '<div><label>Base URL</label><input type="text" id="llm_base_url" value="' + esc(cfg.llm_base_url) + '"></div>' +
-        '<div><label>API key</label><input type="text" id="llm_api_key" value="' + esc(cfg.llm_api_key) + '" placeholder="not required for Ollama"></div>' +
+        '<div><label>API key</label><input type="text" id="llm_api_key" value="' + esc(cfg.llm_api_key) + '" placeholder="DEEPSEEK_API_KEY (not needed for Ollama)"></div>' +
       '</div>' +
       '<div class="desc mt" id="llmNote"></div>' +
       '<div class="btnrow"><button class="btn primary" id="saveCfg">Save settings</button></div>' +
@@ -420,7 +420,7 @@ function settingsCard(cfg, s){
   const provSel = card.querySelector('#llm_provider');
   const knownModels = Object.values(PRESETS).map(p => p.model).filter(Boolean);
   provSel.onchange = () => {
-    const p = PRESETS[provSel.value] || PRESETS.ollama;
+    const p = PRESETS[provSel.value] || PRESETS.deepseek;
     const m = card.querySelector('#llm_model'), b = card.querySelector('#llm_base_url'), k = card.querySelector('#llm_api_key');
     if (!m.value.trim() || knownModels.includes(m.value.trim())) m.value = p.model;
     if (!b.value.trim() || Object.values(PRESETS).some(x => x.base && x.base === b.value.trim())) b.value = p.base;
@@ -502,7 +502,7 @@ function collectSettings(){
   put('voice_zh', v('voice_zh'));
   put('subtitle_lang_zh', v('subtitle_lang_zh'));
   const du = v('duration'); if (du !== null) base.duration = parseInt(du, 10) || 60;
-  const lp = v('llm_provider'); if (lp !== null) base.llm_provider = lp.trim() || 'ollama';
+  const lp = v('llm_provider'); if (lp !== null) base.llm_provider = lp.trim() || 'deepseek';
   const lm = v('llm_model'); if (lm !== null) base.llm_model = lm.trim();
   const lb = v('llm_base_url'); if (lb !== null) base.llm_base_url = lb.trim();
   const lk = v('llm_api_key'); if (lk !== null) base.llm_api_key = lk.trim();

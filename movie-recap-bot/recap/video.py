@@ -141,6 +141,47 @@ def _filter_arg(name: str) -> str:
     return "".join(out)
 
 
+def burn_and_mux_locked(
+    base: Path,
+    narration_mp3: Path,
+    ass_path: Path,
+    out_mp4: Path,
+    cfg_video: dict,
+    duration: float | None = None,
+) -> Path:
+    """Burn subtitles + mux narration with an EXPLICIT duration.
+
+    ``burn_and_mux`` uses ``-shortest``, which silently truncates the render to
+    whichever stream ends first. When the visual track was built only from the
+    spoken clip lengths (ignoring the pauses between sentences) that meant a
+    900-second narration came out as a ~360-second video with the back half of
+    the story missing. Here the video is already audio-locked, so we state the
+    duration outright and never let ffmpeg pick.
+    """
+    out_mp4.parent.mkdir(parents=True, exist_ok=True)
+    ass_path = Path(ass_path)
+    if duration is None:
+        duration = probe_duration(narration_mp3)
+    cmd = [
+        which_ffmpeg(), "-y",
+        "-i", str(base),
+        "-i", str(narration_mp3),
+        "-vf", f"ass={_filter_arg(ass_path.name)}",
+        "-map", "0:v", "-map", "1:a",
+        "-c:v", cfg_video.get("codec", "libx264"),
+        "-preset", cfg_video.get("preset", "medium"),
+        "-crf", str(cfg_video.get("crf", 20)),
+        "-c:a", cfg_video.get("audio_codec", "aac"),
+        "-b:a", cfg_video.get("audio_bitrate", "192k"),
+        "-pix_fmt", "yuv420p",
+        "-t", f"{float(duration):.3f}",
+        "-movflags", "+faststart",
+        str(out_mp4),
+    ]
+    run(cmd, cwd=ass_path.parent)
+    return out_mp4
+
+
 def burn_and_mux(
     base: Path,
     narration_mp3: Path,

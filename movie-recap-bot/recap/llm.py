@@ -23,6 +23,18 @@ class LLMError(RuntimeError):
     pass
 
 
+def _retryable(exc: Exception) -> bool:
+    """True for transient faults worth retrying (network, 429, 5xx)."""
+    s = f"{type(exc).__name__}: {exc}".lower()
+    markers = (
+        "timeout", "timed out", "connection", "conn reset", "temporarily",
+        "rate limit", "ratelimit", "429", "500", "502", "503", "504",
+        "overloaded", "unavailable", "apiconnection", "internalserver",
+        "getaddrinfo", "empty message",
+    )
+    return any(m in s for m in markers)
+
+
 # Per-provider fallback when no model is configured.
 DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
@@ -32,6 +44,11 @@ DEFAULT_MODELS = {
     "groq": "llama-3.3-70b-versatile",
     "gemini": "gemini-3.6-flash",
 }
+
+# Providers whose OpenAI-compatible endpoint supports
+# response_format={"type": "json_object"}. DeepSeek does; Ollama's shim does
+# not accept it reliably across versions, so we only ask where it is safe.
+_JSON_MODE_PROVIDERS = {"deepseek", "openai", "groq"}
 
 
 def _client_from(provider: str, model: str, base_url: str | None = None):
@@ -182,31 +199,79 @@ def complete(
     system: str,
     user: str,
     base_url: str | None = None,
+    json_mode: bool = False,
 ) -> str:
-    """Send a single completion (no history). Returns assistant text."""
+    """Send a single completion (no history). Returns assistant text.
+
+    ``json_mode`` asks the provider to guarantee syntactically valid JSON
+    (DeepSeek / OpenAI / Groq support ``response_format``). The callers still
+    parse defensively, so a provider that ignores the hint is harmless.
+
+    Transient network / rate-limit failures are retried with backoff — a cloud
+    provider hiccup two thirds of the way through a 20-section script pass
+    should not throw the whole run away.
+    """
+    import time
+
+    p = (provider or "").strip().lower()
     client, resolved_model = _client_from(provider, model, base_url)
 
-    try:  # OpenAI-compatible + Ollama
-        resp = client.chat.completions.create(
-            model=resolved_model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=0.7,
-        )
-        return resp.choices[0].message.content.strip()
-    except AttributeError:
-        pass
-    except Exception as exc:  # surface a friendly Ollama hint
-        if provider == "ollama":
-            raise LLMError(
-                f"Ollama request failed ({type(exc).__name__}: {exc}). "
-                "Make sure Ollama is running (`ollama serve`) and the model is "
-                f"pulled (`ollama pull {resolved_model}`), and that "
-                "OLLAMA_BASE_URL points at it."
-            ) from exc
-        raise
+    kwargs: dict = {
+        "model": resolved_model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": float(os.environ.get("LLM_TEMPERATURE", "0.7")),
+    }
+    # deepseek-reasoner rejects temperature/response_format; keep the call bare.
+    if "reasoner" in (resolved_model or ""):
+        kwargs.pop("temperature", None)
+    elif json_mode and p in _JSON_MODE_PROVIDERS:
+        kwargs["response_format"] = {"type": "json_object"}
+
+    try:
+        attempts = int(os.environ.get("LLM_RETRIES", "4"))
+    except ValueError:
+        attempts = 4
+
+    last: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:  # OpenAI-compatible + Ollama
+            resp = client.chat.completions.create(**kwargs)
+            text = (resp.choices[0].message.content or "").strip()
+            if text:
+                return text
+            last = LLMError("provider returned an empty message")
+        except AttributeError:
+            last = None
+            break  # not an OpenAI-style client -> fall through to Anthropic
+        except Exception as exc:
+            last = exc
+            if not _retryable(exc) or attempt >= max(1, attempts) - 1:
+                if p == "ollama":
+                    raise LLMError(
+                        f"Ollama request failed ({type(exc).__name__}: {exc}). "
+                        "Make sure Ollama is running (`ollama serve`) and the model is "
+                        f"pulled (`ollama pull {resolved_model}`), and that "
+                        "OLLAMA_BASE_URL points at it."
+                    ) from exc
+                if p == "deepseek":
+                    raise LLMError(
+                        f"DeepSeek request failed ({type(exc).__name__}: {exc}).\n"
+                        "  - check DEEPSEEK_API_KEY is set and has credit "
+                        "(platform.deepseek.com -> Usage)\n"
+                        f"  - model '{resolved_model}' should be deepseek-chat "
+                        "or deepseek-reasoner"
+                    ) from exc
+                raise
+        wait = min(2.0 * (2 ** attempt), 30.0)
+        print(f"  * LLM call failed ({type(last).__name__}); retry "
+              f"{attempt + 1}/{attempts} in {wait:.0f}s ...", flush=True)
+        time.sleep(wait)
+
+    if last is not None and not isinstance(last, AttributeError):
+        raise LLMError(f"LLM call failed after {attempts} attempts: {last}")
 
     # Anthropic
     resp = client.messages.create(

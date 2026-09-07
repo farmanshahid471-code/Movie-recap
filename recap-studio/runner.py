@@ -69,10 +69,10 @@ DEFAULT_CONFIG = {
     "subtitle_lang_zh": "zh",
     # LLM — Ollama + Qwen (free, local, no key). Used to auto-write the recap
     # script from your movie's dialogue once a key-free local server is up.
-    "llm_provider": "ollama",
-    "llm_base_url": "http://localhost:11434/v1",
-    "llm_api_key": "",               # not needed for Ollama
-    "llm_model": "qwen2.5",
+    "llm_provider": "deepseek",
+    "llm_base_url": "https://api.deepseek.com/v1",
+    "llm_api_key": "",               # DEEPSEEK_API_KEY (or paste in Settings)
+    "llm_model": "deepseek-chat",
     # Auto-recap flags
     "auto": False,                   # write the recap from the movie's dialogue (needs LLM)
     "auto_subtitle": "",             # optional explicit .srt for dialogue; blank = auto-detect
@@ -456,15 +456,27 @@ def _apply_common(rc: dict, cfg: dict, lang: str | None = None) -> None:
     rc["narration"]["lang_voice"]["zh"] = cfg.get("voice_zh") or "zh-CN-YunxiNeural"
     rc["narration"]["rate"] = "+0%"
 
-    # Target clip length only shapes the narration length; edge-tts narrates
-    # roughly 2.5 words/second.
+    # Target clip length -> narration word target.
+    #
+    # This used to be `secs * 2.5` (150 wpm) but then clamped to words_max
+    # (4200). A 900s request needs 2250 words, which survived the clamp, yet
+    # the OLD clamp path plus a short LLM answer is what produced 360s videos.
+    # We now use the configured wpm and raise the ceiling to match the request
+    # so the target is never silently reduced.
     try:
         secs = int(cfg.get("duration") or 0)
     except (TypeError, ValueError):
         secs = 0
     if secs > 0:
-        words = min(max(int(secs * 2.5), 120), int(rc["narration"].get("words_max", 4200)))
+        wpm = int(rc["narration"].get("words_per_minute", 150))
+        words = max(int(round(secs / 60 * wpm)), 120)
         rc["narration"]["words_target"] = words
+        rc["narration"]["words_min"] = min(
+            int(rc["narration"].get("words_min", 600)), words
+        )
+        rc["narration"]["words_max"] = max(
+            int(rc["narration"].get("words_max", 4200)), int(words * 1.6)
+        )
 
     if lang is not None:
         rc["subtitles"]["display_lang"] = cfg.get(f"subtitle_lang_{lang}", lang) or lang

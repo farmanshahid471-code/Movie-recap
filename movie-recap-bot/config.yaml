@@ -17,9 +17,10 @@ language:
 
 narration:
   # Full-length recap style (~10-16 min of speech at ~150 wpm).
-  words_target: 2000
+  words_target: 2250       # 900s at 150 wpm; --seconds/--minutes overrides it
   words_min: 600
-  words_max: 4200
+  words_max: 6000
+  words_per_minute: 150    # speech rate used for every length calculation
   lang_voice:
     en: "en-US-ChristopherNeural"
     zh: "zh-CN-YunxiNeural"
@@ -43,7 +44,16 @@ chunking:
   # LLM step on CPU-only PCs). e.g. "qwen2.5:3b" ~4x faster than qwen2.5 7B.
   model: null
 
-# Step D — semantic timestamp mapping (recap line -> film moment).
+# Step D — chronological timeline (recap line -> film moment, in order).
+# Beats advance monotonically through the film and each beat's visual length is
+# locked to its narration cue, so the video can never drift or be truncated.
+timeline:
+  micro_cut_seconds: 3.0   # aim for a new shot roughly every 3 seconds
+  max_cuts_per_beat: 3     # one sentence becomes up to 3 micro-shots
+  min_cut_seconds: 1.2     # never flash a shot shorter than this
+  pre_roll: 0.4            # start each shot slightly before its moment
+
+# (legacy) semantic vector matching — no longer used for beat selection.
 semantic:
   enabled: true
   embedding_model: "all-MiniLM-L6-v2"   # local, 384-dim
@@ -60,7 +70,9 @@ semantic:
   min_clip: 0.8            # never cut a beat shorter than this
   max_clip: 10.0           # nor longer than this
   clip:
-    mode: "copy"           # copy = fast stream copy | reencode = frame-exact
+    # reencode is now the default: stream copy snaps each cut to the nearest
+    # keyframe and those errors accumulate into seconds of audio/video drift.
+    mode: "reencode"
 
 subtitles:
   font: "Noto Serif CJK SC"
@@ -89,6 +101,9 @@ video:
   bgm_volume: 0.12
 
 llm:
-  provider: ollama         # free, local, no key. Start with `ollama serve`
-  model: qwen2.5           # pull with `ollama pull qwen2.5`
-  base_url: "http://localhost:11434/v1"
+  # DeepSeek: strong, cheap, reliable JSON mode, and fast enough that the
+  # section-by-section script pass finishes in a couple of minutes.
+  # Set DEEPSEEK_API_KEY in .env (get one at platform.deepseek.com).
+  provider: deepseek
+  model: deepseek-chat     # or deepseek-reasoner for harder plots
+  base_url: "https://api.deepseek.com/v1"

@@ -96,14 +96,19 @@ def cmd_auto(args: argparse.Namespace) -> None:
     if args.whisper_device:
         cfg.setdefault("dialogue", {})["whisper_device"] = args.whisper_device
     # Target narration length (full-length ~10-16 min by default).
-    if args.minutes:
-        mins = max(1, int(args.minutes))
+    if args.minutes or args.seconds:
         nar = cfg.setdefault("narration", {})
-        words = int(mins * 150)
-        words = max(words, int(nar.get("words_min", 600)))
-        words = min(words, int(nar.get("words_max", 4200)))
+        wpm = int(nar.get("words_per_minute", 150))
+        secs = int(args.seconds) if args.seconds else int(args.minutes) * 60
+        secs = max(30, secs)
+        words = int(round(secs / 60 * wpm))
+        # Raise the ceiling to whatever was asked for: silently clamping the
+        # target to words_max is how a 900s request became a short video.
         nar["words_target"] = words
-        print(f"  * Target narration: ~{mins} min -> {words} words")
+        nar["words_min"] = min(int(nar.get("words_min", 600)), words)
+        nar["words_max"] = max(int(nar.get("words_max", 4200)), int(words * 1.6))
+        print(f"  * Target narration: {secs}s (~{secs / 60:.1f} min) "
+              f"-> {words} words at {wpm} wpm")
 
     movie = Path(args.movie)
     if not movie.exists():
@@ -193,6 +198,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="whisper device: auto | cpu | cuda | cuda:0")
     p_auto.add_argument("--minutes", default=None, type=int,
                         help="target narration length in minutes (~150 wpm)")
+    p_auto.add_argument("--seconds", default=None, type=int,
+                        help="target narration length in seconds (overrides --minutes)")
     p_auto.add_argument("--langs", default=None, help="comma list, e.g. en,zh")
     p_auto.add_argument("--name", default=None, help="output name")
     p_auto.set_defaults(func=cmd_auto)

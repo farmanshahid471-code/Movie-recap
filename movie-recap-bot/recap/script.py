@@ -160,8 +160,176 @@ def generate_script_json(
         SYSTEM_RECAP_WRITER,
         user,
         base_url=cfg_llm.get("base_url"),
+        json_mode=True,
     )
     return parse_sentences_json(raw)
+
+
+# ===========================================================================
+# Segmented script generation (chronological + length-accurate)
+# ===========================================================================
+#
+# Why not one big call?
+# --------------------
+# Asking a model for "2250 words in one JSON array" reliably under-delivers —
+# a 900-word answer becomes a 6-minute video when 15 were requested. That is
+# exactly the reported bug. Instead we walk the film's own chunks in order and
+# ask for a *word budget per chunk*, which:
+#   * keeps every call small (models hit small targets accurately),
+#   * yields the total length by construction (sum of budgets == target),
+#   * tags every sentence with the film window it came from, which is what
+#     makes the visual timeline strictly chronological (see recap/timeline.py).
+
+SYSTEM_RECAP_BEATS = (
+    "You are the head writer for a top-tier YouTube movie-recap channel "
+    "(the 'Movie Recaps' style). You write narration that is spoken over the "
+    "film's own footage. Never mention being an AI. Never quote dialogue. "
+    "Never say 'the movie', 'the film', 'the scene', 'we see' or 'the camera'. "
+    "Third person, present tense, active verbs, character names. "
+    "Deadpan, propulsive, lightly witty. Every sentence is a VISIBLE action."
+)
+
+PROMPT_SEGMENT_JSON = """You are writing ONE SECTION of a full movie recap narration.
+
+This section covers the part of the film from {t0} to {t1}. Below are the action
+beats for that stretch, in order.
+
+Write EXACTLY about {budget} words of narration for this section — this is a hard
+requirement, the audio timing depends on it. That is roughly {nsent} sentences.
+
+Rules:
+- Third person, PRESENT tense. Every sentence is something a viewer can SEE happen
+  ("Troy kicks the door open.", "The van slams into the barricade.").
+- One self-contained visual action per sentence, about 10 to 20 words.
+- Strictly chronological within this section. Do not jump ahead or recap backwards.
+- Never quote dialogue. Never say "the movie", "the film", "the scene shows",
+  "we see", "the camera", or comment on the filmmaking.
+- Use character names consistently.
+- Do not write an intro, outro, heading or summary. Only the action narration.
+- {continuity}
+
+Respond with ONLY a JSON object in this exact shape, no markdown fences:
+{{"sentences": ["First sentence.", "Second sentence."]}}
+
+=== ACTION BEATS FOR THIS SECTION ===
+{beats}
+=== END ===
+"""
+
+
+def _fmt_clock(seconds: float) -> str:
+    s = max(int(seconds), 0)
+    return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+
+
+def _parse_segment(raw: str) -> list[str]:
+    """Parse {"sentences":[...]}, tolerating the usual model sloppiness."""
+    import json
+    import re
+
+    if not raw:
+        return []
+    text = raw.strip()
+    fences = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.S)
+    if fences:
+        text = fences[-1].strip()
+    # object form
+    a, b = text.find("{"), text.rfind("}")
+    if a != -1 and b > a:
+        try:
+            data = json.loads(text[a : b + 1])
+            if isinstance(data, dict):
+                for key in ("sentences", "narration", "lines", "script"):
+                    if isinstance(data.get(key), list):
+                        return _clean_sentences(data[key])
+        except Exception:
+            pass
+    # bare array form
+    return parse_sentences_json(text)
+
+
+def generate_segmented_script(
+    chunk_summaries: list[dict],
+    cfg_llm: dict,
+    target_words: int,
+    *,
+    words_per_minute: int = 150,
+    progress=None,
+) -> list[dict]:
+    """Write the recap chunk-by-chunk, in film order, hitting the word target.
+
+    ``chunk_summaries`` — ``[{"index", "start", "end", "summary"}]`` in order.
+
+    Returns ``[{"sentence", "film_start", "film_end"}]``: every sentence knows
+    which stretch of film it describes, so the visual timeline is chronological
+    by construction and needs no vector search at all.
+    """
+    usable = [c for c in chunk_summaries if (c.get("summary") or "").strip()]
+    if not usable:
+        return []
+
+    # Distribute the word budget across chunks by how much story each holds,
+    # so a dense 5 minutes gets more narration than a quiet one.
+    weights = [max(len((c.get("summary") or "").split()), 20) for c in usable]
+    wsum = float(sum(weights)) or 1.0
+
+    out: list[dict] = []
+    tail = ""  # last sentence of the previous section, for continuity
+    for pos, (c, w) in enumerate(zip(usable, weights)):
+        budget = max(40, int(round(target_words * (w / wsum))))
+        nsent = max(3, int(round(budget / 15)))
+        t0, t1 = float(c.get("start", 0.0)), float(c.get("end", 0.0))
+
+        continuity = (
+            f'This section continues directly from: "{tail}" — pick up from there '
+            "without repeating it."
+            if tail
+            else "This is the OPENING of the recap. Start with the very first thing "
+            "that happens on screen. Do not write a title or a hook."
+        )
+
+        user = PROMPT_SEGMENT_JSON.format(
+            t0=_fmt_clock(t0), t1=_fmt_clock(t1), budget=budget, nsent=nsent,
+            continuity=continuity, beats=(c.get("summary") or "").strip(),
+        )
+        raw = llm.complete(
+            cfg_llm.get("provider", ""),
+            cfg_llm.get("model", ""),
+            SYSTEM_RECAP_BEATS,
+            user,
+            base_url=cfg_llm.get("base_url"),
+            json_mode=True,
+        )
+        sents = _parse_segment(raw)
+
+        # One retry if the model badly under-delivered on this section.
+        got = count_words(" ".join(sents))
+        if sents and got < budget * 0.55:
+            more = llm.complete(
+                cfg_llm.get("provider", ""),
+                cfg_llm.get("model", ""),
+                SYSTEM_RECAP_BEATS,
+                user + (
+                    f"\n\nIMPORTANT: your previous attempt was only {got} words. "
+                    f"Write the FULL {budget} words this time — expand the action "
+                    "into more distinct visual beats. Same JSON shape."
+                ),
+                base_url=cfg_llm.get("base_url"),
+                json_mode=True,
+            )
+            retry = _parse_segment(more)
+            if count_words(" ".join(retry)) > got:
+                sents = retry
+
+        for s in sents:
+            out.append({"sentence": s, "film_start": t0, "film_end": t1})
+        if sents:
+            tail = sents[-1]
+
+        if progress:
+            progress(pos + 1, len(usable), count_words(" ".join(sents)), budget)
+
+    return out
 
 
 def render_prompt(notes: str, target: int, mn: int, mx: int) -> str:

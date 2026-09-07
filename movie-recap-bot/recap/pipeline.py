@@ -24,7 +24,7 @@ import json
 from pathlib import Path
 
 from . import (chunk, clip, dialogue, llm, match, scenes, script, subtitles,
-               summarize, translate, tts, video)
+               summarize, timeline, translate, tts, video)
 from .config import out_dir, work_dir
 from .dialogue import DialogueError
 from .util import count_words, probe_duration
@@ -276,7 +276,10 @@ def run(cfg: dict, clips: list[Path], storyboard: bool = False) -> list[Path]:
         base = video.add_bgm_if_any(base, cfg["video"].get("bgm", ""), cfg["video"].get("bgm_volume", 0.12), wd)
         ass = wd / f"{code}.ass"
         out_mp4 = outd / f"{name}_{code}.mp4"
-        video.burn_and_mux(base, mp3, ass, out_mp4, cfg["video"])
+        # Explicit duration, never -shortest: the montage is built to `target`
+        # but any rounding there must not silently clip the narration.
+        video.burn_and_mux_locked(base, mp3, ass, out_mp4, cfg["video"],
+                                  duration=probe_duration(mp3))
         results.append(out_mp4)
         print(f"  + {out_mp4}")
 
@@ -322,17 +325,6 @@ def _resolve_narration_lines(cfg: dict, code: str, en_sentences: list[str], wd: 
     )
 
 
-def _anchors_for_lines(beats: list[dict], n_lines: int) -> list[dict]:
-    """Reindex anchors when a language's line count differs from EN's."""
-    if n_lines == len(beats):
-        return beats
-    out = []
-    for i in range(n_lines):
-        src = beats[min(int(i * len(beats) / max(n_lines, 1)), len(beats) - 1)]
-        out.append({**src, "index": i, "sentence": ""})
-    return out
-
-
 def _write_json(obj, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -343,11 +335,17 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
 
     Step A  extract dialogue (faster-whisper / .srt) -> 5-min overlapping chunks
             -> per-chunk action summaries
-    Step B  final narrative pass -> JSON array of sentences (EN master)
+    Step B  section-by-section narration pass -> sentences tagged with the film
+            window they describe (EN master), sized to hit the word target
     Step C  TTS narration per language with sentence (+word) timestamps
-    Step D  embed transcript + script, cosine-match via pgvector store -> beats
-    Step E  ffmpeg-clip each beat from the movie (stream copy by default)
-    Step F  concat -> burn .ass subtitles -> mux narration -> <name>_<code>.mp4
+    Step D  chronological timeline: beats advance monotonically through the
+            film, each locked to its narration cue (no vector search)
+    Step E  ffmpeg-clip each micro-shot frame-exactly from the movie
+    Step F  concat -> burn .ass subtitles -> mux narration at an explicit
+            duration -> <name>_<code>.mp4
+
+    Video length always equals narration length; the render is never truncated
+    by -shortest and never drifts out of sync.
     """
     movie = Path(movie)
     if not movie.exists():
@@ -355,9 +353,18 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
 
     provider = cfg["llm"].get("provider", "")
     if not llm.provider_configured(provider):
+        hint = {
+            "deepseek": "Set DEEPSEEK_API_KEY in .env (get a key at "
+                        "platform.deepseek.com -> API keys).",
+            "openai": "Set OPENAI_API_KEY in .env.",
+            "groq": "Set GROQ_API_KEY in .env.",
+            "gemini": "Set GEMINI_API_KEY in .env.",
+            "anthropic": "Set ANTHROPIC_API_KEY in .env.",
+        }.get((provider or "").strip().lower(),
+              "Set LLM_PROVIDER=deepseek and DEEPSEEK_API_KEY in .env.")
         raise DialogueError(
-            f"Auto-recap needs an LLM provider; current provider={provider!r}. "
-            "Set LLM_PROVIDER (e.g. ollama) in .env / config.yaml."
+            f"Auto-recap needs a working LLM; provider={provider!r} is not "
+            f"configured. {hint}"
         )
 
     outd = out_dir(cfg)
@@ -480,49 +487,79 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
           f"(script/summaries.txt)")
 
     # ------------------------------------------------------------- Step B
-    print("== Step B: Script generation (JSON array of sentences) ==")
+    print("== Step B: Script generation (chronological, length-locked) ==")
     llm.verify_model(cfg["llm"])   # fail fast if the main model is missing
     nar = cfg["narration"]
     target = int(nar.get("words_target", 2000))
     mn = int(nar.get("words_min", 600))
     mx = int(nar.get("words_max", 4200))
+    wpm = int(nar.get("words_per_minute", 150))
+    print(f"  * Target: {target} words ≈ {target / max(wpm, 1) * 60:.0f}s of speech "
+          f"at {wpm} wpm")
+
+    # Pair each chunk with its summary so every sentence keeps the film window
+    # it was written from — that is what makes Step D chronological.
+    chunk_summaries = [
+        {"index": c["index"], "start": c["start"], "end": c["end"],
+         "summary": s}
+        for c, s in zip(chunks, summaries)
+    ]
 
     # Resume: reuse the existing script when the summaries + LLM settings are
     # unchanged (e.g. the previous run failed later at TTS). The signature
     # covers the LLM provider/model too, so switching models regenerates.
     b_marker = tdir / "script_en.marker.json"
-    b_sig = _sig(merged, cfg["llm"].get("provider"), cfg["llm"].get("model"), target)
-    if _marker_ok(b_marker, b_sig) and (tdir / "script_en.json").exists():
+    b_sig = _sig(merged, cfg["llm"].get("provider"), cfg["llm"].get("model"),
+                 target, "segmented-v2")
+    seg_path = tdir / "script_en.segments.json"
+    segments = None
+    if _marker_ok(b_marker, b_sig) and seg_path.exists():
         try:
-            sentences = json.loads((tdir / "script_en.json").read_text(encoding="utf-8"))
+            segments = json.loads(seg_path.read_text(encoding="utf-8")) or None
         except Exception:
-            sentences = []
-        if sentences:
-            print(f"  * Reusing existing EN script ({len(sentences)} sentences — "
-                  f"matches this movie/summaries/LLM). Delete script_en.json + "
-                  f"script_en.marker.json to force a new script.")
-        else:
-            sentences = None
-    else:
-        sentences = None
-    if sentences is None:
-        if (cfg["llm"].get("provider") or "").lower() == "ollama":
-            print("  * (writing the full script is one long LLM call — on CPU this "
-                  "can take 10-40 min; no output until it returns. Speed up with "
-                  "MODEL_NAME=qwen2.5:3b in .env, or switch to deepseek.)")
-        sentences = script.generate_script_json(merged, cfg["llm"], target, mn, mx)
-        if len(sentences) < 10:
+            segments = None
+        if segments:
+            print(f"  * Reusing existing EN script ({len(segments)} sentences — "
+                  f"matches this movie/summaries/LLM). Delete "
+                  f"script_en.segments.json + script_en.marker.json to force a "
+                  f"new script.")
+
+    if segments is None:
+        def _prog(done: int, total: int, got: int, budget: int) -> None:
+            print(f"    ... section {done}/{total}: {got} words "
+                  f"(budget {budget})", flush=True)
+
+        print(f"  * Writing the recap section by section over {len(chunk_summaries)} "
+              f"chunks (keeps every LLM call small and hits the length target) ...")
+        segments = script.generate_segmented_script(
+            chunk_summaries, cfg["llm"], target,
+            words_per_minute=wpm, progress=_prog,
+        )
+        if len(segments) < 10:
             raise DialogueError(
-                f"LLM returned only {len(sentences)} sentences — the recap looks "
-                "broken. Retry with a larger model or check the Ollama context."
+                f"LLM returned only {len(segments)} sentences — the recap looks "
+                "broken. Check the API key/credit, or try a larger model."
             )
-        script.write_script_file("\n".join(sentences), tdir / "script_en.txt")
-        (tdir / "script_en.json").write_text(
-            json.dumps(sentences, ensure_ascii=False, indent=2), encoding="utf-8"
+        seg_path.write_text(
+            json.dumps(segments, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         _write_marker(b_marker, b_sig)
-        print(f"  * EN recap: {len(sentences)} sentences, "
-              f"{count_words(' '.join(sentences))} words (script_en.json/.txt)")
+
+    sentences = [s["sentence"] for s in segments]
+    got_words = count_words(" ".join(sentences))
+    est = got_words / max(wpm, 1) * 60
+    script.write_script_file("\n".join(sentences), tdir / "script_en.txt")
+    (tdir / "script_en.json").write_text(
+        json.dumps(sentences, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"  * EN recap: {len(sentences)} sentences, {got_words} words "
+          f"≈ {est:.0f}s of speech (target {target} / "
+          f"{target / max(wpm, 1) * 60:.0f}s)")
+    if got_words < target * 0.75:
+        print(f"  ! WARNING: the script is {got_words / max(target, 1) * 100:.0f}% of "
+              f"the requested length, so the video will be ~{est:.0f}s not "
+              f"{target / max(wpm, 1) * 60:.0f}s. A stronger model "
+              f"(deepseek-chat) usually fixes this.")
 
     # ------------------------------------------------ Step C (narration)
     print("== Step C: Voiceover (TTS) ==")
@@ -541,8 +578,12 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         c_sig = _sig(lines, voice, tts_cfg.get("tts_provider", "edge"),
                      tts_cfg.get("rate", "+0%"))
         if _marker_ok(c_marker, c_sig) and mp3.exists() and tj.exists():
+            # NOTE: this MUST NOT be called `cues` — that name holds the movie
+            # transcript and Step D matches against it. Shadowing it here made
+            # a resumed run build its timeline from the narration instead of
+            # the film, which silently produced nonsense visuals.
             try:
-                cues = [
+                nar_cues = [
                     tts.TimedCue(
                         d.get("text", ""), float(d.get("start", 0.0)),
                         float(d.get("end", 0.0)),
@@ -552,10 +593,10 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                     for d in json.loads(tj.read_text(encoding="utf-8"))
                 ]
             except Exception:
-                cues = []
-            if cues:
-                audios[code] = (mp3, cues)
-                print(f"  * Reusing narration {code} ({voice}) — {len(cues)} lines "
+                nar_cues = []
+            if nar_cues:
+                audios[code] = (mp3, nar_cues)
+                print(f"  * Reusing narration {code} ({voice}) — {len(nar_cues)} lines "
                       f"already narrated. Delete {code}.mp3 to re-narrate.")
                 continue
         print(f"  * Narrating {code} ({voice}) — {len(lines)} lines ...")
@@ -565,46 +606,43 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         _write_marker(c_marker, c_sig)
         print(f"    -> {audios[code][0]}  ({audios[code][1][-1].end:.1f}s total)")
 
-    # ------------------------------------------------ Step D (semantic map)
-    print("== Step D: Semantic timestamp mapping ==")
-    sem = cfg.setdefault("semantic", {})
-    # compute beats once on the master (EN) script
-    if not sem.get("enabled", True):
-        beats = None
-        print("  * semantic matching disabled -> evenly spaced anchors")
-    else:
-        embedder = match.Embedder(sem.get("embedding_model", "all-MiniLM-L6-v2"))
-        store = match.make_store(sem, wd, dim=embedder.dim)
-        try:
-            beats = match.map_beats(
-                sentences,
-                cues,
-                embedder,
-                store,
-                top_k=int(sem.get("top_k", 3)),
-                min_score=float(sem.get("min_score", 0.10)),
-                movie_duration=movie_dur,
-            )
-        finally:
-            store.close()
-        _write_json(beats, wd / "beats.json")
-        n_ok = sum(1 for b in beats if not b.get("fallback"))
-        print(f"  * Beats: {len(beats)} (semantic={n_ok}, fallback={len(beats) - n_ok}); "
-              f"saved to beats.json")
+    # ------------------------------------------------ Step D (chronological map)
+    # The timeline is built per language, because each language's narration has
+    # its own cue boundaries and the visual must lock to THOSE. See Step E+F.
+    print("== Step D+E+F: Chronological timeline, clipping & assembly ==")
 
-    # ------------------------------------------------ Step E + F per language
-    print("== Step E+F: Clipping & assembly ==")
     vcfg = cfg["video"]
+    tl_cfg = cfg.setdefault("timeline", {})
     sem = cfg.setdefault("semantic", {})
-    pre_roll = float(sem.get("pre_roll", 0.5))
-    pad = float(sem.get("clip_pad", 0.15))
-    min_clip = float(sem.get("min_clip", 0.8))
-    max_clip = float(sem.get("max_clip", 10.0))
-    clip_mode = str((sem.get("clip") or {}).get("mode", "copy")).lower()
+    # clip.mode default is now "reencode": stream-copy snaps every cut to the
+    # nearest keyframe, and those errors accumulate into seconds of A/V drift.
+    clip_mode = str((sem.get("clip") or {}).get("mode", "reencode")).lower()
 
     results: list[Path] = []
     for code, (mp3, cues_t) in audios.items():
         out_mp4 = outd / f"{name}_{code}.mp4"
+
+        # The narration span is the master clock: from 0 to the end of the mp3,
+        # INCLUDING the silences between sentences. Measuring the real file
+        # rather than the last cue's end keeps trailing silence in the render.
+        audio_span = max(probe_duration(mp3), cues_t[-1].end if cues_t else 0.0)
+
+        # Chronological, audio-locked beat plan for this language.
+        durations = timeline.lock_durations(cues_t, audio_span)
+        if code == "en":
+            seg_for_lang = segments
+        else:
+            # Translations stay line-aligned, so reuse the EN film windows.
+            seg_for_lang = [
+                {"sentence": c.text,
+                 "film_start": segments[min(i, len(segments) - 1)]["film_start"],
+                 "film_end": segments[min(i, len(segments) - 1)]["film_end"]}
+                for i, c in enumerate(cues_t)
+            ]
+        beats = timeline.build_timeline(seg_for_lang, durations, movie_dur, tl_cfg)
+        _write_json(beats, wd / f"beats_{code}.json")
+        print(f"  * [{code}] timeline: {timeline.timeline_report(beats, audio_span)}")
+
         # Resume: if the final render already exists for these exact inputs
         # (narration + beats + movie + subtitle/assembly settings), skip the
         # expensive ffmpeg clipping + burn entirely.
@@ -618,24 +656,14 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
             results.append(out_mp4)
             print(f"  * Reusing existing render {out_mp4.name}. Delete it to re-render.")
             continue
-        lines = [c.text for c in cues_t]
-        anchors = _anchors_for_lines(beats or [], len(lines))
-        if not anchors:
-            # no transcript + no beats possible: even spacing over the runtime
-            anchors = match._even_fallback(lines, movie_dur, [])
-        windows: list[tuple[float, float]] = []
-        for i, cue in enumerate(cues_t):
-            need = max(cue.duration + pad, min_clip)
-            need = min(need, max_clip)
-            a = anchors[i] if i < len(anchors) else anchors[-1]
-            src = float(a.get("start") or (i + 0.5) / max(len(lines), 1) * movie_dur)
-            start = max(0.0, src - pre_roll)
-            if movie_dur > 0:
-                need = min(need, max(movie_dur - start, 0.2))
-            windows.append((start, need))
-        visual = clip.build_visual_from_windows(
-            movie, windows, wd / "visual" / code, vcfg, mode=clip_mode
+
+        cuts = timeline.flatten_cuts(beats)
+        print(f"  * [{code}] cutting {len(cuts)} shots from the film "
+              f"(mode={clip_mode}) ...")
+        visual = clip.build_locked_visual(
+            movie, cuts, wd / "visual" / code, vcfg, audio_span, mode=clip_mode
         )
+
         # subtitles synced to THIS language's narration
         sub_cfg = cfg["subtitles"]
         max_units = int(sub_cfg.get("line_width_units", 30))
@@ -649,11 +677,13 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
             wd / "visual" / code,
         )
         ass = wd / f"{code}.ass"
-        out_mp4 = outd / f"{name}_{code}.mp4"
-        video.burn_and_mux(base, mp3, ass, out_mp4, vcfg)
+        video.burn_and_mux_locked(base, mp3, ass, out_mp4, vcfg, duration=audio_span)
         _write_marker(ef_marker, ef_sig)
         results.append(out_mp4)
-        print(f"  + {out_mp4}  ({probe_duration(out_mp4):.1f}s)")
+        final = probe_duration(out_mp4)
+        drift = abs(final - audio_span)
+        flag = "" if drift < 0.5 else f"   ! drift {drift:.2f}s"
+        print(f"  + {out_mp4}  ({final:.1f}s vs narration {audio_span:.1f}s){flag}")
 
     print("\nDone. Outputs:")
     for r in results:
