@@ -30,7 +30,7 @@ DEFAULT_MODELS = {
     "anthropic": "claude-3-5-sonnet-latest",
     "ollama": "qwen2.5",
     "groq": "llama-3.3-70b-versatile",
-    "gemini": "gemini-2.5-flash",
+    "gemini": "gemini-3.6-flash",
 }
 
 
@@ -98,7 +98,7 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
         # Google AI Studio free API key (aistudio.google.com -> Get API key).
         # Flash models keep a generous free tier (~1500 requests/day). This is
         # Google's OpenAI-compatible endpoint; model names like
-        # gemini-2.5-flash / gemini-2.0-flash work here.
+        # gemini-3.6-flash and other current Flash models work here.
         import openai  # type: ignore
 
         client = openai.OpenAI(

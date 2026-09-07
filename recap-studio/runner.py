@@ -533,7 +533,7 @@ PROVIDER_PRESETS = {
     #   groq   -> console.groq.com  (very fast Llama; ~30 req/min free)
     #   gemini -> aistudio.google.com (Flash models; ~1500 requests/day free)
     "groq": {"model": "llama-3.3-70b-versatile", "base_url": "https://api.groq.com/openai/v1", "key": True},
-    "gemini": {"model": "gemini-2.5-flash", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "key": True},
+    "gemini": {"model": "gemini-3.6-flash", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "key": True},
     "none": {"model": "", "base_url": "", "key": False},
 }
 
