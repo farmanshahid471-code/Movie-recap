@@ -16,6 +16,8 @@ Slow-PC notes
 """
 from __future__ import annotations
 
+import hashlib
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -45,6 +47,50 @@ Rules:
 """
 
 
+def _read_partial(path: Path) -> dict[int, str]:
+    """Parse an out_partial file into {chunk_index: summary_text}.
+
+    Format written by this module: a ``--- Chunk N ---`` marker line followed
+    by the summary text. Returns the blocks found (so an interrupted run can
+    resume exactly where it left off).
+    """
+    out: dict[int, str] = {}
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return out
+    cur: int | None = None
+    buf: list[str] = []
+    for line in raw.splitlines():
+        m = re.match(r"^--- Chunk (\d+) ---$", line.strip())
+        if m:
+            if cur is not None:
+                out[cur] = "\n".join(buf).strip()
+            cur = int(m.group(1))
+            buf = []
+        elif cur is not None:
+            buf.append(line)
+    if cur is not None:
+        out[cur] = "\n".join(buf).strip()
+    return out
+
+
+def _chunk_signature(chunks: list[dict]) -> str:
+    """Cheap content signature of the chunk list.
+
+    Two runs resume safely only when the chunks are byte-identical (same movie,
+    same transcript cache, same window/overlap). Anything that changes the
+    chunks — a different film, re-extracted transcript, window_seconds tweak —
+    yields a different signature, so stale summaries are never reused.
+    """
+    h = hashlib.sha1()
+    for c in chunks:
+        t = (c.get("text", "") or "")
+        h.update(str(len(t)).encode("utf-8", "replace"))
+        h.update(t.encode("utf-8", "replace"))
+    return h.hexdigest()[:16]
+
+
 def summarize_chunks(
     chunks: list[dict],
     cfg_llm: dict,
@@ -66,6 +112,47 @@ def summarize_chunks(
     n = len(chunks)
     started = time.time()
 
+    # Resume: if an out_partial file already holds completed chunks (from an
+    # interrupted run) AND the chunk signature matches (same movie/transcript/
+    # chunking), re-use them and only summarize the rest. A signature mismatch
+    # means the file is stale — wipe it and start fresh.
+    done: dict[int, str] = {}
+    skip = 0
+    partial_path = Path(out_partial) if out_partial is not None else None
+    if partial_path is not None:
+        sig_path = Path(str(partial_path) + ".sig")
+        sig = _chunk_signature(chunks)
+        # Stamp the signature so a future run can validate a resume. Always
+        # write it for the *new* chunks (this run or a future one).
+        try:
+            sig_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        try:
+            fresh = partial_path.exists() and sig_path.exists() and \
+                sig_path.read_text(encoding="utf-8").strip() == sig
+        except OSError:
+            fresh = False
+        if fresh:
+            done = _read_partial(partial_path)
+            contiguous = 0
+            while contiguous in done and contiguous < n:
+                contiguous += 1
+            if contiguous > 0:
+                skip = contiguous
+                print(f"  * Resuming: {skip}/{n} chunks already summarized in "
+                      f"{out_partial} (delete it to force a full re-run).", flush=True)
+        elif partial_path.exists():
+            # stale partial from different chunks/movie — clear it
+            try:
+                partial_path.write_text("", encoding="utf-8")
+            except OSError:
+                pass
+            try:
+                sig_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def one(chunk: dict) -> str:
         text = chunk.get("text", "") or ""
         budget = max(500, min(2200, int(len(text) * 0.22)))
@@ -79,17 +166,34 @@ def summarize_chunks(
         )
         return (raw or "").strip()
 
-    results: list[str] = []
-    if parallel and n > 1:
+    results: list[str] = [""] * n
+    for idx, txt in done.items():
+        if idx < n:
+            results[idx] = txt
+
+    # Stamp the signature for this chunk set (future runs resume only when the
+    # signature matches, so stale summaries are never reused).
+    if partial_path is not None:
+        try:
+            sig_path.write_text(sig, encoding="utf-8")
+        except OSError:
+            pass
+
+    if skip >= n:
+        return results
+
+    remaining = [(idx, chunk) for idx, chunk in enumerate(chunks) if idx >= skip]
+    if parallel and len(remaining) > 1:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = []
-            for idx, chunk in enumerate(chunks):
-                futures.append(pool.submit(one, chunk))
-            for idx, fut in enumerate(futures):
+            futures = {}
+            for idx, chunk in remaining:
+                futures[pool.submit(one, chunk)] = idx
+            for fut in futures:
+                idx = futures[fut]
                 print(f"    ... chunk {idx + 1}/{n} ...", flush=True)
-                results.append(fut.result())
+                results[idx] = fut.result()
     else:
-        for idx, chunk in enumerate(chunks):
+        for idx, chunk in remaining:
             el = time.time() - started
             print(
                 f"    ... chunk {idx + 1}/{n} via {model} "
@@ -97,7 +201,7 @@ def summarize_chunks(
                 flush=True,
             )
             s = one(chunk)
-            results.append(s)
+            results[idx] = s
             if out_partial:
                 try:
                     p = Path(out_partial)

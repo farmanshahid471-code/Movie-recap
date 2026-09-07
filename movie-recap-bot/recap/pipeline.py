@@ -429,7 +429,10 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
               "near-instant summaries,\n"
               "      - or raise chunking.window_seconds (e.g. 600) for fewer chunks.")
     summaries_path = tdir / "summaries.txt"
-    summaries_path.write_text("", encoding="utf-8")  # fresh partial file
+    # NOTE: do NOT truncate summaries.txt here — summarize_chunks() resumes
+    # from whatever is already in it, so an interrupted run can continue from
+    # the last finished chunk instead of redoing the slow CPU pass. Delete the
+    # file to force a full re-run.
     print(f"  * Summarizing each chunk via "
           f"{summary_cfg.get('provider')}/{summary_cfg.get('model')} "
           f"({len(chunks)} chunks) ...")
