@@ -51,6 +51,22 @@ _DEFAULTS: dict[str, Any] = {
         "model": None,             # optional smaller/faster model for the
                                    # chunk-summary pass, e.g. "qwen2.5:3b"
     },
+    # Step A (pass 1.5) — optional VISUAL pass. DeepSeek's chat API is
+    # text-only, so narration is blind to silent set-pieces. When a key for a
+    # vision-capable provider exists (default: GEMINI_API_KEY, free tier), the
+    # film's frames are captioned and the notes merged into each chunk's beat
+    # list. Skipped gracefully (text-only) when no key is present.
+    "vision": {
+        "enabled": True,
+        "provider": "gemini",      # gemini (free, multimodal) | openai | groq
+        "model": "gemini-3.6-flash",  # Gemini Flash models are multimodal
+        "base_url": None,          # None = provider default (Gemini OpenAI-compat)
+        "cadence_seconds": 20.0,   # sample ~every 20s of film
+        "scene_threshold": 0.35,   # also caption real shot changes above this
+        "max_frames": 400,         # hard cap per movie (API-quota friendly)
+        "width": 512,              # JPEG width sent to the vision model
+        "frames_per_request": 4,   # frames per API call (free-tier economy)
+    },
     # LEGACY semantic vector matcher (retired from beat selection — the
     # chronological timeline in recap/timeline.py maps narration lines to film
     # windows now). Only semantic.clip.mode is still read by the pipeline.
@@ -180,6 +196,18 @@ def load_config(path: str | Path | None = None) -> dict:
     cfg["narration"]["tts_provider"] = os.environ.get(
         "TTS_PROVIDER", cfg["narration"].get("tts_provider", "edge")
     )
+    # Vision pass toggles (see recap/vision.py). Keys come from the provider's
+    # env var (gemini -> GEMINI_API_KEY), which _load_dotenv already imported.
+    if "VISION_ENABLED" in os.environ:
+        cfg["vision"]["enabled"] = os.environ["VISION_ENABLED"].strip().lower() not in (
+            "0", "false", "no", "off"
+        )
+    if os.environ.get("VISION_PROVIDER"):
+        cfg["vision"]["provider"] = os.environ["VISION_PROVIDER"].strip().lower()
+    if os.environ.get("VISION_MODEL"):
+        cfg["vision"]["model"] = os.environ["VISION_MODEL"].strip()
+    if os.environ.get("VISION_BASE_URL"):
+        cfg["vision"]["base_url"] = os.environ["VISION_BASE_URL"].strip()
 
     # Language tags: zh -> configured zh_variant
     langs = []

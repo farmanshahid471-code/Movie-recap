@@ -188,6 +188,18 @@ spreading footage across a 5-minute chunk). Chunks are 3 minutes
 DeepSeek tokens with the `RECAP_SUMMARY_RATIO` env var (default `0.6`; `0.35`
 = lighter/cheaper) in `../movie-recap-bot/.env`.
 
+**Vision pass (see the movie, not just the dialogue)** — DeepSeek is
+text-only, so pure-visual scenes (montages, chases, sight gags) were invisible
+to the narrator. With a free **Google Gemini** key (`aistudio.google.com` →
+Get API key → put `GEMINI_API_KEY=...` in `../movie-recap-bot/.env`) the
+pipeline captions frames of the actual film (real shot changes + every ~20 s)
+and merges those on-screen notes into the beat list — silent scenes get
+narrated too. No key = skipped with a warning, text-only as before. Tunables
+under `vision:` in `../movie-recap-bot/config.yaml`; disable with
+`VISION_ENABLED=0`. It never bills DeepSeek: image tokens are free on the
+Gemini free tier (rate-limited), and ~75 API calls cover a 100-min film
+(frames are cached per movie).
+
 Everything in this table is applied to the pipeline by `runner.recap_cfg()` —
 including the LLM fields, which are pushed into both the recap config and the
 environment (`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, …) that `recap/llm.py`

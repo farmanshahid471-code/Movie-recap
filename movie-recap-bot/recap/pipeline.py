@@ -24,7 +24,7 @@ import json
 from pathlib import Path
 
 from . import (chunk, clip, dialogue, llm, scenes, script, subtitles,
-               summarize, timeline, translate, tts, video)
+               summarize, timeline, translate, tts, video, vision)
 from .config import out_dir, work_dir
 from .dialogue import DialogueError
 from .util import count_words, probe_duration
@@ -466,6 +466,32 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         (wd / "chunks" / f"chunk_{c['index']:03d}.txt").write_text(
             c["text"], encoding="utf-8"
         )
+
+    # ------------------------------------------------- Step A (pass 1.5) vision
+    # DeepSeek cannot see the film, so silent set-pieces would never be
+    # narrated. If a vision provider key is configured (default: GEMINI_API_KEY
+    # free tier), caption on-screen action once per movie (cached + resumable)
+    # and attach the notes to each chunk so the summarizer turns them into
+    # timestamped beats. No key -> graceful text-only (current behaviour).
+    vcfg = cfg.get("vision") or {}
+    visual_notes: list[dict] = []
+    if vcfg.get("enabled", True):
+        try:
+            visual_notes = vision.capture(movie, vcfg, wd)
+        except Exception as exc:  # never let the visual pass kill a movie run
+            print(f"  ! Vision pass failed ({exc}); continuing text-only.",
+                  flush=True)
+            visual_notes = []
+        if visual_notes:
+            by_t = {int(n.get("t", -1)): (n.get("text") or "").strip()
+                    for n in visual_notes if n.get("t") is not None}
+            for c in chunks:
+                lo, hi = float(c.get("start", 0.0)), float(c.get("end", 0.0))
+                vis = [{"t": t, "text": by_t[t]}
+                       for t in sorted(by_t)
+                       if lo - 1.0 <= t < hi and by_t[t]]
+                if vis:
+                    c["visual"] = vis
 
     # Summarization is the slowest LLM step on a CPU-only machine. Fail fast
     # when the model is missing (otherwise Ollama silently downloads it, which

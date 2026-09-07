@@ -49,6 +49,26 @@ chunking:
   # LLM step on CPU-only PCs). e.g. "qwen2.5:3b" ~4x faster than qwen2.5 7B.
   model: null
 
+# Step A (pass 1.5) — optional VISUAL pass (the "see the movie" tier).
+# DeepSeek's chat API is text-only, so it cannot see silent set-pieces. When a
+# vision-provider key is configured this pass captions frames of the actual
+# film and merges them into the beat list, so montages / chases / sight gags
+# get narrated too. Provider default = Google Gemini (free tier, multimodal):
+#   - get a free key at aistudio.google.com -> Get API key
+#   - put GEMINI_API_KEY=<key> in movie-recap-bot/.env
+# Without a key the pass is skipped with a warning and the pipeline runs
+# text-only, exactly as before.
+vision:
+  enabled: true             # set false (or VISION_ENABLED=0) to disable
+  provider: "gemini"        # gemini (free) | openai | groq (OpenAI-compatible)
+  model: "gemini-3.6-flash" # Gemini Flash models are multimodal; any works
+  base_url: null            # null = provider default (Gemini OpenAI-compat)
+  cadence_seconds: 20       # caption a frame roughly every 20s of film
+  scene_threshold: 0.35     # also caption real shot changes above this delta
+  max_frames: 400           # hard cap per movie (API-quota friendly)
+  width: 512                # JPEG width sent to the model (smaller = cheaper)
+  frames_per_request: 4     # frames per API call (free-tier request economy)
+
 # Step D — chronological timeline (recap line -> film moment, in order).
 # Beats advance monotonically through the film and each beat's visual length is
 # locked to its narration cue, so the video can never drift or be truncated.

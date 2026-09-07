@@ -40,6 +40,26 @@ movie.mp4
         -> <name>_<lang>.mp4
 ```
 
+> **Vision pass (optional — the "see the movie" tier).** Step A above reads the
+> *dialogue*, so scenes that tell their story visually (montages, chases,
+> sight gags) are invisible to the narrator. When a vision-provider key is
+> configured (default **Google Gemini, free tier**), the pipeline captions
+> frames of the actual film — real shot changes + every ~20 s — and merges
+> those on-screen notes into each chunk's beat list, so silent scenes get
+> narrated too. Setup: get a free key at aistudio.google.com → Get API key,
+> put `GEMINI_API_KEY=...` in `movie-recap-bot/.env` (separate from your
+> DeepSeek key; read automatically). No key = the pass is skipped with a
+> warning and the pipeline runs text-only. Tunables live in `config.yaml` →
+> `vision:` (`cadence_seconds`, `max_frames`, `width`, `frames_per_request`);
+> override with `VISION_ENABLED=0` / `VISION_MODEL=...`.
+>
+> **Vision cost:** it never bills DeepSeek. Image tokens are consumed on the
+> vision provider — free on the Gemini free tier (rate-limited); a paid key
+> bills ~cents per movie at 512px. The captions add a few thousand text tokens
+> to the DeepSeek summary prompts per movie. Frames ≈ movie length / 20 s
+> (≈300 for a 100-min film ≈ 75 API calls at 4 frames/request), cached per
+> movie so re-runs reuse them.
+
 ### Run it locally (no Docker needed)
 
 ```bash

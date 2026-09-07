@@ -51,6 +51,10 @@ Rules:
 - Present tense, third person, VISIBLE action only ("Jessie hops onto Bullseye and rides off"),
   inferred from what is said — never quote dialogue verbatim.
 - Keep each line dense (under ~35 words) but specific. No "the movie", "the scene shows", "we see".
+- The VISUAL NOTES section below describes what is ON SCREEN even when nobody talks. Those
+  moments have no dialogue beat, so include them as beats (with their timecodes) too — that is
+  the only way silent scenes get narrated. Merge them into the chronological list where their
+  time falls; skip a visual note only when a dialogue beat already covers the same moment.
 
 Example of the required format:
 [00:02:05] Bonnie plays with Forky and Rex in her room.
@@ -58,6 +62,7 @@ Example of the required format:
 
 === TIMESTAMPED DIALOGUE BLOCK ===
 {transcript}
+{visual}
 === END OF BLOCK ===
 """
 
@@ -147,19 +152,54 @@ def _read_partial(path: Path) -> dict[int, str]:
     return out
 
 
+def _visual_block(visual) -> str:
+    """Render a chunk's on-screen notes ('[MM:SS] caption' lines) for the prompt.
+
+    ``visual`` is an optional list of {"t": seconds, "text": ...} records. An
+    empty list yields an empty string so text-only runs are byte-identical to
+    before.
+    """
+    if not visual:
+        return ""
+    lines = []
+    for v in visual:
+        t = v.get("t")
+        text = (v.get("text") or "").strip()
+        if text is None or not text:
+            continue
+        if t is None:
+            lines.append(text)
+        else:
+            m, s = divmod(int(float(t)) % 3600, 60)
+            h = int(float(t)) // 3600
+            stamp = f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+            lines.append(f"[{stamp}] {text}")
+    if not lines:
+        return ""
+    return "\n\n=== WHAT IS ON SCREEN (VISUAL NOTES, WITH FILM TIMES) ===\n" \
+        + "\n".join(lines) + "\n=== END VISUAL NOTES ===\n"
+
+
 def _chunk_signature(chunks: list[dict]) -> str:
     """Cheap content signature of the chunk list.
 
     Two runs resume safely only when the chunks are byte-identical (same movie,
-    same transcript cache, same window/overlap). Anything that changes the
-    chunks — a different film, re-extracted transcript, window_seconds tweak —
-    yields a different signature, so stale summaries are never reused.
+    same transcript cache, same window/overlap, same on-screen notes). Anything
+    that changes the chunks — a different film, re-extracted transcript,
+    window_seconds tweak, new vision captions — yields a different signature,
+    so stale summaries are never reused.
     """
     h = hashlib.sha1()
     for c in chunks:
         t = (c.get("text", "") or "")
         h.update(str(len(t)).encode("utf-8", "replace"))
         h.update(t.encode("utf-8", "replace"))
+        vis = c.get("visual")
+        if vis:
+            h.update(b"|visual|")
+            for v in vis:
+                h.update(str(v.get("t", "")).encode("utf-8", "replace"))
+                h.update((v.get("text") or "").encode("utf-8", "replace"))
     return h.hexdigest()[:16]
 
 
@@ -228,7 +268,10 @@ def summarize_chunks(
     def one(chunk: dict) -> str:
         text = chunk.get("text", "") or ""
         budget = _summary_budget(len(text))
-        user = PROMPT_SUMMARY.format(transcript=text, budget=budget)
+        user = PROMPT_SUMMARY.format(
+            transcript=text, budget=budget,
+            visual=_visual_block(chunk.get("visual")),
+        )
         raw = llm.complete(
             cfg_llm.get("provider", ""),
             model,
