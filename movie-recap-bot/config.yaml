@@ -10,10 +10,24 @@ project:
   cache_dir: ""
 
 language:
-  # en = English (master). zh = Simplified Chinese (line-aligned translation).
-  # Add languages by wiring them in recap/pipeline.py::_resolve_narration_lines.
+  # Clips to render for each movie. Codes: en (English), zh (Simplified
+  # Chinese), ar (Arabic), es (Spanish).
+  #
+  # How each language gets its narration:
+  #   en  -> written from the movie's own dialogue (its .srt or Whisper).
+  #   ar/es/zh -> written NATIVELY in that language when a subtitle for it is
+  #               provided; otherwise line-aligned-translated from the English
+  #               recap (zh's classic behaviour).
+  # Subtitle discovery: a file tagged next to the movie, e.g. "Toy Story 5.ar.srt"
+  # (also .es / .zh), OR an explicit path per language in `sources:` below.
   target_languages: ["en"]
   zh_variant: "zh-CN"
+  # Optional explicit dialogue subtitles per language (paths; discovery above
+  # also works). Keys match the language codes:
+  # sources:
+  #   ar: "D:\\subs\\Toy Story 5.ar.srt"
+  #   es: "D:\\subs\\Toy Story 5.es.srt"
+  sources: {}
 
 narration:
   # Full-length recap style (~10-16 min of speech at ~150 wpm).
@@ -23,7 +37,9 @@ narration:
   words_per_minute: 150    # speech rate used for every length calculation
   lang_voice:
     en: "en-US-ChristopherNeural"   # warm, deep male — "storytelling" narrator
-    zh: "zh-CN-YunxiNeural"
+    zh: "zh-CN-YunxiNeural"         # Mandarin Chinese (male)
+    ar: "ar-SA-HamedNeural"         # Arabic (Modern Standard, Saudi) — male
+    es: "es-MX-JorgeNeural"         # Spanish (Mexico / Latin America) — male
   tts_provider: "edge"     # edge | elevenlabs | openai
   # Slightly slower than natural for a calm storyteller read. Range +0%..-20%;
   # edge-tts "+X%" speeds up, "-X%" slows down. ElevenLabs/OpenAI ignore this.
@@ -100,6 +116,10 @@ semantic:
 
 subtitles:
   font: "Noto Serif CJK SC"
+  # Per-language burned-subtitle fonts (Arabic needs a shaped Arabic typeface;
+  # "Arial" ships with Windows). Missing codes fall back to `font`.
+  lang_font:
+    ar: "Arial"
   fontsize: 56
   margin_v: 96
   margin_x: 40

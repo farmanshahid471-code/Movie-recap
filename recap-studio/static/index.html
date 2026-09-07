@@ -78,7 +78,7 @@ video{width:100%;border-radius:10px;border:1px solid var(--border);background:#0
   <div class="head">
     <div>
       <h1>🎬 Recap Studio — Control Panel</h1>
-      <div class="sub">Two clips per movie: English dubbing + English subtitles, and Mandarin dubbing + Simplified Chinese subtitles.</div>
+      <div class="sub">Per movie you pick which clips to make — English, Mandarin 中文, Arabic العربية and/or Spanish Español. Tick the languages below, then Generate. Arabic/Spanish are written natively from subtitles you provide (<code>movie.ar.srt</code> / <code>movie.es.srt</code> next to the film, or paths in Settings).</div>
       <div class="row mt">
         <span class="badge" id="engBadge">engine: recap</span>
         <span class="badge yellow" id="modeBadge">mode: …</span>
@@ -86,7 +86,7 @@ video{width:100%;border-radius:10px;border:1px solid var(--border);background:#0
       </div>
     </div>
     <div class="row">
-      <button class="btn primary" id="generateBtn">▶ Generate both clips</button>
+      <button class="btn primary" id="generateBtn">▶ Generate selected clips</button>
       <button class="btn" id="stopRunBtn" disabled>■ Stop run</button>
       <button class="btn danger" id="closeBtn" title="Shut the Recap Studio server down">✕ Close Studio</button>
     </div>
@@ -98,14 +98,25 @@ video{width:100%;border-radius:10px;border:1px solid var(--border);background:#0
     <div class="card stat"><div class="num" id="statClips">0</div><div class="lab">Clips Made</div></div>
     <div class="card stat"><div class="num" id="statRuns">0</div><div class="lab">Runs</div></div>
     <div class="card stat"><div class="num" id="statStorage">0 MB</div><div class="lab">Storage</div></div>
-    <div class="card stat"><div class="num">2</div><div class="lab">Tracks (EN / 中文)</div></div>
+    <div class="card stat"><div class="num">4</div><div class="lab">Languages (EN/中/AR/ES)</div></div>
   </div>
 
   <div class="tabs">
     <div class="tab active" data-tab="en"><span class="dot"></span>EN clip</div>
     <div class="tab" data-tab="zh"><span class="dot"></span>ZH clip</div>
+    <div class="tab" data-tab="ar"><span class="dot"></span>AR clip</div>
+    <div class="tab" data-tab="es"><span class="dot"></span>ES clip</div>
     <div class="tab" data-tab="script"><span class="dot"></span>Script editor</div>
     <div class="tab" data-tab="settings"><span class="dot"></span>Settings</div>
+  </div>
+
+  <div class="langbar" id="langBar" style="display:flex;gap:18px;align-items:center;flex-wrap:wrap;padding:10px 4px">
+    <span class="muted" style="font-weight:600">Clips for this movie:</span>
+    <label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox" data-lang="en" checked> English</label>
+    <label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox" data-lang="zh" checked> 中文</label>
+    <label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox" data-lang="ar"> العربية</label>
+    <label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox" data-lang="es"> Español</label>
+    <span class="muted" id="langNote"></span>
   </div>
 
   <div id="panel"></div>
@@ -174,9 +185,20 @@ function toast(msg, isErr){
 
 // ---------------------------------------------------------------- panels ---
 function clipCard(lang, cfg, s){
+  const META = {
+    en: { title: 'English clip', dubbing: 'English', sub: 'English',
+          sem: 'Full-length recap: the narration is written from the movie\'s dialogue, then every line is matched to its exact visual moment in the film and dubbed with burned-in English subtitles.' },
+    zh: { title: 'Chinese clip (中文)', dubbing: 'Mandarin 普通话', sub: '简体中文',
+          sem: 'Mandarin recap: written from a Simplified-Chinese subtitle when one is set (<code>movie.zh.srt</code>), otherwise translated from the English recap to 简体中文, narrated by the Chinese voice, and every line is matched to its visual moment in the film with burned-in Chinese subtitles.' },
+    ar: { title: 'Arabic clip (العربية)', dubbing: 'Arabic', sub: 'العربية',
+          sem: 'Arabic recap: with an Arabic subtitle (<code>movie.ar.srt</code> next to the film or a path in Settings) the narration is written natively in Arabic from it, narrated by the Arabic voice with burned-in Arabic subtitles. Without one it falls back to translating the English recap.' },
+    es: { title: 'Spanish clip (Español)', dubbing: 'Spanish', sub: 'Español',
+          sem: 'Spanish recap: with a Spanish subtitle (<code>movie.es.srt</code> next to the film or a path in Settings) the narration is written natively in Spanish from it, narrated by the Spanish voice with burned-in Spanish subtitles. Without one it falls back to translating the English recap.' }
+  };
+  const meta = META[lang] || { title: lang.toUpperCase() + ' clip', dubbing: lang, sub: lang, sem: '' };
   const isEn = lang === 'en';
-  const voice = isEn ? cfg.voice_en : cfg.voice_zh;
-  const sub  = isEn ? cfg.subtitle_lang_en : cfg.subtitle_lang_zh;
+  const voice = cfg['voice_' + lang] || cfg.voice_en;
+  const sub  = cfg['subtitle_lang_' + lang] || lang;
   const sem = (s.engine || cfg.engine || 'semantic') === 'semantic';
   const rows = (s.outputs || []).filter(o => o.lang === lang);
   const table = rows.length
@@ -211,13 +233,9 @@ function clipCard(lang, cfg, s){
   const card = document.createElement('div');
   card.className = 'card';
   card.innerHTML =
-    '<h2>' + (isEn ? 'English clip' : 'Chinese clip (中文)') + '</h2>' +
+    '<h2>' + meta.title + '</h2>' +
     '<div class="desc">' +
-      (sem
-        ? (isEn
-            ? 'Full-length recap: the narration is written from the movie\'s dialogue, then every line is matched to its exact visual moment in the film and dubbed with burned-in English subtitles.'
-            : 'Mandarin recap: the English narration is translated to 简体中文, narrated by the Chinese voice, and every line is matched to its visual moment in the film with burned-in Chinese subtitles.')
-        : 'Dubbing in ' + (isEn ? 'English' : 'Mandarin 普通话') + ', burned-in subtitles in ' + (isEn ? 'English' : '简体中文') + '.') +
+      (sem ? meta.sem : 'Dubbing in ' + meta.dubbing + ', burned-in subtitles in ' + meta.sub + '.') +
     '</div>' + warn +
     (sem ? '' :
     '<fieldset><legend>Montage — how the footage is cut</legend>' +
@@ -304,8 +322,14 @@ function settingsCard(cfg, s){
       '<div id="movieMsg" class="desc mt"></div>' +
       '<label class="switch" id="sw_storyboard"><input type="checkbox" id="storyboard"' + (cfg.storyboard ? ' checked' : '') + '> Use placeholder scenes when no movie is set (legacy engine)</label>' +
       '<label class="switch" id="sw_auto"><input type="checkbox" id="auto"' + (cfg.auto ? ' checked' : '') + '> Auto-recap: write the narration from the movie\'s dialogue (legacy engine)</label>' +
-      '<label>Dialogue subtitle (.srt) — optional; blank = look for one next to the movie, else Whisper</label>' +
+      '<label>English dialogue subtitle (.srt) — optional; blank = look for one next to the movie, else Whisper</label>' +
       '<input type="text" id="auto_subtitle" value="' + esc(cfg.auto_subtitle) + '" placeholder="D:\\videos\\my_movie.srt (or leave blank)">' +
+      '<div class="desc mt">Native-language subtitles (optional): the Arabic / Spanish / Chinese clip is written natively from that subtitle. Either drop <code>movie.ar.srt</code> / <code>movie.es.srt</code> / <code>movie.zh.srt</code> next to the movie, or type the paths here. Blank = that language falls back to a translation of the English recap.</div>' +
+      '<div class="grid2">' +
+        '<div><label>Arabic subtitle (.srt)</label><input type="text" id="subtitle_ar" value="' + esc(cfg.subtitle_ar || '') + '" placeholder="D:\\videos\\my_movie.ar.srt (or leave blank)"></div>' +
+        '<div><label>Spanish subtitle (.srt)</label><input type="text" id="subtitle_es" value="' + esc(cfg.subtitle_es || '') + '" placeholder="D:\\videos\\my_movie.es.srt (or leave blank)"></div>' +
+        '<div><label>Chinese subtitle (.srt)</label><input type="text" id="subtitle_zh" value="' + esc(cfg.subtitle_zh || '') + '" placeholder="D:\\videos\\my_movie.zh.srt (or leave blank)"></div>' +
+      '</div>' +
       '<div class="desc mt" id="readyBox"></div>' +
     '</fieldset>' +
 
@@ -334,6 +358,10 @@ function settingsCard(cfg, s){
         '<div><label>English subtitle lang</label><input type="text" id="subtitle_lang_en" value="' + esc(cfg.subtitle_lang_en) + '"></div>' +
         '<div><label>Chinese voice</label><input type="text" id="voice_zh" value="' + esc(cfg.voice_zh) + '"></div>' +
         '<div><label>Chinese subtitle lang</label><input type="text" id="subtitle_lang_zh" value="' + esc(cfg.subtitle_lang_zh) + '"></div>' +
+        '<div><label>Arabic voice (العربية)</label><input type="text" id="voice_ar" value="' + esc(cfg.voice_ar) + '"></div>' +
+        '<div><label>Arabic subtitle lang</label><input type="text" id="subtitle_lang_ar" value="' + esc(cfg.subtitle_lang_ar) + '"></div>' +
+        '<div><label>Spanish voice (Español)</label><input type="text" id="voice_es" value="' + esc(cfg.voice_es) + '"></div>' +
+        '<div><label>Spanish subtitle lang</label><input type="text" id="subtitle_lang_es" value="' + esc(cfg.subtitle_lang_es) + '"></div>' +
         '<div><label>Narration pace</label><select id="rate">' +
           ['-12%','-8%','-4%','+0%'].map(function (r) {
             const sel = (cfg.rate || '-8%') === r ? ' selected' : '';
@@ -375,7 +403,10 @@ function settingsCard(cfg, s){
   // template string stays simple). Browsers won't reveal a picked file's full
   // path, so the picker lists this machine's folders through /api/browse.
   [['movie_path', 'video', 'Pick the movie file from your folders'],
-   ['auto_subtitle', 'subtitle', 'Pick the .srt subtitle file']].forEach(([inp, kind, tip]) => {
+   ['auto_subtitle', 'subtitle', 'Pick the .srt subtitle file for the English/master source'],
+   ['subtitle_ar', 'subtitle', 'Pick the Arabic .srt subtitle (native Arabic recap)'],
+   ['subtitle_es', 'subtitle', 'Pick the Spanish .srt subtitle (native Spanish recap)'],
+   ['subtitle_zh', 'subtitle', 'Pick the Chinese .srt subtitle (native Chinese recap)']].forEach(([inp, kind, tip]) => {
     const field = card.querySelector('#' + inp);
     if (!field) return;
     const wrap = document.createElement('div');
@@ -469,7 +500,7 @@ function renderPanel(){
   const cfg = s.config || {};
   const p = $('#panel');
   p.innerHTML = '';
-  if (state.tab === 'en' || state.tab === 'zh') p.appendChild(clipCard(state.tab, cfg, s));
+  if (['en','zh','ar','es'].indexOf(state.tab) >= 0) p.appendChild(clipCard(state.tab, cfg, s));
   else if (state.tab === 'script') p.appendChild(scriptCard(s));
   else p.appendChild(settingsCard(cfg, s));
   if (state.tab === 'script') loadScripts();
@@ -505,6 +536,13 @@ function collectSettings(){
   put('subtitle_lang_en', v('subtitle_lang_en'));
   put('voice_zh', v('voice_zh'));
   put('subtitle_lang_zh', v('subtitle_lang_zh'));
+  put('voice_ar', v('voice_ar'));
+  put('subtitle_lang_ar', v('subtitle_lang_ar'));
+  put('voice_es', v('voice_es'));
+  put('subtitle_lang_es', v('subtitle_lang_es'));
+  put('subtitle_ar', v('subtitle_ar'));
+  put('subtitle_es', v('subtitle_es'));
+  put('subtitle_zh', v('subtitle_zh'));
   put('rate', v('rate'));
   const du = v('duration'); if (du !== null) base.duration = parseInt(du, 10) || 60;
   const lp = v('llm_provider'); if (lp !== null) base.llm_provider = lp.trim() || 'deepseek';
@@ -723,7 +761,14 @@ document.querySelectorAll('.tab').forEach(t => { t.onclick = async () => {
   selectTab(t.dataset.tab);
 }; });
 
-$('#generateBtn').onclick = () => doRun(['en', 'zh']);
+$('#generateBtn').onclick = () => {
+  const langs = Array.from(document.querySelectorAll('#langBar input[type=checkbox]'))
+    .filter(c => c.checked).map(c => c.dataset.lang);
+  if (!langs.length) { toast('Tick at least one language in the Clips bar', true); return; }
+  doRun(langs);
+};
+// keep the header button label honest about the engine
+$('#generateBtn').textContent = '\u25B6 Generate selected clips';
 $('#stopRunBtn').onclick = stopRun;
 $('#reloadLogs').onclick = pullLogs;
 $('#fmClose').onclick = () => { $('#fileModal').style.display = 'none'; };

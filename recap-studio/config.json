@@ -18,5 +18,12 @@
   "auto": false,
   "auto_subtitle": "",
   "whisper_model": "small",
-  "whisper_device": "auto"
+  "whisper_device": "auto",
+  "voice_ar": "ar-SA-HamedNeural",
+  "voice_es": "es-MX-JorgeNeural",
+  "subtitle_lang_ar": "ar",
+  "subtitle_lang_es": "es",
+  "subtitle_ar": "",
+  "subtitle_es": "",
+  "subtitle_zh": ""
 }

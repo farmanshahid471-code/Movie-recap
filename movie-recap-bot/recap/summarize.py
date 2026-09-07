@@ -23,7 +23,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import llm
+from . import languages, llm
 
 SYSTEM_SUMMARY = (
     "You are a movie plot analyst. You read timestamped film dialogue and "
@@ -210,12 +210,18 @@ def summarize_chunks(
     parallel: bool = False,
     max_workers: int = 4,
     out_partial: str | Path | None = None,
+    lang: str = "en",
 ) -> list[str]:
     """Summarize every transcript chunk. Returns summaries aligned to chunks.
 
     ``out_partial`` — if given, each finished summary is appended to that file
     immediately (so a crash never loses all progress and the file shows live
     progress while the pass runs).
+
+    ``lang`` — the recap language. For a native language the beat lines are
+    written in that language (the transcript is in that language too), so the
+    section script writer receives same-language beats. English stays
+    byte-identical to before (no instruction appended).
     """
     if not chunks:
         return []
@@ -223,6 +229,14 @@ def summarize_chunks(
     model = cfg_llm.get("summary_model") or cfg_llm.get("model") or ""
     n = len(chunks)
     started = time.time()
+    lang_name = languages.name(lang)
+    lang_instr = (
+        "\n\nLanguage: write the beat lines in " + lang_name + ", natural and "
+        "idiomatic — a " + lang_name + "-speaking recap audience will hear this. "
+        "Keep the [HH:MM:SS] timecode prefix format exactly as shown."
+        if lang and lang != "en"
+        else ""
+    )
 
     # Resume: if an out_partial file already holds completed chunks (from an
     # interrupted run) AND the chunk signature matches (same movie/transcript/
@@ -272,6 +286,8 @@ def summarize_chunks(
             transcript=text, budget=budget,
             visual=_visual_block(chunk.get("visual")),
         )
+        if lang_instr:
+            user += lang_instr
         raw = llm.complete(
             cfg_llm.get("provider", ""),
             model,

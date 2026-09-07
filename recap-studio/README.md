@@ -1,11 +1,19 @@
-# 🎬 Recap Studio 🇬🇧/🇨🇳 — Control Panel
+# 🎬 Recap Studio 🇬🇧/🇨🇳/🇸🇦/🇲🇽 — Control Panel
 
-A self-contained web control panel that produces **two recap clips per movie**:
+A self-contained web control panel that produces **recap clips per movie in the
+languages you tick** (English, 中文, العربية, Español):
 
-| Clip | Dubbing | Burned-in subtitles |
-|------|---------|---------------------|
-| `recap_en.mp4` | English | English |
-| `recap_zh.mp4` | Mandarin 普通话 | Simplified Chinese 简体中文 |
+| Clip | Dubbing | Burned-in subtitles | Written… |
+|------|---------|---------------------|----------|
+| `recap_en.mp4` | English | English | from the movie's own dialogue |
+| `recap_zh.mp4` | Mandarin 普通话 | Simplified Chinese 简体中文 | natively from a `movie.zh.srt`, else translated from the EN recap |
+| `recap_ar.mp4` | Arabic (MSA) | العربية | natively from a `movie.ar.srt` you provide, else translated from the EN recap |
+| `recap_es.mp4` | Spanish (LatAm) | Español | natively from a `movie.es.srt` you provide, else translated from the EN recap |
+
+Tick the languages in the **“Clips for this movie”** bar and press
+**Generate selected clips** (or a tab's per-clip button). Arabic/Spanish
+default narrators: `ar-SA-HamedNeural`, `es-MX-JorgeNeural` (Settings →
+Clip voices; any edge-tts voice works).
 
 It drives the `../movie-recap-bot/recap` pipeline (edge-tts narration + word-synced
 burned-in subtitles + ffmpeg assembly). Written in **pure Python stdlib** for the server
@@ -168,7 +176,8 @@ Stored in `config.json` (next to the code). Key fields:
 | `auto_subtitle` | optional explicit `.srt`/`.ass`/`.vtt`; blank = look next to the movie, else Whisper (both engines) |
 | `whisper_model` / `whisper_device` | Whisper model size + device used when no subtitle exists (default `small` / `auto`) |
 | `voice_en` / `voice_zh` | narrator voices (edge-tts; default warm deep male `en-US-ChristopherNeural`) |
-| `subtitle_lang_en` / `subtitle_lang_zh` | subtitle languages (default `en` / `zh`) |
+| `subtitle_lang_en` / `_zh` / `_ar` / `_es` | subtitle languages per clip |
+| `subtitle_ar` / `subtitle_es` / `subtitle_zh` | optional per-language dialogue `.srt` (native recap) |
 | `llm_provider` / `llm_base_url` / `llm_api_key` / `llm_model` | LLM used for auto scripting (default **DeepSeek** / `deepseek-chat`; paste the key in Settings) |
 
 Timeline knobs (Step D) live in `../movie-recap-bot/config.yaml` under

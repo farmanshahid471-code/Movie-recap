@@ -11,9 +11,13 @@ It reproduces the format of the reference channel videos:
 * **one sentence per subtitle cue**, timed to the narration
 * `title + thumbnail + description` recipe for each upload
 
-> **Status:** English is the primary output. Simplified Chinese (简体中文) is
-> supported through line-aligned translation (`--langs en,zh`); more languages
-> plug into `recap/pipeline.py::_resolve_narration_lines`.
+> **Status:** Languages: **en · zh (简体中文) · ar (العربية) · es (Español)**.
+> English is always written from the movie's own dialogue. Chinese, Arabic and
+> Spanish are written **natively in that language** when you provide a subtitle
+> for it (`movie.ar.srt` next to the film, a `language.sources` path, or
+> `--subtitle-ar`); without one they fall back to line-aligned translation of
+> the English recap. Pick the clips you want per run with `--langs` (CLI) or
+> the language bar in Recap Studio.
 
 ---
 
@@ -191,7 +195,36 @@ What it does:
 3. **Translate to Simplified Chinese** automatically (when `--langs en,zh`).
 4. **Narrate + burn subtitles + assemble** both clips (EN + 简体中文).
 
-Outputs: `output/<name>_en.mp4` and `output/<name>_zh.mp4`.
+Outputs: `output/<name>_<lang>.mp4` for every language in `--langs`
+(`_en.mp4`, `_zh.mp4`, `_ar.mp4`, `_es.mp4`).
+
+### Making Arabic / Spanish clips (native, from your subtitles)
+
+Provide a subtitle in the language of the clip you want — the recap is then
+written in that language **from that subtitle** (no Whisper needed for it):
+
+```bash
+# next to the movie file:  "Toy Story 5.ar.srt"  /  "Toy Story 5.es.srt"
+python -m recap.cli auto --movie "D:\Movies\Toy Story 5.mp4" \
+    --langs en,ar,es \
+    --subtitle-ar "D:\Movies\Toy Story 5.ar.srt" \
+    --subtitle-es "D:\Movies\Toy Story 5.es.srt"
+# -> output/<name>_en.mp4, _ar.mp4 (Arabic narration from the Arabic subs),
+#    and _es.mp4 (Spanish narration from the Spanish subs)
+```
+
+Rules of thumb:
+* **Name it `<movie>.<code>.srt`** (e.g. `Toy Story 5.ar.srt`) and no `--subtitle-*`
+  flag is needed — the pipeline finds it next to the film. The untagged
+  `Toy Story 5.srt` stays the English source.
+* Default narrators: **ar = `ar-SA-HamedNeural`** (Modern Standard Arabic),
+  **es = `es-MX-JorgeNeural`** (Latin American Spanish) — override under
+  `narration.lang_voice`.
+* Subtitles burned on the clip use `subtitles.lang_font.ar` (default `Arial`,
+  shaped Arabic) — swap to any installed Arabic font you prefer.
+* A language **without** its own subtitle is still rendered: it is translated
+  from the English recap (fully dubbed + subtitled), so a missing `.ar.srt`
+  never blocks the run.
 
 > Auto-recap needs a configured LLM — DeepSeek is the shipped default
 > (`LLM_PROVIDER=deepseek`, `MODEL_NAME=deepseek-chat`, key in `.env`). Ollama
@@ -273,9 +306,12 @@ Edit `config.yaml` (template: `config.example.yaml`). Key knobs:
 |---------|---------|
 | `narration.lang_voice.en` | English narrator (`edge` voice) |
 | `narration.lang_voice.zh` | Chinese narrator (`edge` voice) |
+| `narration.lang_voice.ar` | Arabic narrator (default `ar-SA-HamedNeural`) |
+| `narration.lang_voice.es` | Spanish narrator (default `es-MX-JorgeNeural`) |
 | `narration.rate` | speaking rate, e.g. `+5%` |
 | `narration.words_target` | desired narration length |
 | `subtitles.font` | must include CJK glyphs for 中文 (default `Noto Serif CJK SC`) |
+| `subtitles.lang_font.ar` | Arabic subtitle font (default `Arial`, shaped) |
 | `subtitles.line_width_units` | wrap width (中文 glyphs count double) |
 | `subtitles.fontsize` | subtitle text size |
 | `video.bgm` | optional background-music path |

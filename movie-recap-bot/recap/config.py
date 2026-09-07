@@ -13,13 +13,23 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 _DEFAULTS: dict[str, Any] = {
     "project": {"name": "recap-project", "output_dir": "output", "cache_dir": ""},
-    "language": {"target_languages": ["en"], "zh_variant": "zh-CN"},
+    # Languages whose clips to render. "en" is authored from the movie's own
+    # audio/dialogue; "zh"/"ar"/"es" are authored natively when a subtitle in
+    # that language is provided (language.sources or <movie>.<code>.srt next to
+    # the film), otherwise they fall back to a line-aligned translation of the
+    # English recap.
+    "language": {"target_languages": ["en"], "zh_variant": "zh-CN",
+                 "sources": {}},
     "narration": {
         "words_target": 2000,      # ~13-14 min at ~150 wpm (full-length recap)
         "words_min": 600,
         "words_max": 4200,
         "words_per_minute": 150,   # speech rate used for all length maths
-        "lang_voice": {"en": "en-US-ChristopherNeural", "zh": "zh-CN-YunxiNeural"},
+        # Default edge-tts narrators per language (all warm, deep male).
+        "lang_voice": {"en": "en-US-ChristopherNeural",
+                       "zh": "zh-CN-YunxiNeural",
+                       "ar": "ar-SA-HamedNeural",    # Modern Standard Arabic
+                       "es": "es-MX-JorgeNeural"},   # Latin American Spanish
         "rate": "+0%",
         "tts_provider": "edge",
     },
@@ -84,6 +94,10 @@ _DEFAULTS: dict[str, Any] = {
     },
     "subtitles": {
         "font": "Noto Serif CJK SC",
+        # Per-language burned-subtitle fonts; missing codes fall back to font.
+        # Arabic needs a shaped Arabic typeface (default "Arial" ships with
+        # Windows); others reuse the CJK font's Latin glyphs.
+        "lang_font": {"ar": "Arial"},
         "fontsize": 56,
         "margin_v": 96,
         "margin_x": 40,

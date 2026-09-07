@@ -39,6 +39,9 @@ DEFAULT_OUTPUT_DIR = STUDIO_DIR / "output"
 OUTPUT_DIR = DEFAULT_OUTPUT_DIR
 INPUTS = BOT_DIR / "inputs" / "text"
 
+# Recap languages the studio can render (pipeline catalog in recap/languages.py).
+LANG_CODES = ("en", "zh", "ar", "es")
+
 VIDEO_EXTS = {
     ".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".wmv",
     ".flv", ".ts", ".m2ts", ".mpg", ".mpeg", ".mxf",
@@ -67,9 +70,13 @@ DEFAULT_CONFIG = {
     "scene_len": 6.0,                       # seconds per beat
     "voice_en": "en-US-ChristopherNeural",
     "voice_zh": "zh-CN-YunxiNeural",
+    "voice_ar": "ar-SA-HamedNeural",     # Modern Standard Arabic (male)
+    "voice_es": "es-MX-JorgeNeural",     # Latin American Spanish (Mexico, male)
     "rate": "-8%",                       # edge-tts pace: +X% faster, -X% slower
     "subtitle_lang_en": "en",
     "subtitle_lang_zh": "zh",
+    "subtitle_lang_ar": "ar",
+    "subtitle_lang_es": "es",
     # LLM — Ollama + Qwen (free, local, no key). Used to auto-write the recap
     # script from your movie's dialogue once a key-free local server is up.
     "llm_provider": "deepseek",
@@ -78,7 +85,10 @@ DEFAULT_CONFIG = {
     "llm_model": "deepseek-chat",
     # Auto-recap flags
     "auto": False,                   # write the recap from the movie's dialogue (needs LLM)
-    "auto_subtitle": "",             # optional explicit .srt for dialogue; blank = auto-detect
+    "auto_subtitle": "",             # optional explicit .srt for the EN/master dialogue
+    "subtitle_ar": "",               # optional Arabic .srt -> native Arabic recap
+    "subtitle_es": "",               # optional Spanish .srt -> native Spanish recap
+    "subtitle_zh": "",               # optional Chinese .srt -> native Chinese recap
     "whisper_model": "small",        # used if no subtitle is found
     "whisper_device": "auto",        # auto = GPU when available, else CPU
 }
@@ -455,8 +465,12 @@ def _base_recap(cfg: dict | None = None) -> dict:
 
 def _apply_common(rc: dict, cfg: dict, lang: str | None = None) -> None:
     """Push the panel settings that both engines share into the recap config."""
-    rc["narration"]["lang_voice"]["en"] = cfg.get("voice_en") or "en-US-ChristopherNeural"
-    rc["narration"]["lang_voice"]["zh"] = cfg.get("voice_zh") or "zh-CN-YunxiNeural"
+    from recap import languages
+
+    for code in LANG_CODES:
+        rc["narration"]["lang_voice"][code] = (
+            cfg.get(f"voice_{code}") or languages.voice_default(code)
+        )
     # Pacing is user-tunable now ("-8%" = calm storyteller read). Scale the
     # word target by the pace factor so the finished mp3 still lands on the
     # requested duration instead of running ~8% long.
@@ -519,10 +533,13 @@ def recap_cfg(cfg: dict, lang: str) -> dict:
 def semantic_recap_cfg(cfg: dict, langs: list[str]) -> dict:
     """Step A-F engine: full recap config for the requested language set.
 
-    One run covers every requested language (EN master, ZH line-aligned), so
-    the whisper extraction, chunking and semantic matching happen exactly once.
+    One run covers every requested language in one pipeline call. Languages
+    with their own dialogue subtitle (``subtitle_ar`` / ``subtitle_es`` /
+    ``subtitle_zh`` settings, or ``<movie>.<code>.srt`` next to the film) are
+    authored natively in that language; the others are line-aligned
+    translations of the English recap (zh's long-standing behaviour).
     """
-    langs = [l for l in langs if l in ("en", "zh")] or ["en"]
+    langs = [l for l in langs if l in LANG_CODES] or ["en"]
     rc = _base_recap(cfg)
 
     rc["language"]["target_languages"] = list(langs)
@@ -531,6 +548,15 @@ def semantic_recap_cfg(cfg: dict, langs: list[str]) -> dict:
         tag = rc["language"].get("zh_variant", "zh-CN") if code.startswith("zh") else code
         resolved.append({"code": code, "tag": tag})
     rc["language"]["_resolved"] = resolved
+
+    # Per-language dialogue subtitles the panel lets you point at.
+    sources = {}
+    for code in ("ar", "es", "zh"):
+        s = (cfg.get(f"subtitle_{code}") or "").strip()
+        if s:
+            sources[code] = s
+    if sources:
+        rc.setdefault("language", {})["sources"] = sources
 
     _apply_common(rc, cfg, langs[0])
     rc["semantic"]["enabled"] = True
@@ -764,6 +790,23 @@ def subtitle_for(movie: Path | None, explicit: str = "") -> Path | None:
         return None
 
 
+def subtitle_for_lang(movie: Path | None, code: str,
+                     cfg: dict | None = None) -> Path | None:
+    """The subtitle that would author ``code`` natively, if any."""
+    if movie is None:
+        return None
+    cfg = cfg if cfg is not None else load_config()
+    explicit = (cfg.get(f"subtitle_{code}") or "").strip()
+    if code == "en":
+        return subtitle_for(movie, cfg.get("auto_subtitle", ""))
+    try:
+        from recap.dialogue import find_subtitle_near
+
+        return find_subtitle_near(Path(movie), explicit or None, lang=code)
+    except Exception:
+        return None
+
+
 def readiness(cfg: dict | None = None) -> dict:
     """What the chosen engine needs to run — the panel shows this before Run."""
     cfg = cfg if cfg is not None else load_config()
@@ -794,14 +837,31 @@ def readiness(cfg: dict | None = None) -> dict:
 
     if eng == "semantic":
         # The Step A-F engine *always* reads the movie: it needs a real file,
-        # an LLM to write the recap, and dialogue (subtitle or auto-installed
-        # Whisper).
+        # an LLM to write the recap, and dialogue per language (its own
+        # subtitle, else Whisper on the movie audio for the English source).
         if movie is None:
             blocking.append(movie_err or "no movie file set (semantic engine recaps a real movie)")
-        if not srt and not whisper:
+        # Whisper is only needed when some requested language will have to read
+        # the movie's audio — English clips, or a language whose subtitle is
+        # missing (it then translates an English master that Whisper provides).
+        langs = [l for l in (JOB_STATE.get("langs") or ["en"]) if l in LANG_CODES]
+        per_lang: dict[str, str] = {}
+        for code in ("en", "zh", "ar", "es"):
+            found = subtitle_for_lang(movie, code, cfg)
+            if found:
+                per_lang[code] = str(found)
+        need_whisper = False
+        for code in langs:
+            if code == "en":
+                need_whisper = need_whisper or ("en" not in per_lang)
+            elif code not in per_lang and "en" not in per_lang:
+                # its native subtitle is missing AND English audio isn't
+                # available as a translation source via a subtitle either
+                need_whisper = need_whisper or True
+        if need_whisper and not whisper:
             blocking.append(
-                "no .srt next to the movie and Whisper not installed — it will be "
-                "downloaded & installed automatically on run"
+                "no subtitle for a requested language and Whisper not installed — "
+                "it will be downloaded & installed automatically on run"
             )
         auto_ready = movie is not None and not blocking
     else:
@@ -972,11 +1032,12 @@ def run_semantic(langs: list[str], cfg: dict | None = None) -> list[Path]:
     """Run the Step A-F engine once for every requested language.
 
     One ``pipeline.auto_recap`` call covers all languages (the expensive steps —
-    whisper extraction, chunking, summaries, semantic matching — run once and
-    every language reuses the result), so this returns a list of output mp4s.
+    extraction, chunking, summaries, vision pass — run once per authored
+    language and translations reuse the English master), so this returns a
+    list of output mp4s.
     """
     cfg = cfg if cfg is not None else load_config()
-    langs = [l for l in langs if l in ("en", "zh")] or ["en"]
+    langs = [l for l in langs if l in LANG_CODES] or ["en"]
     _log(f">>> Semantic recap [{'+'.join(langs)}]")
 
     from recap import pipeline
@@ -1015,15 +1076,24 @@ def run_semantic(langs: list[str], cfg: dict | None = None) -> list[Path]:
     rc["dialogue"]["whisper_model"] = cfg.get("whisper_model", "small")
     rc["dialogue"]["whisper_device"] = cfg.get("whisper_device", "auto")
 
-    # Dialogue source: prefer a .srt next to the movie, else Whisper (install
-    # on demand if nothing is present).
-    if subtitle_for(movie, cfg.get("auto_subtitle", "")) is None:
+    # Dialogue sources: each language's own subtitle, else Whisper reads the
+    # movie's English audio (install on demand when nothing is present).
+    _missing = [
+        c for c in langs
+        if c == "en" and subtitle_for(movie, cfg.get("auto_subtitle", "")) is None
+        or c in ("zh", "ar", "es")
+        and subtitle_for_lang(movie, c, cfg) is None
+        and subtitle_for(movie, cfg.get("auto_subtitle", "")) is None
+    ]
+    if _missing:
         ok, why = ensure_whisper()
         if not ok:
             msg = (
-                "Auto-recap needs the movie's dialogue, but Whisper could not be "
-                f"made available ({why}). Drop an .srt next to the movie, or fix "
-                "your network/pip and run again."
+                "Auto-recap needs the movie's dialogue for "
+                f"{_missing}, but Whisper could not be made available ({why}). "
+                "Drop an .srt next to the movie (name it <movie>.<lang>.srt for "
+                "that language's native recap), or fix your network/pip and run "
+                "again."
             )
             _log(f"    ERROR: {msg}")
             raise RuntimeError(msg)
@@ -1053,7 +1123,8 @@ def list_outputs() -> list[dict]:
                     "name": p.name,
                     "size_mb": round(p.stat().st_size / 1e6, 2),
                     "url": "/output/" + p.name,
-                    "lang": "zh" if "_zh" in p.name else "en",
+                    "lang": (p.stem.rsplit("_", 1)[-1]
+                             if p.stem.rsplit("_", 1)[-1] in LANG_CODES else "en"),
                 }
             )
     return res
@@ -1062,7 +1133,7 @@ def list_outputs() -> list[dict]:
 def start_run(langs: list[str], cfg: dict | None = None) -> bool:
     """Start a background run. Returns False if one is already running."""
     cfg = cfg if cfg is not None else load_config()
-    langs = [l for l in langs if l in ("en", "zh")] or ["en", "zh"]
+    langs = [l for l in langs if l in LANG_CODES] or ["en", "zh"]
     with LOCK:
         if JOB_STATE["running"]:
             return False

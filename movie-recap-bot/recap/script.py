@@ -377,12 +377,18 @@ def generate_segmented_script(
     *,
     words_per_minute: int = 150,
     progress=None,
+    lang_name: str = "English",
 ) -> list[dict]:
     """Write the recap chunk-by-chunk, in film order, hitting the word target.
 
     ``chunk_summaries`` — ``[{"index", "start", "end", "summary",
     "beats": [{"t": seconds, "text": ...}, ...]}]`` in order (the ``beats``
     list is optional; when present every beat keeps its film time).
+
+    ``lang_name`` — the narration language. The section writer is told to
+    produce its sentences in that language, so a native recap (Arabic/Spanish
+    written straight from that language's subtitles) never leaks English prose.
+    English stays byte-identical to before (no instruction appended).
 
     Returns ``[{"sentence", "film_start", "film_end"}]``: every sentence knows
     which moment of film it describes (see ``_anchor_windows``), so the visual
@@ -392,6 +398,15 @@ def generate_segmented_script(
     usable = [c for c in chunk_summaries if (c.get("summary") or "").strip()]
     if not usable:
         return []
+
+    lang_instr = ""
+    if lang_name and lang_name.lower() != "english":
+        lang_instr = (
+            f"\n\nLanguage: write the narration entirely in {lang_name} — "
+            f"natural, idiomatic {lang_name} for a {lang_name}-speaking recap "
+            "audience. Keep character names recognizable (use their common "
+            f"{lang_name} forms, consistently)."
+        )
 
     # Distribute the word budget across chunks by how much story each holds:
     # beat count when available (a 20-beat chunk gets more narration room than
@@ -427,6 +442,8 @@ def generate_segmented_script(
             t0=_fmt_clock(t0), t1=_fmt_clock(t1), budget=budget, nsent=nsent,
             continuity=continuity, beats=_fmt_beat_lines(c),
         )
+        if lang_instr:
+            user += lang_instr
         raw = llm.complete(
             cfg_llm.get("provider", ""),
             cfg_llm.get("model", ""),

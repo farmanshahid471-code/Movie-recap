@@ -305,15 +305,39 @@ def _caption_batch(
             "each starting with its label like '" + _fmt_label(frames[0][0]) + " - text'.",
         }
     )
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "system", "content": CAPTION_SYSTEM},
-                      {"role": "user", "content": parts}],
-            max_tokens=2048,
-        )
-    except Exception as exc:  # network / quota / model refusal
-        raise VisionError(f"vision request failed ({model}): {exc}") from exc
+    # Free tiers throttle aggressively (e.g. Gemini ~15 req/min); a batch
+    # that hits the rate cap should wait and retry, not die or leave a hole in
+    # the caption list. 429 / 5xx / network blips get a few backoff attempts.
+    import time
+
+    resp = None
+    last: Exception | None = None
+    for attempt in range(5):
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": CAPTION_SYSTEM},
+                          {"role": "user", "content": parts}],
+                max_tokens=2048,
+            )
+            break
+        except Exception as exc:  # network / quota / model refusal
+            last = exc
+            msg = str(exc).lower()
+            retryable = any(k in msg for k in (
+                "429", "rate", "quota", "rpm", "too many", "resource exhausted",
+                "502", "503", "504", "500", "timeout", "timed out", "connection",
+            ))
+            if not retryable or attempt == 4:
+                break
+            wait = 5.0 * (2 ** attempt)          # 5s, 10s, 20s, 40s
+            print(f"    ... vision batch rate-limited ({type(exc).__name__}) — "
+                  f"waiting {wait:.0f}s and retrying ...", flush=True)
+            time.sleep(wait)
+    if resp is None:
+        raise VisionError(
+            f"vision request failed ({model}): {last}"
+        ) from last
     raw = ""
     try:
         raw = resp.choices[0].message.content or ""
