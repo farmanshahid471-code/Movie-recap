@@ -8,9 +8,9 @@ Two engines:
   narrate -> subtitles -> montage assembly). Used by Recap Studio and the
   ``run`` CLI command.
 * ``auto_recap()`` — the Step A-F engine: whisper -> contextual chunking ->
-  chunk summarization -> JSON-array script -> TTS with timing -> semantic
-  timestamp mapping (pgvector) -> ffmpeg clipping -> final assembly.
-  Used by the ``auto`` CLI command.
+  chunk summarization -> section-by-section JSON script -> TTS with timing ->
+  chronological, audio-locked timeline -> frame-exact ffmpeg clipping -> final
+  assembly. Used by the ``auto`` CLI command.
 
 Interrupted runs resume: transcript, chunk summaries, the generated script,
 the narration and the final renders are all gated by content-signature marker
@@ -23,7 +23,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from . import (chunk, clip, dialogue, llm, match, scenes, script, subtitles,
+from . import (chunk, clip, dialogue, llm, scenes, script, subtitles,
                summarize, timeline, translate, tts, video)
 from .config import out_dir, work_dir
 from .dialogue import DialogueError
@@ -129,7 +129,7 @@ def _get_script(cfg: dict, workdir: Path, video: Path | None = None) -> str:
     if script_text is None and video is not None:
         try:
             script_text = _auto_script(cfg, workdir, video)
-            print(f"  * Auto-written EN recap from dialogue.")
+            print("  * Auto-written EN recap from dialogue.")
         except llm.LLMError as exc:
             # The movie and dialogue were fine — the LLM is unreachable. Do NOT
             # fall through to the plot-summary path (its "provide script_en.txt"
@@ -296,16 +296,30 @@ def run(cfg: dict, clips: list[Path], storyboard: bool = False) -> list[Path]:
 def _resolve_narration_lines(cfg: dict, code: str, en_sentences: list[str], wd: Path) -> list[str]:
     """Return the narration lines for one language (EN master; ZH translated).
 
-    The English script is the master: anchors (semantic matches) are computed
-    for it, and every other language stays line-aligned to reuse the same
-    anchors. New languages can be added here later.
+    The English script is the master: the chronological timeline (Step D) is
+    built from it, and every other language must stay line-aligned so it can
+    reuse the EN sentence's film windows. A stale translation (EN changed but
+    an old ``script_zh.txt`` sat in the workdir) would pair the wrong ZH lines
+    with the wrong film moments, so ZH reuse is gated by a content signature of
+    the exact EN text it was translated from.
     """
     if code == "en":
         return en_sentences
     if code.startswith("zh"):
         provider = cfg["llm"].get("provider", "")
-        tr = wd / "script" / "script_zh.txt"
-        if tr.exists() and not cfg.get("regenerate_translation"):
+        en_text = "\n".join(en_sentences)
+        tdir = wd / "script"
+        tr = tdir / "script_zh.txt"
+        marker = tdir / "script_zh.marker.json"
+        sig = _sig(en_text, cfg["llm"].get("provider"), cfg["llm"].get("model"))
+        # Reuse an existing ZH file when it was written for THIS EN text
+        # (marker matches) — or when no marker exists at all (a hand-placed
+        # file from before marker tracking; respect it, don't silently
+        # overwrite a manual translation). Only a known-stale auto file is
+        # regenerated.
+        if tr.exists() and not cfg.get("regenerate_translation") and (
+            _marker_ok(marker, sig) or not marker.exists()
+        ):
             print(f"  * Using existing ZH translation: {tr}")
             return translate.normalize(tr.read_text(encoding="utf-8").splitlines()).splitlines()
         if not llm.provider_configured(provider):
@@ -314,11 +328,15 @@ def _resolve_narration_lines(cfg: dict, code: str, en_sentences: list[str], wd: 
                 "is configured to write one."
             )
         print(f"  * Translating EN recap to Simplified Chinese via {provider} ...")
-        en_text = "\n".join(en_sentences)
         zh = translate.normalize(translate.generate_online(en_text, cfg["llm"]).splitlines())
-        tr.parent.mkdir(parents=True, exist_ok=True)
+        zh_lines = zh.splitlines()
+        aligned, why = translate.check_alignment(en_sentences, zh_lines)
+        if not aligned:
+            print(f"  ! WARNING: {why}")
+        tdir.mkdir(parents=True, exist_ok=True)
         translate.write_translation_file(zh, tr)
-        return zh.splitlines()
+        _write_marker(marker, sig)
+        return zh_lines
     raise NotImplementedError(
         f"Language '{code}' is not wired into the semantic engine yet. "
         "EN is primary; zh is supported via line-aligned translation."
@@ -491,8 +509,6 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
     llm.verify_model(cfg["llm"])   # fail fast if the main model is missing
     nar = cfg["narration"]
     target = int(nar.get("words_target", 2000))
-    mn = int(nar.get("words_min", 600))
-    mx = int(nar.get("words_max", 4200))
     wpm = int(nar.get("words_per_minute", 150))
     print(f"  * Target: {target} words ≈ {target / max(wpm, 1) * 60:.0f}s of speech "
           f"at {wpm} wpm")

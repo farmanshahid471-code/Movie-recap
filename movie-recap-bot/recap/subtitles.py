@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pysubs2  # type: ignore
 
-from .util import fmt_ts, fmt_ts_ass
+from .util import fmt_ts_ass
 
 LINE_DELAY = 0.12       # gap between cue end and next cue start, seconds
 PAD_START = 0.05

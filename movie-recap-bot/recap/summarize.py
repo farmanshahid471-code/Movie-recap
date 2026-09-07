@@ -47,6 +47,16 @@ Rules:
 """
 
 
+def _summary_max_tokens(budget_chars: int) -> int:
+    """Output cap for one chunk summary, derived from the requested size.
+
+    The prompt asks for ``budget`` *characters* of dense beats. English runs
+    ~4 chars/token, Chinese ~1; using ~0.9 tokens/char + padding caps a
+    rambling summary at ~2x what the job needs without truncating a good one.
+    """
+    return max(512, min(4096, int(budget_chars * 0.9) + 256))
+
+
 def _read_partial(path: Path) -> dict[int, str]:
     """Parse an out_partial file into {chunk_index: summary_text}.
 
@@ -163,6 +173,7 @@ def summarize_chunks(
             SYSTEM_SUMMARY,
             user,
             base_url=cfg_llm.get("base_url"),
+            max_tokens=_summary_max_tokens(budget),
         )
         return (raw or "").strip()
 

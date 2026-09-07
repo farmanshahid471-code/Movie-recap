@@ -29,7 +29,6 @@ Two further properties the old code lacked:
 """
 from __future__ import annotations
 
-import math
 from typing import Sequence
 
 # A beat is:

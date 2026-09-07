@@ -17,62 +17,60 @@ It reproduces the format of the reference channel videos:
 
 ---
 
-## 🎞️ The Step A-F semantic engine (recommended)
+## 🎞️ The Step A-F engine (recommended)
 
-The `auto` command implements the production workflow in six steps. It never
-lets the movie transcript overflow the LLM context window, and it chooses each
-visual beat of the final video by **semantic similarity** to the dialogue that
-inspired it.
+The `auto` command implements the production workflow in six steps. The
+transcript is chunked so a 2-hour film never overflows the LLM context window,
+each section's narration is written with a per-section word budget, and every
+narration beat is locked to its **chronological moment in the film** (no
+embeddings, no vector store). The video length always equals the narration
+length — gaps between sentences included — so renders are never cut short.
 
 ```
 movie.mp4
- ├─ A. ffmpeg audio -> faster-whisper -> timestamped transcript (transcript.json/.srt)
+ ├─ A. ffmpeg audio -> faster-whisper/.srt -> timestamped transcript
  │      -> 5-min chunks w/ 30s overlap  -> per-chunk "action" summaries (LLM)
- ├─ B. summaries -> Qwen 2.5 -> STRICT JSON array of narration sentences
+ ├─ B. summaries -> DeepSeek, section by section -> narration sentences, each
+ │      tagged with the film window it describes + sized to hit the word target
  ├─ C. sentences -> TTS (edge) -> en.mp3 + sentence (+word) timestamps
- ├─ D. embed transcript + script (all-MiniLM-L6-v2) -> pgvector store
- │      -> cosine match per sentence -> the film moment for that story beat
- ├─ E. ffmpeg loop: -ss/-to -> seg_NNN.mp4 (stream copy = fast, no re-encode)
- └─ F. concat demuxer -> burn .ass subtitles -> mux narration -> <name>_en.mp4
+ ├─ D. chronological beat timeline: a monotonic playhead through the film,
+ │      every beat's visual duration locked to its narration cue
+ ├─ E. ffmpeg frame-exact cuts (re-encode) -> per-beat micro-shots
+ └─ F. concat -> burn .ass subtitles -> mux narration at an explicit duration
+        -> <name>_<lang>.mp4
 ```
 
-### Run it
+### Run it (DeepSeek)
 
 ```bash
 cd movie-recap-bot
-pip install -r requirements.txt            # + faster-whisper, sentence-transformers
-ollama serve                               # keep running
-ollama pull qwen2.5
+pip install -r requirements.txt            # + faster-whisper (auto-recap needs it)
+# put DEEPSEEK_API_KEY=sk-... in .env (platform.deepseek.com -> API keys)
 
 python -m recap.cli auto --movie "C:\Movies\my_movie.mp4" --minutes 14 --name my-recap
 ```
 
-Step D vector store:
-
-| Store | When | Setup |
-|-------|------|-------|
-| **local** (SQLite fallback) | no Supabase credentials yet | nothing — exact same search logic |
-| **supabase** (pgvector) | `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` in `.env` | run `migrations/001_pgvector.sql` once in the SQL editor (or set `SUPABASE_DB_URL` and the pipeline bootstraps it) |
-
 Intermediates land in `output/<name>/_work/`: `transcript.json`/`.srt`,
 `chunks/`, `script/summaries.txt`, `script/script_en.json` (the sentence
 array), `script/script_en.txt`, `en.mp3`, `en.timing.json` (word-level when
-edge-tts provides it), `beats.json` (the semantic line→timestamp map) and
-`beats/seg_NNN.mp4` (the raw film cuts).
+edge-tts provides it), `beats_en.json` (the chronological beat→film-window
+map) and `visual/<lang>/beats/seg_NNNN.mp4` (the raw film cuts).
 
-Useful flags: `--minutes` (target length), `--langs en,zh`,
+Useful flags: `--minutes` / `--seconds` (target length), `--langs en,zh`,
 `--subtitle movie.srt` (skip Whisper), `--whisper-model`,
 `--whisper-device auto|cpu|cuda`.
 
 > The extraction step is cached per movie file (`transcript.json` + a file
 > fingerprint) so EN/ZH runs don't transcribe twice. Delete it to force a
-> re-extract.
+> re-extract. LLM steps resume too: change nothing and a re-run reuses the
+> summaries / script / narration / final render, so nothing is billed twice.
 
 ---
 
 ## How the flow works (classic 5-step engine)
 
-The legacy `run` command (used by Recap Studio) works like this:
+The legacy `run` command (select "legacy recap" in Recap Studio, or use the
+`run` CLI) works like this:
 
 ```
   ┌────────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
@@ -156,16 +154,19 @@ python -m recap.cli auto --movie /path/to/movie.mp4
 What it does:
 1. **Extract dialogue** — using an existing `.srt` next to the movie (best), or Whisper
    ASR on the audio if none exists. (`--whisper-model` / `--subtitle` to override.)
-2. **LLM writes the recap** — Ollama/Qwen reads the timestamped transcript and produces
-   the Movie-Recaps-style English narration (present tense, beat by beat).
-3. **Translate to Simplified Chinese** automatically.
+2. **LLM writes the recap** — DeepSeek (`deepseek-chat`) reads each chunk of the
+   timestamped transcript and writes the Movie-Recaps-style English narration
+   (present tense, beat by beat, section by section with a word budget).
+3. **Translate to Simplified Chinese** automatically (when `--langs en,zh`).
 4. **Narrate + burn subtitles + assemble** both clips (EN + 简体中文).
 
 Outputs: `output/<name>_en.mp4` and `output/<name>_zh.mp4`.
 
-> Auto-recap runs end-to-end with the **Ollama + Qwen** default (free, local, no key).
-> If no LLM is configured it falls back to a pre-written script (or fails with a clear
-> message). See `--langs`, `--name`, `--subtitle`.
+> Auto-recap needs a configured LLM — DeepSeek is the shipped default
+> (`LLM_PROVIDER=deepseek`, `MODEL_NAME=deepseek-chat`, key in `.env`). Ollama
+> and other OpenAI-compatible providers are supported too, but local models
+> under-write the target length; DeepSeek is recommended when length matters.
+> See `--langs`, `--name`, `--subtitle`.
 
 ## Supply your own footage
 
@@ -197,20 +198,22 @@ Put a text file with **one sentence per line** at
 `--script-file` / `--zh-file`). The Chinese file must be **line-aligned** with
 the English (same number of lines, same order). The repo ships a matching pair.
 
-### B) LLM-assisted (auto-write) — **no API key with Ollama + Qwen**
+### B) LLM-assisted (auto-write) — DeepSeek (recommended)
 
-The default is **Ollama + Qwen**, which is **free and fully local** (no key).
+DeepSeek is the shipped default: cheap, fast, reliable JSON output, and it hits
+long word targets that small local models routinely miss.
 
-1. Install Ollama and pull the model:
+1. Get a key at [platform.deepseek.com](https://platform.deepseek.com) → API keys.
 
-   ```bash
-   curl -fsSL https://ollama.com/install.sh | sh
-   ollama serve          # start the local server
-   ollama pull qwen2.5   # the model used by this config
+2. Put it in `.env`:
+
+   ```env
+   LLM_PROVIDER=deepseek
+   MODEL_NAME=deepseek-chat          # or deepseek-reasoner for tangled plots
+   DEEPSEEK_API_KEY=sk-...
    ```
 
-2. `config.yaml` is already set to `provider: ollama`, `model: qwen2.5`,
-   `base_url: http://localhost:11434/v1`. Nothing else to configure.
+   (Nothing else needs changing — `config.yaml` already ships this provider.)
 
 3. Write your plot summary and generate the script (and translation):
 
@@ -218,9 +221,11 @@ The default is **Ollama + Qwen**, which is **free and fully local** (no key).
    python -m recap.cli script --plot inputs/text/plot_notes.txt --translate
    ```
 
-> To use a cloud LLM instead (Zhipu GLM, OpenAI, Claude, DeepSeek), set the
-> provider + model + key in `.env` / `config.yaml`. Ollama is the default because
-> it's free, key-free, and strong at both English and Chinese.
+> Free/local alternative: Ollama + Qwen (`ollama serve`, `ollama pull qwen2.5`,
+> then `LLM_PROVIDER=ollama MODEL_NAME=qwen2.5`). Expect shorter-than-requested
+> scripts from small local models — DeepSeek is recommended when length matters.
+> Token use is bounded per call (each section only gets tokens for its word
+> budget); set `RECAP_TOKEN_LOG=1` in `.env` to see per-call in/out counts.
 
 The bot uses a prompt tuned to the *Movie Recaps* voice: present-tense, one
 sentence per line, moderate length, no film commentary, and a target word
@@ -305,13 +310,14 @@ movie-recap-bot/
 ├── requirements.txt
 ├── .env.example                # secrets template (copy to .env)
 ├── migrations/
-│   └── 001_pgvector.sql        # Supabase schema for Step D (pgvector)
+│   └── 001_pgvector.sql        # LEGACY Supabase schema (retired vector matcher)
 ├── inputs/text/
 │   ├── plot_notes.txt          # sample plot summary (for LLM mode)
 │   ├── script_en.txt           # sample EN recap (one sentence/line)
 │   └── script_zh.txt           # sample 简体中文 translation (aligned)
 ├── tests/
-│   ├── test_semantic_engine.py # chunking / JSON script / semantic matcher
+│   ├── test_timeline_sync.py   # length-lock + chronology regression suite
+│   ├── test_semantic_engine.py # chunking / JSON parsing / legacy matcher
 │   └── test_engine_integration.py  # full A-F orchestration (stubbed externals)
 └── recap/
     ├── cli.py                  # `python -m recap.cli` entry point
@@ -322,7 +328,8 @@ movie-recap-bot/
     ├── script.py               # Step B: JSON-array recap script (or load file)
     ├── translate.py            # EN → 简体中文 (line-aligned)
     ├── tts.py                  # Step C: narration + sentence/word timestamps
-    ├── match.py                # Step D: embeddings + pgvector/local cosine match
+    ├── timeline.py             # Step D: chronological, audio-locked beat plan
+    ├── match.py                # LEGACY vector matcher (no longer in the flow)
     ├── clip.py                 # Step E/F: ffmpeg beat clipping + concat
     ├── subtitles.py            # SRT + ASS generation, CJK-aware wrap
     ├── video.py                # bgm, subtitle burn, mux (shared assembly)
@@ -356,38 +363,37 @@ done
 ## 🐳 Docker (package the whole codebase)
 
 The repo root ships `Dockerfile` (CLI), `Dockerfile.studio` (web control panel)
-and `docker-compose.yml` (Ollama + panel + optional CLI container):
+and `docker-compose.yml` (Recap Studio + headless CLI container), all wired to
+the **DeepSeek API**:
 
 ```bash
-docker compose up --build          # Ollama + Recap Studio on http://localhost:8080
+export DEEPSEEK_API_KEY=sk-...            # required by docker compose
+docker compose up --build          # Recap Studio on http://localhost:8080
 # headless CLI on demand:
 docker compose run --rm recap auto --movie /movies/my_movie.mp4 --minutes 14
 ```
 
 Volumes: put movies you own in `./movies`, rendered clips land in `./output`,
-model weights cache in `./cache`. Pass `SUPABASE_URL` / `SUPABASE_SERVICE_KEY`
-as environment variables when your Supabase pgvector project is ready — until
-then the pipeline uses the built-in local vector store.
+model weights cache in `./cache` (Whisper / static-ffmpeg).
 
 ## 🧪 Testing (no movie, no network, no ffmpeg needed)
 
 ```bash
-python tests/test_semantic_engine.py     # chunking, JSON parsing, matching
+python tests/test_timeline_sync.py       # length lock + chronology regressions
+python tests/test_semantic_engine.py     # chunking, JSON parsing (legacy matcher)
 python tests/test_engine_integration.py  # full Steps A-F orchestration
 ```
 
-## 🎛️ Tuning the semantic mapping (Step D)
+## 🎛️ Tuning the timeline (Step D)
 
-After a run, inspect `output/_work/beats.json`: every narration line lists the
-matched dialogue cue (`cue_idx`), the film timestamps to cut, the cosine
-`score`, and whether it fell back to even spacing (`fallback: true`). Adjust in
-`config.yaml`:
+After a run, inspect `output/_work/beats_<lang>.json`: every beat carries its
+`film_start`/`film_end` window, its audio-locked `duration` and the 1–3
+`cuts` (micro-shots) it was split into. Adjust in `config.yaml` under
+`timeline:`:
 
-* `semantic.min_score` — raise it if lines are matched to unrelated moments,
-  lower it if too many lines fall back.
-* `semantic.pre_roll` — seconds of footage before the matched cue (0.3–0.8s).
-* `semantic.clip.max_clip` — cap per-beat length so one shot never drags.
-* `semantic.clip.mode` — `copy` (fast, keyframe cuts) vs `reencode`
-  (frame-exact, slower).
-* `semantic.store` — `supabase` once your project is deployed (with
-  `migrations/001_pgvector.sql` applied once in the SQL editor).
+* `micro_cut_seconds` — aim for a new shot every ~N seconds (default 3.0).
+* `max_cuts_per_beat` — how many micro-shots one long sentence may split into.
+* `min_cut_seconds` — never flash a shot shorter than this.
+* `pre_roll` — start each shot slightly before its narration moment.
+* `semantic.clip.mode` — `reencode` (frame-exact, default) vs `copy` (fast
+  preview; snaps to keyframes and reintroduces drift).

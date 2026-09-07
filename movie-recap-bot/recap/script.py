@@ -70,6 +70,16 @@ Respond with ONLY the JSON array. No markdown fences, no headings, no trailing n
 """
 
 
+def _out_tokens_for_words(words: int) -> int:
+    """Sane output cap for a prose/JSON answer of ``words``.
+
+    English runs ~1.4-2 tokens/word; a 25% headroom plus structure padding is
+    enough to never truncate a healthy answer while capping a rambling one to
+    roughly what the job needs (DeepSeek's own output limit is 8192).
+    """
+    return max(512, min(8192, int(words * 2.2) + 512))
+
+
 def render_script_json_prompt(
     summary: str,
     target: int,
@@ -161,6 +171,7 @@ def generate_script_json(
         user,
         base_url=cfg_llm.get("base_url"),
         json_mode=True,
+        max_tokens=_out_tokens_for_words(mx),
     )
     return parse_sentences_json(raw)
 
@@ -299,6 +310,7 @@ def generate_segmented_script(
             user,
             base_url=cfg_llm.get("base_url"),
             json_mode=True,
+            max_tokens=_out_tokens_for_words(budget),
         )
         sents = _parse_segment(raw)
 
@@ -316,6 +328,7 @@ def generate_segmented_script(
                 ),
                 base_url=cfg_llm.get("base_url"),
                 json_mode=True,
+                max_tokens=_out_tokens_for_words(budget),
             )
             retry = _parse_segment(more)
             if count_words(" ".join(retry)) > got:
@@ -392,6 +405,7 @@ def generate_from_dialogue(
         system,
         user,
         base_url=cfg_llm.get("base_url"),
+        max_tokens=_out_tokens_for_words(mx),
     )
 
 
@@ -404,6 +418,7 @@ def generate_online(notes: str, cfg_llm: dict, target: int, mn: int, mx: int) ->
         system,
         user,
         base_url=cfg_llm.get("base_url"),
+        max_tokens=_out_tokens_for_words(mx),
     )
 
 

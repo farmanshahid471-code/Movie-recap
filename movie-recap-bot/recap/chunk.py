@@ -16,7 +16,7 @@ sentence of dialogue is ever split or dropped.
 """
 from __future__ import annotations
 
-from .dialogue import _fmt, to_transcript_text
+from .dialogue import to_transcript_text
 
 
 def chunk_cues(

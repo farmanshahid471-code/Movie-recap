@@ -235,7 +235,7 @@ function clipCard(lang, cfg, s){
     '<div class="tags">' +
       '<span class="pill">' + dot(true) + 'voice: ' + esc(voice) + '</span>' +
       '<span class="pill">' + dot(true) + 'subtitles: ' + esc(sub) + '</span>' +
-      (sem ? '<span class="pill">' + dot(true) + 'engine: semantic beat matching</span>' : '') +
+      (sem ? '<span class="pill">' + dot(true) + 'engine: chronological beat timeline</span>' : '') +
     '</div>' +
     '<div class="btnrow">' +
       '<button class="btn primary" id="runLang"' + (s.job.running ? ' disabled' : '') + '>' +
@@ -292,7 +292,7 @@ function settingsCard(cfg, s){
 
     '<fieldset id="fm_engine"><legend>Engine</legend>' +
       '<label>Recap engine</label><select id="engine">' +
-        '<option value="semantic"' + (sem ? ' selected' : '') + '>semantic — Step A–F: reads the movie (whisper → chunks → JSON script → semantic beat matching → real clips)</option>' +
+        '<option value="semantic"' + (sem ? ' selected' : '') + '>semantic — Step A–F: reads the movie (whisper → chunks → JSON script → chronological beat timeline → real clips)</option>' +
         '<option value="recap"' + (!sem ? ' selected' : '') + '>legacy recap — 5-step montage over your scripts/clips</option>' +
       '</select>' +
       '<div class="desc mt" id="engineNote"></div>' +
@@ -360,7 +360,7 @@ function settingsCard(cfg, s){
     const q = sel => { const e = card.querySelector(sel); if (e) e.remove(); };
     q('#fm_montage'); q('#sw_storyboard'); q('#sw_auto');
     const note = card.querySelector('#engineNote');
-    if (note) note.innerHTML = 'The semantic engine (recommended) runs the full Step A–F flow: extract the film\'s dialogue, write the recap as a JSON script, then match every narration line to its exact visual moment in the movie. Missing <b>faster-whisper</b> and <b>sentence-transformers</b> are installed automatically on first run.';
+    if (note) note.innerHTML = 'The semantic engine (recommended) runs the full Step A–F flow: extract the film\'s dialogue, summarize each 5-minute block, write the recap as a per-section JSON script, then lock every narration beat to its exact chronological moment in the film (no vector database, no embeddings). Missing <b>faster-whisper</b> is installed automatically on first run; the LLM writes the recap via <b>DeepSeek</b> by default.';
   } else {
     const note = card.querySelector('#engineNote');
     if (note) note.innerHTML = 'The legacy engine builds the 5-step recap (script → translate → narrate → subtitles → montage). Best when you hand-write or edit the narration yourself.';
@@ -387,7 +387,7 @@ function settingsCard(cfg, s){
   const items = [
     ['ffmpeg', env.ffmpeg], ['edge-tts', env.edge_tts], ['pysubs2', env.pysubs2], ['pyyaml', env.yaml],
     ['scene detect', env.scene_detect], ['movie set', env.movie_set], ['movie file readable', env.movie_exists],
-    ['whisper (ASR)', env.whisper], ['embeddings (semantic)', env.embeddings],
+    ['whisper (ASR)', env.whisper],
     ['output folder writable', env.output_writable],
     ['llm: ' + (env.llm_provider || 'none') + (env.llm_ready ? (env.llm_reachable ? ' (reachable)' : ' — NOT running') : ''), env.llm_ready && env.llm_reachable],
     ['python ' + (env.python || '?'), true]
@@ -442,7 +442,6 @@ function settingsCard(cfg, s){
       : (rd.whisper ? 'Whisper ASR (no .srt found)' : (rd.whisper_will_install ? 'Whisper — will be installed automatically on first run' : 'none'));
     rb.innerHTML = '<b>Semantic engine check</b><br>' + rdLines +
       '<br><span class="muted">dialogue source: ' + src +
-      (rd.embeddings_will_install ? ' · embeddings will be downloaded & installed on first run' : (rd.embeddings ? ' · embeddings ready' : '')) +
       ' · llm: ' + esc(rd.llm_provider) + '</span>';
   } else if (rd.auto) {
     rb.innerHTML = '<b>Auto-recap check</b><br>' + rdLines +

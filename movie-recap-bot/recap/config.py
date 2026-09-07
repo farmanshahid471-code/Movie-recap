@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -52,17 +51,19 @@ _DEFAULTS: dict[str, Any] = {
         "model": None,             # optional smaller/faster model for the
                                    # chunk-summary pass, e.g. "qwen2.5:3b"
     },
-    # Step D — semantic timestamp mapping (recap sentence -> movie moment).
+    # LEGACY semantic vector matcher (retired from beat selection — the
+    # chronological timeline in recap/timeline.py maps narration lines to film
+    # windows now). Only semantic.clip.mode is still read by the pipeline.
     "semantic": {
-        "enabled": True,           # auto-recap maps each line to a film moment
-        "embedding_model": "all-MiniLM-L6-v2",  # 384-dim, runs locally
-        "store": "auto",           # auto | local | supabase (auto: supabase when creds exist)
-        "top_k": 3,                # candidates considered per recap line
-        "min_score": 0.10,         # below this -> even-beat fallback for that line
-        "pre_roll": 0.5,           # seconds of footage before the matched cue
-        "clip_pad": 0.15,          # extra footage after the narration of a line
-        "min_clip": 0.8,           # never cut a beat shorter than this
-        "max_clip": 10.0,          # nor longer than this
+        "enabled": True,
+        "embedding_model": "all-MiniLM-L6-v2",  # 384-dim, runs locally (legacy)
+        "store": "auto",           # auto | local | supabase (legacy)
+        "top_k": 3,                # candidates considered per recap line (legacy)
+        "min_score": 0.10,         # below this -> even-beat fallback (legacy)
+        "pre_roll": 0.5,           # seconds of footage before the matched cue (legacy)
+        "clip_pad": 0.15,          # extra footage after the narration of a line (legacy)
+        "min_clip": 0.8,           # never cut a beat shorter than this (legacy)
+        "max_clip": 10.0,          # nor longer than this (legacy)
         "clip": {"mode": "reencode"},  # reencode = frame-exact (required for A/V lock)
     },
     "subtitles": {

@@ -10,11 +10,9 @@ Returns a timestamped transcript in a compact text form the LLM can read.
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
-from typing import Iterable
 
-from .util import probe_duration, run, which_ffmpeg
+from .util import run, which_ffmpeg
 
 
 class DialogueError(RuntimeError):

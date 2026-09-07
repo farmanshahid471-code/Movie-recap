@@ -721,11 +721,10 @@ def ensure_whisper() -> tuple[bool, str]:
 def ensure_embeddings() -> tuple[bool, str]:
     """Make sentence-transformers available, installing it if missing.
 
-    The Step D semantic matcher embeds the transcript + narration with a local
-    model (all-MiniLM-L6-v2). Like Whisper, rather than sending the user to
-    pip we install it into the interpreter that runs the panel. It pulls
-    PyTorch (CPU) so it is a large download — done once, on the first run that
-    needs it. Returns (ok, message).
+    LEGACY ONLY: the current Step A-F engine builds its timeline from film
+    windows, not vectors, so the app no longer calls this (it used to pull a
+    multi-GB PyTorch install on first run for nothing). Kept for anyone who
+    still exercises the old vector matcher by hand. Returns (ok, message).
     """
     if have("sentence_transformers"):
         return True, "already installed"
@@ -765,6 +764,10 @@ def readiness(cfg: dict | None = None) -> dict:
     srt = subtitle_for(movie, cfg.get("auto_subtitle", ""))
     whisper = whisper_available()
     sample = sample_script_in_use()
+    # NOTE: sentence-transformers/embeddings are legacy-only (the old vector
+    # matcher). The Step A-F engine now builds the beat timeline from the film
+    # windows carried on each narration line — no embeddings are needed, so we
+    # never block on or auto-install that multi-GB package.
     embeddings = have("sentence_transformers")
 
     blocking = []
@@ -772,6 +775,8 @@ def readiness(cfg: dict | None = None) -> dict:
     if not llm_ok:
         blocking.append(llm_block)
     elif not ollama_up(cfg):
+        # Only ever reached for the ollama provider; other providers are keyed
+        # (llm_ready already passed) and need no local server.
         blocking.append(
             "Ollama is not running — open a terminal and run: ollama serve, then "
             "ollama pull qwen2.5 (or switch provider in Settings -> LLM)"
@@ -779,19 +784,14 @@ def readiness(cfg: dict | None = None) -> dict:
 
     if eng == "semantic":
         # The Step A-F engine *always* reads the movie: it needs a real file,
-        # an LLM to write the recap, dialogue (subtitle or auto-installed
-        # Whisper) and the local embedding model.
+        # an LLM to write the recap, and dialogue (subtitle or auto-installed
+        # Whisper).
         if movie is None:
             blocking.append(movie_err or "no movie file set (semantic engine recaps a real movie)")
         if not srt and not whisper:
             blocking.append(
                 "no .srt next to the movie and Whisper not installed — it will be "
                 "downloaded & installed automatically on run"
-            )
-        if not embeddings:
-            blocking.append(
-                "sentence-transformers not installed — it will be downloaded & "
-                "installed automatically on first run (large download)"
             )
         auto_ready = movie is not None and not blocking
     else:
@@ -810,8 +810,10 @@ def readiness(cfg: dict | None = None) -> dict:
     return {
         "engine": eng,
         "whisper_will_install": whisper_will_install,
+        # Kept for API/UI compatibility; the timeline engine does not need the
+        # embedding stack and it is never auto-installed any more.
         "embeddings": embeddings,
-        "embeddings_will_install": eng == "semantic" and not embeddings,
+        "embeddings_will_install": False,
         "llm_reachable": ollama_up(cfg),
         "auto": wants_auto,
         "auto_ready": auto_ready,
@@ -1016,16 +1018,9 @@ def run_semantic(langs: list[str], cfg: dict | None = None) -> list[Path]:
             _log(f"    ERROR: {msg}")
             raise RuntimeError(msg)
 
-    # Step D needs the local embedding model (install on demand, large).
-    ok, why = ensure_embeddings()
-    if not ok:
-        msg = (
-            "Semantic timestamp mapping needs sentence-transformers, but it "
-            f"could not be installed ({why}). Fix your network/pip and run again."
-        )
-        _log(f"    ERROR: {msg}")
-        raise RuntimeError(msg)
-
+    # NOTE: no embedding install here. The Step A-F engine's timeline maps each
+    # narration line straight to the film window it was written from — the old
+    # pgvector/sentence-transformers matcher is not part of that flow.
     try:
         with redirect_stdout(_Tee(_REAL_STDOUT)):
             outs = pipeline.auto_recap(rc, movie)

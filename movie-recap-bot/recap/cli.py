@@ -21,7 +21,7 @@ from pathlib import Path
 import yaml
 
 from . import llm, pipeline, script, translate
-from .config import BASE_DIR, load_config, out_dir, work_dir
+from .config import BASE_DIR, load_config, work_dir
 
 
 def _load_raw_yaml(path: str | None) -> dict:
@@ -74,7 +74,8 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 def cmd_auto(args: argparse.Namespace) -> None:
     """Auto-recap a movie with the Step A-F engine (whisper -> chunks ->
-    summaries -> JSON script -> TTS -> semantic match -> clips)."""
+    summaries -> section-by-section JSON script -> TTS -> chronological
+    beat timeline -> clips)."""
     cfg = load_config(args.config)
     cfg["project"]["name"] = args.name or cfg["project"]["name"]
     if args.langs:

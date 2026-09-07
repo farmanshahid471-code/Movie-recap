@@ -8,9 +8,10 @@ Inputs (per language):
 Produced output (per language):
     output/<name>_<lang>.mp4
 
-The montage is built to be *at least* as long as the narration; `-shortest`
-trims it exactly to the narration so audio stays the master clock. If the
-clips are shorter than the narration, they are looped seamlessy.
+The montage is built to be *at least* as long as the narration and muxed with
+an explicit duration (``burn_and_mux_locked``) so the audio stays the master
+clock and the render can never be truncated. If the clips are shorter than the
+narration, they are looped seamlessly.
 
 If no real clips are provided, `make_storyboard()` fabricates colored scene
 clips so the whole pipeline is runnable end-to-end (useful for testing/demo).

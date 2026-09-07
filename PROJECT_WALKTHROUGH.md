@@ -3,6 +3,13 @@
 A file-by-file, step-by-step explanation of what this bot is and how it works.
 Written after reading every file in the repository.
 
+> ⚠️ **Partly outdated.** Several sections below describe the *original* Step-D
+> vector matcher (embeddings / pgvector / Supabase) and Ollama+Qwen as the
+> default LLM. Both have since changed: beat selection is now a chronological
+> audio-locked timeline (`recap/timeline.py`) and the shipped default LLM is
+> **DeepSeek** (`deepseek-chat`). Where this file contradicts `FIXES.md` or the
+> bot README, the latter describe the current code.
+
 ---
 
 ## 1. What the bot actually is

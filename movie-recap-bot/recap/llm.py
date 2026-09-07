@@ -24,15 +24,41 @@ class LLMError(RuntimeError):
 
 
 def _retryable(exc: Exception) -> bool:
-    """True for transient faults worth retrying (network, 429, 5xx)."""
+    """True for transient faults worth retrying (network, 429, 5xx).
+
+    ``empty message`` is deliberately NOT here: a provider that answered with
+    an empty completion spent the tokens already and will very likely answer
+    empty again — retrying it up to four times is pure token waste.
+    """
     s = f"{type(exc).__name__}: {exc}".lower()
     markers = (
         "timeout", "timed out", "connection", "conn reset", "temporarily",
         "rate limit", "ratelimit", "429", "500", "502", "503", "504",
         "overloaded", "unavailable", "apiconnection", "internalserver",
-        "getaddrinfo", "empty message",
+        "getaddrinfo",
     )
     return any(m in s for m in markers)
+
+
+def _token_log_enabled() -> bool:
+    return os.environ.get("RECAP_TOKEN_LOG", "").strip() in ("1", "true", "yes", "on")
+
+
+def _log_tokens(p: str, model: str, resp) -> None:
+    """One-line usage/cost trace, gated behind RECAP_TOKEN_LOG=1."""
+    if not _token_log_enabled():
+        return
+    try:
+        u = getattr(resp, "usage", None)
+        if u is None:
+            return
+        pin = int(getattr(u, "prompt_tokens", 0) or 0)
+        pout = int(getattr(u, "completion_tokens", 0) or 0)
+        total = int(getattr(u, "total_tokens", 0) or (pin + pout))
+        print(f"  * [{p}/{model}] ~{pin:,} in + ~{pout:,} out "
+              f"(total ~{total:,} tokens)", flush=True)
+    except Exception:
+        pass
 
 
 # Per-provider fallback when no model is configured.
@@ -200,12 +226,25 @@ def complete(
     user: str,
     base_url: str | None = None,
     json_mode: bool = False,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
 ) -> str:
     """Send a single completion (no history). Returns assistant text.
 
     ``json_mode`` asks the provider to guarantee syntactically valid JSON
     (DeepSeek / OpenAI / Groq support ``response_format``). The callers still
     parse defensively, so a provider that ignores the hint is harmless.
+
+    Token economy (paid APIs like DeepSeek bill per token):
+      * ``max_tokens`` caps the *output*. Callers pass a bound derived from the
+        size they actually need (a section script needs ~150 tokens, not the
+        provider's 4-8K default), so a model that starts rambling cannot burn
+        a large bill. Fallback: env ``LLM_MAX_TOKENS`` or 4096.
+      * ``temperature`` defaults to env ``LLM_TEMPERATURE`` (0.7), overridable
+        per call; deterministic JSON passes can drop it (e.g. 0.2) which makes
+        the model hit the requested shape first try instead of retrying.
+      * An *empty* answer is never retried (the tokens were already spent and
+        the model will likely answer empty again).
 
     Transient network / rate-limit failures are retried with backoff — a cloud
     provider hiccup two thirds of the way through a 20-section script pass
@@ -216,15 +255,34 @@ def complete(
     p = (provider or "").strip().lower()
     client, resolved_model = _client_from(provider, model, base_url)
 
+    try:
+        env_max = int(os.environ.get("LLM_MAX_TOKENS", "0") or "0")
+    except ValueError:
+        env_max = 0
+    cap = max_tokens or env_max or 4096
+
+    try:
+        temp = float(os.environ.get("LLM_TEMPERATURE", "0.7"))
+    except ValueError:
+        temp = 0.7
+    if temperature is not None:
+        temp = float(temperature)
+
+    # Is this client OpenAI-compatible (chat.completions) or Anthropic?
+    has_chat = hasattr(client, "chat") and hasattr(getattr(client, "chat", None),
+                                                  "completions")
+    has_messages = hasattr(client, "messages")
+
     kwargs: dict = {
         "model": resolved_model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "temperature": float(os.environ.get("LLM_TEMPERATURE", "0.7")),
+        "temperature": temp,
+        "max_tokens": int(cap),
     }
-    # deepseek-reasoner rejects temperature/response_format; keep the call bare.
+    # deepseek-reasoner rejects temperature; keep the call bare.
     if "reasoner" in (resolved_model or ""):
         kwargs.pop("temperature", None)
     elif json_mode and p in _JSON_MODE_PROVIDERS:
@@ -234,21 +292,31 @@ def complete(
         attempts = int(os.environ.get("LLM_RETRIES", "4"))
     except ValueError:
         attempts = 4
+    attempts = max(1, attempts)
 
-    last: Exception | None = None
-    for attempt in range(max(1, attempts)):
-        try:  # OpenAI-compatible + Ollama
-            resp = client.chat.completions.create(**kwargs)
-            text = (resp.choices[0].message.content or "").strip()
-            if text:
-                return text
-            last = LLMError("provider returned an empty message")
-        except AttributeError:
-            last = None
-            break  # not an OpenAI-style client -> fall through to Anthropic
+    for attempt in range(attempts):
+        try:
+            if has_chat:  # OpenAI-compatible (OpenAI / DeepSeek / Ollama / ...)
+                resp = client.chat.completions.create(**kwargs)
+                _log_tokens(p, resolved_model, resp)
+                text = (resp.choices[0].message.content or "").strip()
+                if text:
+                    return text
+                raise LLMError(
+                    "provider returned an empty message (tokens were billed but "
+                    "nothing came back) — retry the run, or switch to a "
+                    "stronger model if this repeats"
+                )
+            if not has_messages:
+                raise LLMError(
+                    "LLM client is neither OpenAI-compatible nor Anthropic — "
+                    "cannot call it."
+                )
+            break  # Anthropic client -> handled below
+        except LLMError as exc:
+            raise exc  # empty message: do not burn tokens retrying
         except Exception as exc:
-            last = exc
-            if not _retryable(exc) or attempt >= max(1, attempts) - 1:
+            if not _retryable(exc) or attempt >= attempts - 1:
                 if p == "ollama":
                     raise LLMError(
                         f"Ollama request failed ({type(exc).__name__}: {exc}). "
@@ -265,20 +333,18 @@ def complete(
                         "or deepseek-reasoner"
                     ) from exc
                 raise
-        wait = min(2.0 * (2 ** attempt), 30.0)
-        print(f"  * LLM call failed ({type(last).__name__}); retry "
-              f"{attempt + 1}/{attempts} in {wait:.0f}s ...", flush=True)
-        time.sleep(wait)
-
-    if last is not None and not isinstance(last, AttributeError):
-        raise LLMError(f"LLM call failed after {attempts} attempts: {last}")
+            wait = min(2.0 * (2 ** attempt), 30.0)
+            print(f"  * LLM call failed ({type(exc).__name__}); retry "
+                  f"{attempt + 1}/{attempts} in {wait:.0f}s ...", flush=True)
+            time.sleep(wait)
 
     # Anthropic
     resp = client.messages.create(
         model=resolved_model,
-        max_tokens=4096,
+        max_tokens=int(cap),
         system=system,
         messages=[{"role": "user", "content": user}],
+        temperature=temp,
     )
     return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
 
