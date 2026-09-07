@@ -31,20 +31,46 @@ SYSTEM_SUMMARY = (
 )
 
 PROMPT_SUMMARY = """Below is a TIMESTAMPED DIALOGUE BLOCK from a movie (what the characters say, with timecodes).
-Read it and summarize the *action implied by the dialogue* — the story beats that are happening on screen.
+Read it and write out the ACTION that is happening on screen — the full story-beat list of this block, in exact order.
+
+Why this matters: your output is the ONLY source the final recap narration is written from.
+Every beat you omit is a moment the recap can never show. Completeness first.
 
 Rules:
-- Output a list of concise, factual beats, one per line, in chronological order.
-- Present tense, third person. Never quote dialogue. No "the movie/the scene shows".
-- Infer visual action from what is said ("He grabs her arm", not "she says she is scared").
-- Keep each beat short (under ~25 words) and dense. Skip filler and small talk.
-- Aim for roughly {budget} characters of output — use FEWER lines when the block is thin.
-- If this block continues an earlier scene, pick up where it left off naturally.
+- ONE LINE PER STORY BEAT. Cover EVERY distinct moment in order: each arrival, departure,
+  decision, discovery, confrontation, reveal, reaction, plan, trick, and scene change.
+  Never merge two different moments into one line; never drop a beat to keep it short.
+- Name the characters who act (use the name the dialogue uses — "Buzz", "Jessie", "Lilypad").
+  Keep proper nouns: places, devices, objects, and app names when they matter.
+- Present tense, third person, VISIBLE action only ("Jessie hops onto Bullseye and rides off"),
+  inferred from what is said — never quote dialogue verbatim.
+- If characters talk about something that happened off screen, say what that was.
+- Keep each line dense and short (under ~30 words). No "the movie", "the scene shows", "we see".
+- Aim for roughly {budget} characters of output. Dense blocks may use the full budget; thin
+  blocks should be short. Never pad with invented events.
 
 === TIMESTAMPED DIALOGUE BLOCK ===
 {transcript}
 === END OF BLOCK ===
 """
+
+
+def _summary_budget(text_chars: int) -> int:
+    """Character budget for one chunk summary (maximum-detail mode).
+
+    The old ~0.22x ratio compressed a dense 5-minute block so hard that whole
+    scenes vanished before the script writer ever saw them. Default now keeps
+    ~0.42x of the raw transcript as story beats — near-complete beat coverage.
+    Tune with RECAP_SUMMARY_RATIO (e.g. 0.25 = lighter / cheaper) without
+    touching code; the floor/ceiling keep degenerate inputs sane.
+    """
+    import os
+
+    try:
+        ratio = float(os.environ.get("RECAP_SUMMARY_RATIO", "0.42"))
+    except ValueError:
+        ratio = 0.42
+    return max(350, min(5200, int(text_chars * ratio)))
 
 
 def _summary_max_tokens(budget_chars: int) -> int:
@@ -165,7 +191,7 @@ def summarize_chunks(
 
     def one(chunk: dict) -> str:
         text = chunk.get("text", "") or ""
-        budget = max(500, min(2200, int(len(text) * 0.22)))
+        budget = _summary_budget(len(text))
         user = PROMPT_SUMMARY.format(transcript=text, budget=budget)
         raw = llm.complete(
             cfg_llm.get("provider", ""),

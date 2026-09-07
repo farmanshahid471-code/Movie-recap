@@ -197,22 +197,31 @@ SYSTEM_RECAP_BEATS = (
     "film's own footage. Never mention being an AI. Never quote dialogue. "
     "Never say 'the movie', 'the film', 'the scene', 'we see' or 'the camera'. "
     "Third person, present tense, active verbs, character names. "
-    "Deadpan, propulsive, lightly witty. Every sentence is a VISIBLE action."
+    "Deadpan, propulsive, lightly witty. Every sentence is a VISIBLE action. "
+    "Your source beats are a factual record: describe them accurately and "
+    "specifically — keep every character name and proper noun they contain — "
+    "and never invent events that are not in the list."
 )
 
 PROMPT_SEGMENT_JSON = """You are writing ONE SECTION of a full movie recap narration.
 
-This section covers the part of the film from {t0} to {t1}. Below are the action
-beats for that stretch, in order.
+This section covers the part of the film from {t0} to {t1}. Below, in exact
+order, are the action beats for that stretch — the complete factual record of
+what happens there. Write the narration FROM those beats; never invent events.
 
-Write EXACTLY about {budget} words of narration for this section — this is a hard
-requirement, the audio timing depends on it. That is roughly {nsent} sentences.
+Write EXACTLY about {budget} words of narration for this section — the audio
+timing depends on it. That is roughly {nsent} sentences.
 
 Rules:
-- Third person, PRESENT tense. Every sentence is something a viewer can SEE happen
-  ("Troy kicks the door open.", "The van slams into the barricade.").
-- One self-contained visual action per sentence, about 10 to 20 words.
-- Strictly chronological within this section. Do not jump ahead or recap backwards.
+- Third person, PRESENT tense. Every sentence is something a viewer can SEE
+  happen ("Troy kicks the door open.", "The van slams into the barricade.").
+- Walk the section in order from its first beat to its last. Never skip an
+  entire scene and never jump backwards; where the budget cannot fit every
+  minor beat, drop only the least visual sub-steps and keep one sentence per
+  distinct scene, with the scene's key detail intact.
+- Be SPECIFIC like a top recap channel: keep the character names and proper
+  nouns from the beats ("Jessie hops onto Bullseye and rides to the twins'
+  house", not "she goes to help"). About 10 to 20 words per sentence.
 - Never quote dialogue. Never say "the movie", "the film", "the scene shows",
   "we see", "the camera", or comment on the filmmaking.
 - Use character names consistently.

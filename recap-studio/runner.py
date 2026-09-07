@@ -30,6 +30,8 @@ BOT_DIR = Path(__file__).resolve().parent.parent / "movie-recap-bot"
 if str(BOT_DIR) not in sys.path:
     sys.path.insert(0, str(BOT_DIR))
 
+from recap.util import rate_speed_factor  # noqa: E402  (needs BOT_DIR on sys.path)
+
 STUDIO_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = STUDIO_DIR / "output"
 # Kept as the fallback location. Use output_dir() — it honours the configured
@@ -65,6 +67,7 @@ DEFAULT_CONFIG = {
     "scene_len": 6.0,                       # seconds per beat
     "voice_en": "en-US-ChristopherNeural",
     "voice_zh": "zh-CN-YunxiNeural",
+    "rate": "-8%",                       # edge-tts pace: +X% faster, -X% slower
     "subtitle_lang_en": "en",
     "subtitle_lang_zh": "zh",
     # LLM — Ollama + Qwen (free, local, no key). Used to auto-write the recap
@@ -454,7 +457,14 @@ def _apply_common(rc: dict, cfg: dict, lang: str | None = None) -> None:
     """Push the panel settings that both engines share into the recap config."""
     rc["narration"]["lang_voice"]["en"] = cfg.get("voice_en") or "en-US-ChristopherNeural"
     rc["narration"]["lang_voice"]["zh"] = cfg.get("voice_zh") or "zh-CN-YunxiNeural"
-    rc["narration"]["rate"] = "+0%"
+    # Pacing is user-tunable now ("-8%" = calm storyteller read). Scale the
+    # word target by the pace factor so the finished mp3 still lands on the
+    # requested duration instead of running ~8% long.
+    pace = str(cfg.get("rate") or "-8%").strip() or "+0%"
+    if not pace.endswith("%"):
+        pace += "%"
+    rc["narration"]["rate"] = pace
+    factor = rate_speed_factor(pace)
 
     # Target clip length -> narration word target.
     #
@@ -469,7 +479,7 @@ def _apply_common(rc: dict, cfg: dict, lang: str | None = None) -> None:
         secs = 0
     if secs > 0:
         wpm = int(rc["narration"].get("words_per_minute", 150))
-        words = max(int(round(secs / 60 * wpm)), 120)
+        words = max(int(round(secs / 60 * wpm * factor)), 120)
         rc["narration"]["words_target"] = words
         rc["narration"]["words_min"] = min(
             int(rc["narration"].get("words_min", 600)), words

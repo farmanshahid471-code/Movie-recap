@@ -334,9 +334,14 @@ function settingsCard(cfg, s){
         '<div><label>English subtitle lang</label><input type="text" id="subtitle_lang_en" value="' + esc(cfg.subtitle_lang_en) + '"></div>' +
         '<div><label>Chinese voice</label><input type="text" id="voice_zh" value="' + esc(cfg.voice_zh) + '"></div>' +
         '<div><label>Chinese subtitle lang</label><input type="text" id="subtitle_lang_zh" value="' + esc(cfg.subtitle_lang_zh) + '"></div>' +
+        '<div><label>Narration pace</label><select id="rate">' +
+          ['-12%','-8%','-4%','+0%'].map(function (r) {
+            const sel = (cfg.rate || '-8%') === r ? ' selected' : '';
+            return '<option value="' + r + '"' + sel + '>' + r + ' (slower/faster)</option>';
+          }).join('') + '</select></div>' +
         '<div><label>Target recap length (seconds)</label><input type="number" id="duration" value="' + esc(cfg.duration) + '"></div>' +
       '</div>' +
-      '<div class="desc mt">Target length shapes the narration (~2.5 spoken words/second). 840 ≈ 14 min (full-length); 300 ≈ 5 min.</div>' +
+      '<div class="desc mt">Target length shapes the narration (word count adjusts to the pace above). 900 ≈ 15 min (full-length); 300 ≈ 5 min.</div>' +
     '</fieldset>' +
 
     '<fieldset id="fm_llm"><legend>LLM — DeepSeek (recommended: fast, cheap, reliable JSON)</legend>' +
@@ -500,6 +505,7 @@ function collectSettings(){
   put('subtitle_lang_en', v('subtitle_lang_en'));
   put('voice_zh', v('voice_zh'));
   put('subtitle_lang_zh', v('subtitle_lang_zh'));
+  put('rate', v('rate'));
   const du = v('duration'); if (du !== null) base.duration = parseInt(du, 10) || 60;
   const lp = v('llm_provider'); if (lp !== null) base.llm_provider = lp.trim() || 'deepseek';
   const lm = v('llm_model'); if (lm !== null) base.llm_model = lm.trim();

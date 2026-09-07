@@ -22,10 +22,12 @@ narration:
   words_max: 6000
   words_per_minute: 150    # speech rate used for every length calculation
   lang_voice:
-    en: "en-US-ChristopherNeural"
+    en: "en-US-ChristopherNeural"   # warm, deep male — "storytelling" narrator
     zh: "zh-CN-YunxiNeural"
   tts_provider: "edge"     # edge | elevenlabs | openai
-  rate: "+0%"
+  # Slightly slower than natural for a calm storyteller read. Range +0%..-20%;
+  # edge-tts "+X%" speeds up, "-X%" slows down. ElevenLabs/OpenAI ignore this.
+  rate: "-8%"
 
 # Step A1-A2 — Whisper ASR tuning (used when no .srt sits next to the movie).
 dialogue:

@@ -140,6 +140,21 @@ def ffmpeg_timeout(media_seconds: float, minimum: float = 300.0) -> float:
     return max(float(minimum), float(media_seconds) * 30.0)
 
 
+def rate_speed_factor(rate: str | None) -> float:
+    """Parse an edge-tts rate string ('+10%', '-8%') into a speed multiplier.
+
+    '-8%' (slower) -> 0.92, '+0%' -> 1.0. Callers size the narration word
+    target with this factor so the finished audio still lands on the requested
+    length even when the voice reads slower or faster than the default.
+    """
+    if not rate:
+        return 1.0
+    try:
+        return 1.0 + float(str(rate).strip().strip("%")) / 100.0
+    except ValueError:
+        return 1.0
+
+
 def probe_duration(path: str | Path) -> float:
     """Return media duration in seconds.
 

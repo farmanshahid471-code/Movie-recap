@@ -22,6 +22,7 @@ import yaml
 
 from . import llm, pipeline, script, translate
 from .config import BASE_DIR, load_config, work_dir
+from .util import rate_speed_factor
 
 
 def _load_raw_yaml(path: str | None) -> dict:
@@ -102,14 +103,19 @@ def cmd_auto(args: argparse.Namespace) -> None:
         wpm = int(nar.get("words_per_minute", 150))
         secs = int(args.seconds) if args.seconds else int(args.minutes) * 60
         secs = max(30, secs)
-        words = int(round(secs / 60 * wpm))
+        # A slower TTS pace (rate "-8%") reads fewer words per minute, so scale
+        # the word target by the pace factor to land on the requested length.
+        pace = nar.get("rate", "+0%")
+        factor = rate_speed_factor(pace)
+        words = int(round(secs / 60 * wpm * factor))
         # Raise the ceiling to whatever was asked for: silently clamping the
         # target to words_max is how a 900s request became a short video.
         nar["words_target"] = words
         nar["words_min"] = min(int(nar.get("words_min", 600)), words)
         nar["words_max"] = max(int(nar.get("words_max", 4200)), int(words * 1.6))
         print(f"  * Target narration: {secs}s (~{secs / 60:.1f} min) "
-              f"-> {words} words at {wpm} wpm")
+              f"-> {words} words at {wpm} wpm "
+              f"(TTS pace {pace}, effective ~{wpm * factor:.0f} wpm)")
 
     movie = Path(args.movie)
     if not movie.exists():

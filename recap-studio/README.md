@@ -162,11 +162,12 @@ Stored in `config.json` (next to the code). Key fields:
 | `movie_path` | path to an owned movie **file**. The semantic engine **requires** one; the legacy engine uses placeholder scenes when empty. A folder is rejected with a message naming the videos inside it |
 | `output_dir` | folder for the rendered clips + the `_work` intermediates (default `D:\recap`; created on demand, falls back to `recap-studio/output` with a warning if it can't be written) |
 | `storyboard` | legacy engine only: use placeholder scenes when no movie is set |
-| `duration` | target recap length in seconds (~2.5 spoken words/sec → `840` ≈ 14 min full-length) |
+| `duration` | target recap length in seconds → word count is derived from it (default `900` ≈ 15 min full-length, adjusted for the pace below) |
+| `rate` | narration pace (edge-tts): `-12%` … `+0%`. Default `-8%` = calm storyteller read. The word target auto-scales so the video still lands on `duration` |
 | `auto` | legacy engine only: write the narration from the movie's dialogue |
 | `auto_subtitle` | optional explicit `.srt`/`.ass`/`.vtt`; blank = look next to the movie, else Whisper (both engines) |
 | `whisper_model` / `whisper_device` | Whisper model size + device used when no subtitle exists (default `small` / `auto`) |
-| `voice_en` / `voice_zh` | narrator voices (edge-tts) |
+| `voice_en` / `voice_zh` | narrator voices (edge-tts; default warm deep male `en-US-ChristopherNeural`) |
 | `subtitle_lang_en` / `subtitle_lang_zh` | subtitle languages (default `en` / `zh`) |
 | `llm_provider` / `llm_base_url` / `llm_api_key` / `llm_model` | LLM used for auto scripting (default **DeepSeek** / `deepseek-chat`; paste the key in Settings) |
 
@@ -175,6 +176,14 @@ Timeline knobs (Step D) live in `../movie-recap-bot/config.yaml` under
 `pre_roll`) and `semantic.clip.mode` (`reencode` = frame-exact default, `copy`
 = fast preview). Inspect `<output>/_work/beats_<lang>.json` after a run to tune
 them.
+
+**Narration precision & detail** — the script is only ever as precise as the
+story beats it is written from. The Step A summary pass now keeps ~42% of each
+dialogue block as ordered beats (maximum detail: names, objects, scene changes,
+every beat preserved) instead of a loose ~22% compression, and the script-writer
+prompt forces per-scene coverage with the beats' exact names/details. Trade
+detail vs DeepSeek tokens with the `RECAP_SUMMARY_RATIO` env var (default
+`0.42`; `0.25` = lighter/cheaper) in `../movie-recap-bot/.env`.
 
 Everything in this table is applied to the pipeline by `runner.recap_cfg()` —
 including the LLM fields, which are pushed into both the recap config and the
