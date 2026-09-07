@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .util import probe_duration, run, which_ffmpeg
+from .util import ffmpeg_timeout, probe_duration, run, which_ffmpeg
 
 SCALE_FILL = (
     "scale=1920:1080:force_original_aspect_ratio=increase,"
@@ -179,7 +179,10 @@ def burn_and_mux_locked(
         "-movflags", "+faststart",
         str(out_mp4),
     ]
-    run(cmd, cwd=ass_path.parent)
+    print(f"  * burning subtitles + muxing narration "
+          f"({float(duration):.1f}s; final encode pass)", flush=True)
+    run(cmd, cwd=ass_path.parent,
+        timeout=ffmpeg_timeout(float(duration), minimum=600.0))
     return out_mp4
 
 

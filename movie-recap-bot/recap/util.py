@@ -85,6 +85,7 @@ def run(
     check: bool = True,
     capture: bool = True,
     cwd: str | Path | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a command, echoing the call for debuggability.
 
@@ -94,19 +95,49 @@ def run(
     Callers pass the file's folder here and use a bare relative filename.
     """
     pretty = " ".join(str(c) for c in cmd)
-    print(f"  $ {pretty}")
-    res = subprocess.run(
-        [str(c) for c in cmd],
-        capture_output=capture,
-        text=True,
-        cwd=str(cwd) if cwd else None,
-    )
+    print(f"  $ {pretty}", flush=True)
+    try:
+        res = subprocess.run(
+            [str(c) for c in cmd],
+            capture_output=capture,
+            text=True,
+            cwd=str(cwd) if cwd else None,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        tail = ""
+        for blob in (getattr(exc, "stdout", None), getattr(exc, "stderr", None)):
+            if blob:
+                text = blob if isinstance(blob, str) else blob.decode(errors="replace")
+                tail += text[-2000:]
+        raise RuntimeError(
+            f"Command did not finish within {timeout:.0f}s and was aborted "
+            f"(it may be stuck):\n  {pretty}\n{tail}"
+        ) from exc
     if check and res.returncode != 0:
         raise RuntimeError(
             f"Command failed ({res.returncode}): {pretty}\n"
             f"STDOUT:\n{res.stdout[-3000:]}\nSTDERR:\n{res.stderr[-3000:]}"
         )
     return res
+
+
+def ffmpeg_timeout(media_seconds: float, minimum: float = 300.0) -> float:
+    """A generous per-pass ceiling so a slow encode still finishes.
+
+    ffmpeg output is silent for minutes at a time (stderr is captured and only
+    shown on failure), which reads as "stuck" on older machines. Real 1080p
+    software encodes on a 2017-era PC run at roughly 0.5-3x realtime, so ~30x
+    realtime headroom only fires on a true deadlock and never below
+    ``minimum``. Override with the FFMPEG_TIMEOUT env var (seconds).
+    """
+    env = os.environ.get("FFMPEG_TIMEOUT")
+    if env:
+        try:
+            return float(env)
+        except ValueError:
+            pass
+    return max(float(minimum), float(media_seconds) * 30.0)
 
 
 def probe_duration(path: str | Path) -> float:
