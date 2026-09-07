@@ -80,7 +80,10 @@ DEFAULT_CONFIG = {
     "whisper_device": "auto",        # auto = GPU when available, else CPU
 }
 
-LOCK = threading.Lock()
+# Reentrant lock: log calls and status() must be safe to invoke from code that
+# already holds the lock (a plain Lock caused a self-deadlock in the run worker
+# when a run logged while the caller still held LOCK).
+LOCK = threading.RLock()
 LOG_BUFFER: list[str] = []
 MAX_LOG_LINES = 600
 JOB_STATE: dict = {
@@ -239,21 +242,24 @@ def output_dir(cfg: dict | None = None) -> Path:
     """
     if cfg is None:
         cfg = load_config()
-    raw = (cfg.get("output_dir") or "").strip().strip('"')
-    cached = _OUTPUT_CACHE.get(raw)
+    raw0 = (cfg.get("output_dir") or "").strip().strip('"')
+    cached = _OUTPUT_CACHE.get(raw0)
     if cached is not None:
         return cached
 
     resolved = DEFAULT_OUTPUT_DIR
+    raw = raw0
     if raw:
         # "D:\recap" is a perfectly legal *filename* on Linux/macOS, so without
         # this check it silently creates a folder named "D:\recap" instead of
         # telling you the path makes no sense on this OS.
         if re.match(r"^[A-Za-z]:[\\/]", raw) and os.name != "nt":
-            _log(
-                f"! output folder {raw} is a Windows path but this is not Windows "
-                f"({sys.platform}); falling back to {DEFAULT_OUTPUT_DIR}"
-            )
+            if raw0 not in _RESOLVE_LOGGED:
+                _RESOLVE_LOGGED.add(raw0)
+                _log(
+                    f"! output folder {raw} is a Windows path but this is not Windows "
+                    f"({sys.platform}); falling back to {DEFAULT_OUTPUT_DIR}"
+                )
             raw = ""
     if raw:
         target = Path(raw).expanduser()
@@ -273,6 +279,9 @@ def output_dir(cfg: dict | None = None) -> Path:
     except Exception:
         resolved = DEFAULT_OUTPUT_DIR
         resolved.mkdir(parents=True, exist_ok=True)
+    # Cache under both the raw key and the normalized key so repeat calls with
+    # the same configured path don't re-log the fallback warning every poll.
+    _OUTPUT_CACHE[raw0] = resolved
     _OUTPUT_CACHE[raw] = resolved
     return resolved
 
@@ -609,6 +618,63 @@ def whisper_available() -> bool:
     return any(have(m) for m in ("faster_whisper", "whisper", "whisperx"))
 
 
+def _run_pip_install(pkg: str, label: str, timeout: int = 1800) -> tuple[bool, str]:
+    """pip install one package, streaming its output into the panel log.
+
+    The old capture_output version left the Console silent for minutes during
+    the big downloads (faster-whisper, sentence-transformers + torch), which
+    read as "the UI does nothing". Every pip line is forwarded to _log so the
+    Console shows live progress, and failures report the real pip error.
+    """
+    import subprocess
+
+    cmd = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", pkg]
+    _log(f"    pip: {' '.join(cmd)}")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+    except Exception as exc:
+        return False, f"could not start pip: {exc}"
+
+    lines: list[str] = []
+
+    def reader() -> None:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            # pip's download progress uses \r; split on both so every visible
+            # update becomes a log line instead of one giant \r-joined blob.
+            for seg in raw.replace("\r", "\n").split("\n"):
+                s = seg.strip()
+                if s:
+                    lines.append(s)
+                    _log(f"    pip: {s}")
+
+    th = threading.Thread(target=reader, daemon=True, name=f"pip-{label}")
+    th.start()
+    try:
+        rc = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return False, f"pip install {label} timed out after {timeout // 60} min"
+    th.join(timeout=5)
+    if rc != 0:
+        tail = [ln for ln in lines if "error" in ln.lower() or "no matching" in ln.lower()]
+        detail = (tail[-1] if tail else (lines[-1] if lines else "unknown error")).strip()
+        if sys.version_info >= (3, 13) and "no matching distribution" in detail.lower():
+            detail += (" — your Python is 3.13, and some AI packages (torch/whisper) "
+                       "lag behind new Python releases. Install Python 3.12 on D: and "
+                       "run setup_ui.bat again.")
+        return False, f"pip install {label} failed: {detail}"
+    return True, "installed"
+
+
 def ensure_whisper() -> tuple[bool, str]:
     """Make a Whisper implementation available, installing it if missing.
 
@@ -622,20 +688,10 @@ def ensure_whisper() -> tuple[bool, str]:
         return True, "already installed"
 
     _log("    Whisper not installed -> downloading & installing faster-whisper "
-         "(one-time; this can take a couple of minutes) ...")
-    import subprocess
-
-    cmd = [sys.executable, "-m", "pip", "install", "faster-whisper"]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
-    except subprocess.TimeoutExpired:
-        return False, "pip install faster-whisper timed out"
-    except Exception as exc:
-        return False, f"could not start pip: {exc}"
-
-    if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
-        return False, f"pip install faster-whisper failed: {tail[-1] if tail else 'unknown error'}"
+         "(one-time; can take several minutes on a slow connection) ...")
+    ok, why = _run_pip_install("faster-whisper", "faster-whisper", timeout=2400)
+    if not ok:
+        return False, why
 
     if whisper_available():
         _log("    faster-whisper installed.")
@@ -656,20 +712,11 @@ def ensure_embeddings() -> tuple[bool, str]:
         return True, "already installed"
 
     _log("    sentence-transformers not installed -> installing (one-time, "
-         "large download: it includes a CPU PyTorch build) ...")
-    import subprocess
-
-    cmd = [sys.executable, "-m", "pip", "install", "sentence-transformers"]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2400)
-    except subprocess.TimeoutExpired:
-        return False, "pip install sentence-transformers timed out"
-    except Exception as exc:
-        return False, f"could not start pip: {exc}"
-
-    if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
-        return False, f"pip install sentence-transformers failed: {tail[-1] if tail else 'unknown error'}"
+         "large download: it includes a CPU PyTorch build; see live pip output "
+         "below) ...")
+    ok, why = _run_pip_install("sentence-transformers", "sentence-transformers", timeout=3600)
+    if not ok:
+        return False, why
 
     if have("sentence_transformers"):
         _log("    sentence-transformers installed.")
@@ -1008,9 +1055,14 @@ def start_run(langs: list[str], cfg: dict | None = None) -> bool:
         try:
             if engine_name(cfg) == "semantic":
                 # One pass covers every language (shared whisper/chunks/beats).
+                # NOTE: never hold LOCK while running — run_semantic logs
+                # immediately, and LOCK is not reentrant, so nesting it here
+                # used to self-deadlock the worker on its first _log() call
+                # (UI showed running:true forever and an empty Console).
                 with LOCK:
-                    if not JOB_STATE["cancel"]:
-                        run_semantic(langs, cfg)
+                    cancelled = JOB_STATE["cancel"]
+                if not cancelled:
+                    run_semantic(langs, cfg)
             else:
                 for lang in langs:
                     with LOCK:

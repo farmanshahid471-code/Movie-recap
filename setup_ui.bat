@@ -126,13 +126,23 @@ echo  [OK] Project structure looks good.
 echo.
 
 :: ---------------------------------------------------------
-:: 5. Already running on this port? Then just open it.
+:: 5. Already running on this port? Restart it FRESH.
 :: ---------------------------------------------------------
+:: A leftover instance from an older code copy is the classic cause of a
+:: dead panel: the old process still serves, but its log stream is broken,
+:: so the Console stays empty and buttons do nothing.
 %PY% recap-studio\tools\portcheck.py %PORT% >nul 2>&1
 if not errorlevel 1 (
-    echo  [OK] Recap Studio is already running - opening %URL%
-    start "" "%URL%"
-    goto :end
+    echo  [..] An instance is already running on port %PORT%.
+    echo       Restarting it with the current code - any in-progress run stops.
+    %PY% recap-studio\tools\shutdown.py %PORT%
+    if errorlevel 1 (
+        echo.
+        echo  [X] Port %PORT% is still occupied. Close the other Recap Studio
+        echo      window or run stop_ui.bat, then start setup_ui.bat again.
+        pause
+        exit /b 1
+    )
 )
 
 :: ---------------------------------------------------------
