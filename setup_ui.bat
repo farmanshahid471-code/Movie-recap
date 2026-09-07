@@ -103,10 +103,10 @@ echo.
 :: ---------------------------------------------------------
 %PY% recap-studio\tools\ensure_ffmpeg.py
 if not errorlevel 1 (
-    echo  [OK] ffmpeg + ffprobe ready (binaries kept in %RECAP_DATA%, not C:).
+    echo  [OK] ffmpeg + ffprobe ready - binaries kept in %RECAP_DATA%, not C:.
 ) else (
     echo  [!] ffmpeg unavailable right now - setup continues; the first render
-    echo      will fetch it (keep an internet connection available).
+    echo      will fetch it - keep an internet connection available.
 )
 echo.
 
