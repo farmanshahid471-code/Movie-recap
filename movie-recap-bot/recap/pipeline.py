@@ -410,19 +410,47 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
             c["text"], encoding="utf-8"
         )
 
-    print(f"  * Summarizing each chunk via {provider}/{cfg['llm'].get('model')} ...")
+    # Summarization is the slowest LLM step on a CPU-only machine. Fail fast
+    # when the model is missing (otherwise Ollama silently downloads it, which
+    # looks identical to "stuck"), and use a smaller model if configured.
+    summary_cfg = dict(cfg["llm"])
+    if ck.get("model"):
+        summary_cfg["model"] = ck["model"]          # chunking.model override
+    summary_cfg["summary_model"] = summary_cfg.get("model", "")
+    llm.verify_model(summary_cfg)
+
+    if len(chunks) > 6:
+        print("  * NOTE: this LLM summarization pass is the slow step on CPU-only "
+              "machines. It prints per-chunk progress below and writes "
+              "script/summaries.txt as it goes. To speed it up:\n"
+              "      - set chunking.model to a smaller local model "
+              "(e.g. qwen2.5:3b) in config.yaml, or\n"
+              "      - use a cloud provider (LLM_PROVIDER=deepseek + key) for "
+              "near-instant summaries,\n"
+              "      - or raise chunking.window_seconds (e.g. 600) for fewer chunks.")
+    summaries_path = tdir / "summaries.txt"
+    summaries_path.write_text("", encoding="utf-8")  # fresh partial file
+    print(f"  * Summarizing each chunk via "
+          f"{summary_cfg.get('provider')}/{summary_cfg.get('model')} "
+          f"({len(chunks)} chunks) ...")
     summaries = summarize.summarize_chunks(
         chunks,
-        cfg["llm"],
+        summary_cfg,
         parallel=bool(ck.get("parallel", False)),
+        out_partial=summaries_path,
     )
     merged = summarize.merge_summaries(summaries)
-    (tdir / "summaries.txt").write_text(merged, encoding="utf-8")
+    summaries_path.write_text(merged, encoding="utf-8")
     print(f"  * Summaries: {len(summaries)} chunks -> {len(merged.split())} words "
           f"(script/summaries.txt)")
 
     # ------------------------------------------------------------- Step B
     print("== Step B: Script generation (JSON array of sentences) ==")
+    llm.verify_model(cfg["llm"])   # fail fast if the main model is missing
+    if (cfg["llm"].get("provider") or "").lower() == "ollama":
+        print("  * (writing the full script is one long LLM call — on CPU this "
+              "can take 10-40 min; no output until it returns. Speed up with "
+              "MODEL_NAME=qwen2.5:3b in .env, or switch to deepseek.)")
     nar = cfg["narration"]
     target = int(nar.get("words_target", 2000))
     mn = int(nar.get("words_min", 600))

@@ -37,6 +37,8 @@ _DEFAULTS: dict[str, Any] = {
         "window_seconds": 300.0,   # 5-minute logical blocks
         "overlap_seconds": 30.0,   # overlap between adjacent blocks
         "parallel": False,         # Ollama is single-user; keep serial by default
+        "model": None,             # optional smaller/faster model for the
+                                   # chunk-summary pass, e.g. "qwen2.5:3b"
     },
     # Step D — semantic timestamp mapping (recap sentence -> movie moment).
     "semantic": {

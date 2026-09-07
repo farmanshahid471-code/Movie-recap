@@ -33,6 +33,9 @@ chunking:
   window_seconds: 300      # 5-minute logical blocks
   overlap_seconds: 30      # 30s of carry between blocks
   parallel: false          # true parallelizes chunk summaries (remote LLMs)
+  # Optional: a smaller/faster model for the chunk-summary pass (the slowest
+  # LLM step on CPU-only PCs). e.g. "qwen2.5:3b" ~4x faster than qwen2.5 7B.
+  model: null
 
 # Step D — semantic timestamp mapping (recap line -> film moment).
 semantic:

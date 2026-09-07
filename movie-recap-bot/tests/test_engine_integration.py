@@ -72,7 +72,10 @@ def _install_stubs():
     _save(pipeline.script, "generate_script_json")
     _save(pipeline.match, "map_beats")
     _save(pipeline.match, "Embedder")
+    _save(pipeline.llm, "verify_model")
     _save(pipeline.tts, "make_provider")
+
+    pipeline.llm.verify_model = lambda cfg_llm: None  # no real Ollama in tests
 
     class _DummyEmbedder:
         dim = 384

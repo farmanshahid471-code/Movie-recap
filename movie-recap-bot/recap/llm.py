@@ -39,6 +39,10 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
     not just Ollama.
     """
     provider = (provider or "").strip().lower()
+    try:
+        timeout = float(os.environ.get("LLM_TIMEOUT", "3600"))
+    except ValueError:
+        timeout = 3600.0
 
     if provider in ("", "none"):
         raise LLMError(
@@ -53,6 +57,7 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
         client = openai.OpenAI(
             api_key=os.environ.get("OPENAI_API_KEY"),
             base_url=base_url or os.environ.get("OPENAI_BASE_URL") or None,
+            timeout=timeout,
         )
         model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["openai"]
         return client, model
@@ -65,6 +70,7 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
             base_url=base_url
             or os.environ.get("DEEPSEEK_BASE_URL")
             or "https://api.deepseek.com/v1",
+            timeout=timeout,
         )
         model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["deepseek"]
         return client, model
@@ -72,7 +78,9 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
     if provider == "anthropic":
         import anthropic  # type: ignore
 
-        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        client = anthropic.Anthropic(
+            api_key=os.environ.get("ANTHROPIC_API_KEY"), timeout=timeout
+        )
         model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["anthropic"]
         return client, model
 
@@ -80,11 +88,49 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
         import openai  # type: ignore
 
         base = base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-        client = openai.OpenAI(base_url=base, api_key="ollama")
+        client = openai.OpenAI(base_url=base, api_key="ollama", timeout=timeout)
         model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["ollama"]
         return client, model
 
     raise LLMError(f"Unknown LLM provider: {provider!r}")
+
+
+def verify_model(cfg_llm: dict) -> None:
+    """Fail fast (actionable error) before the long LLM passes.
+
+    For Ollama this asks the server which models are already pulled. Without
+    this check, generating on a model that was never pulled makes Ollama
+    *silently download the model first* — the #1 cause of "stuck for an hour
+    with no output" on a fresh setup.
+    """
+    provider = (cfg_llm.get("provider") or "").strip().lower()
+    model = (cfg_llm.get("model") or "").strip()
+    if provider != "ollama" or not model:
+        return
+    import json
+    import urllib.error
+    import urllib.request
+
+    base = (
+        (cfg_llm.get("base_url") or os.environ.get("OLLAMA_BASE_URL"))
+        or "http://localhost:11434/v1"
+    ).rstrip("/")
+    try:
+        with urllib.request.urlopen(base + "/models", timeout=5) as r:
+            data = json.loads(r.read().decode("utf-8") or "{}")
+    except Exception as exc:
+        raise LLMError(
+            f"Ollama is not answering at {base} ({type(exc).__name__}).\n"
+            "  Start it:  ollama serve   (keep it running)\n"
+            f"  Pull the model:  ollama pull {model}"
+        ) from exc
+    ids = {m.get("id", "") for m in data.get("data", [])}
+    if model not in ids:
+        raise LLMError(
+            f"Ollama is running but does not have model '{model}' yet.\n"
+            f"  Run once:  ollama pull {model}\n"
+            "(check with: ollama list)"
+        )
 
 
 def complete(
