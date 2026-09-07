@@ -34,9 +34,11 @@ echo.
 :: RECAP_DATA below if your big drive has another letter.
 set "RECAP_DATA=D:\recap-data"
 if not exist "D:\nul" set "RECAP_DATA=%ROOT%\.recap-data"
-if not exist "%RECAP_DATA%" mkdir "%RECAP_DATA%"
-if not exist "%RECAP_DATA%\cache" mkdir "%RECAP_DATA%\cache"
-if not exist "%RECAP_DATA%\tmp"   mkdir "%RECAP_DATA%\tmp"
+mkdir "%RECAP_DATA%" 2>nul
+if not exist "%RECAP_DATA%\" set "RECAP_DATA=%ROOT%\.recap-data"
+mkdir "%RECAP_DATA%" 2>nul
+mkdir "%RECAP_DATA%\cache" 2>nul
+mkdir "%RECAP_DATA%\tmp"   2>nul
 set "TEMP=%RECAP_DATA%\tmp"
 set "TMP=%RECAP_DATA%\tmp"
 set "PIP_CACHE_DIR=%RECAP_DATA%\pip-cache"

@@ -1,0 +1,6 @@
+# Windows batch files MUST keep CRLF line endings. cmd.exe mis-parses LF-only
+# scripts (goto labels / multi-line if blocks) which makes them flash-close.
+# They are marked -text so the exact CRLF bytes are stored in git and appear
+# unchanged in the GitHub download ZIP (eol=crlf would store LF internally).
+*.bat -text
+*.cmd -text
