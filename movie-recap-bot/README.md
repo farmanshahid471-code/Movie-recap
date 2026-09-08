@@ -308,6 +308,21 @@ machine narration): uniform sentence length, "Name does X. Name does Y."
 listing, em-dashes, semicolons, "little did they know", rhetorical questions,
 and meta commentary.
 
+Every LLM role also speaks as a **strict persona** instead of a task
+description (a persona's taste filters every drafting choice; a task
+description falls back to the model's default encyclopedic voice):
+
+* all narration writing (section writer, one-shot writer, punch-up, legacy
+  modes) speaks as **the same veteran recap narrator** — a storyteller
+  relaying the film to a friend who missed it, with instincts (rhythm that
+  breathes, varied openers, indirect speech, contractions) and a hard "code"
+  (never invent events, never analyze/review, never say "the movie", no
+  em-dashes/semicolons, never mention being an AI);
+* the beat-extraction step speaks as a **script supervisor** whose log is the
+  single source of truth — complete, timecoded, neutral, nothing merged or
+  invented — which is what keeps the factual record underneath the narration
+  trustworthy.
+
 Structural touches that match how those videos open and close:
 
 * the first section starts *inside the film's first scene* ("It all begins

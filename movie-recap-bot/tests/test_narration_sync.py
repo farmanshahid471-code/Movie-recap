@@ -210,6 +210,32 @@ def test_prompts_render() -> None:
     print("ok: all writer prompts render")
 
 
+def test_strict_personas() -> None:
+    """Every LLM role must speak as a strict persona, not a task description."""
+    from recap import summarize
+
+    # The narrator persona is one identity shared by every narration writer.
+    assert "veteran movie-recap narrator" in script.NARRATOR_PERSONA
+    assert "Never mention yourself" in script.NARRATOR_PERSONA
+    for sys_prompt in (script.SYSTEM_RECAP_WRITER, script.SYSTEM_RECAP_BEATS,
+                       script.SYSTEM_POLISH):
+        assert sys_prompt.startswith(script.NARRATOR_PERSONA), \
+            "every narration system prompt must BE the narrator persona"
+    # The persona carries the hard rules, not just the flavor.
+    low = script.NARRATOR_PERSONA.lower()
+    for rule in ("never invent events", "never use em-dashes",
+                 "never say \"the movie\""):
+        assert rule in low
+    # The beat extractor has its own strict persona (the log is ground truth).
+    sup = summarize.SYSTEM_SUMMARY.lower()
+    assert "script supervisor" in sup and "source of truth" in sup
+    assert "never quote dialogue" in sup or "you never quote dialogue" in sup
+    # Legacy writer presets open with the persona framing too.
+    assert "veteran movie-recap narrator" in script.STYLE_PRESET
+    assert "veteran movie-recap narrator" in script.DIALOGUE_PRESET
+    print("ok: strict personas on every LLM role (narrator + script supervisor)")
+
+
 if __name__ == "__main__":
     test_map_words_to_sentences_perfect_match()
     test_map_words_to_sentences_tolerant_match()
@@ -222,4 +248,5 @@ if __name__ == "__main__":
     test_sign_off_skipped_when_writer_already_closed()
     test_sign_off_disabled()
     test_prompts_render()
+    test_strict_personas()
     print("\nALL NARRATION-SYNC TESTS PASSED")
