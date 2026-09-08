@@ -663,7 +663,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
 
         b_marker = tdir / f"script_{code}.marker.json"
         b_sig = _sig(merged, cfg["llm"].get("provider"),
-                     cfg["llm"].get("model"), target, "segmented-v5")
+                     cfg["llm"].get("model"), target, "segmented-v6")
         seg_path = tdir / f"script_{code}.segments.json"
         segments = None
         if _marker_ok(b_marker, b_sig) and seg_path.exists():
