@@ -48,6 +48,9 @@ narration:
   # edge-tts pitch shift in Hz: "-8Hz" adds depth/gravitas, "+6Hz" brightens.
   # Keep "-0Hz" (off) unless a voice sounds thin. ElevenLabs/OpenAI ignore.
   pitch: "-0Hz"
+  # English naturalness knobs (set in .env): RECAP_POLISH=1 spoken-style
+  # rewrite per section; RECAP_ALIGN=1 sentence->beat footage alignment;
+  # RECAP_ANCHOR_LEAD=0.8 / RECAP_ANCHOR_TAIL=6.0 film window per line.
 
 # Step A1-A2 — Whisper ASR tuning (used when no .srt sits next to the movie).
 dialogue:

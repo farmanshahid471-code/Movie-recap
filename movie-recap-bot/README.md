@@ -223,26 +223,40 @@ Rules of thumb:
 
 ### Sounding closer to a top recap channel (natural narration + matching cuts)
 
-**Narration style** — the section writer narrates in the present tense like a
-storyteller over footage and varies sentence length/openers so the read never
-sounds like a list ("Woody does X. Woody does Y."). It is baked into the
-default prompt. The recap is plain text before it is voiced, so you can also
-hand-edit any line: after the run, `_work/script/script_en.txt` (and
-`_zh/_ar/_es`) holds one sentence per line — edit, re-run, and only the voice
-+ render steps repeat (LLM steps stay cached).
+Three layers now work together to close the gap to channels like *Fantastic
+Recaps* — and each layer is independently tunable so you can hear/see what
+moves the needle.
 
-**Scene ↔ narration timing** — each narration sentence is anchored to the film
-moment its beat came from, and the camera cuts inside a tight window around
-that moment (~2.5 s of lead-in, never a scene from minutes before), so the
-picture is already on the action when the line lands. The recap stays
-strictly chronological: beat N always shows footage at or after beat N−1.
+**1. Narration that reads as speech, not generated text.** The English section
+writer now gets an in-prompt *voice exemplar* (an original passage written in
+the target rhythm: varied sentence openers, cause → effect chaining, short
+breath-long beats) and is told to match its energy, never its words. On top of
+that, an automatic **punch-up pass** (`RECAP_POLISH`, default on for English)
+sends each finished section back to the LLM once with an editorial brief —
+"kill robotic patterns, never start three lines the same way, replace generic
+verbs with concrete ones" — and only keeps the rewrite if it preserves the
+exact sentence count, so no film anchor ever shifts. Each English section
+therefore costs one extra DeepSeek call (~+$0.01 per movie), cached afterwards.
+The recap is plain text before it is voiced, so you can still hand-edit any
+line: `_work/script/script_en.txt` (and `_zh/_ar/_es`) holds one sentence per
+line — edit, re-run, and only voice + render repeat.
 
-**Voice** — swap `narration.lang_voice.<code>` (or the Studio per-language
-voice field) and re-run; only TTS + render repeat because upstream steps are
-cached, so auditioning a voice costs minutes. For English the deep/calm edge
-narrators to try, in rough order of fit for the *Fantastic Recaps* vibe:
+**2. Footage that shows the moment each line talks about.** Every narration
+sentence is anchored to a beat with its own film timecode. For English the
+script now *aligns* each sentence to the beat it actually narrates — local
+embeddings score every sentence against every beat, and a monotone (never
+backwards) path picks each line's own moment — instead of assuming the writer
+covered the film evenly. The camera then cuts inside a tight window around
+that beat (`RECAP_ANCHOR_LEAD=0.8` s of lead-in so the shot is already on the
+action when the line lands, `RECAP_ANCHOR_TAIL=6.0` s of follow-through), and
+micro-cuts walk forward within it. Chronology is guaranteed: beat N always
+shows footage at or after beat N−1.
 
-| Voice | Feel |
+**3. A voice that doesn't sound like a robot.** Swap `narration.lang_voice.<code>`
+(or the Studio per-language voice field) and re-run — only TTS + render repeat
+because upstream steps are cached, so auditioning costs minutes, not a full run:
+
+| Voice (en) | Feel |
 |---|---|
 | `en-US-ChristopherNeural` (default) | deep, warm, storytelling |
 | `en-US-AndrewNeural` | natural, younger male |
@@ -256,6 +270,25 @@ synthetic — recap channels you admire usually use a paid neural narrator. The
 single biggest voice upgrade is `tts_provider: elevenlabs` with an
 `ELEVENLABS_API_KEY` + `ELEVENLABS_VOICE_ID` in `.env` (pick a deep male voice
 in the ElevenLabs voice library; check elevenlabs.io for current pricing).
+ElevenLabs free tier is enough to A/B a few voices on one recap before you
+decide.
+
+**What still separates you from the reference channel** (honest list): those
+channels use a professional narrator, a subtle music bed under the voice, and
+often a human who wrote or heavily edited the script. Two of those three you
+can now reach cheaply: hand-edit `script_en.txt` once for a hero video, and
+drop a music track into `config.yaml` → `video.bgm` (mp3 path + `bgm_volume`,
+e.g. 0.10–0.15) for the under-bed. The last one — a truly human-grade voice —
+is ElevenLabs or a local narrator; no free TTS matches a paid neural voice.
+
+**English naturalness knobs (in `.env`)**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RECAP_POLISH` | `1` | spoken-style punch-up rewrite of each English section |
+| `RECAP_ALIGN` | `1` | align each English line to the beat it narrates |
+| `RECAP_ANCHOR_LEAD` | `0.8` | seconds of footage before a line's beat (raise to 1.5–2 if cuts feel too abrupt) |
+| `RECAP_ANCHOR_TAIL` | `6.0` | max follow-through footage per line |
 
 * Subtitles burned on the clip use `subtitles.lang_font.ar` (default `Arial`,
   shaped Arabic) — swap to any installed Arabic font you prefer.

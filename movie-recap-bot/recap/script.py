@@ -10,6 +10,8 @@ subtitle cue later.
 """
 from __future__ import annotations
 
+import os
+
 from pathlib import Path
 
 from . import llm
@@ -67,6 +69,55 @@ Respond with ONLY the JSON array. No markdown fences, no headings, no trailing n
 === STORY SUMMARY ===
 {summary}
 === END OF SUMMARY ===
+"""
+
+
+# A short passage in the target voice. It is ORIGINAL writing (no movie, no
+# characters from any film) used only to demonstrate rhythm: varied openings,
+# cause -> effect chaining, short punchy beats, a spoken feel. Models copy the
+# ENERGY, never the words or events.
+EN_VOICE_EXEMPLAR = (
+    "Outside, the rain hasn't stopped all day. Claire reaches the gate just as "
+    "it slams shut behind her -- no key, no phone, nobody home. She tries the "
+    "side window, then the cellar door, then the dog flap, which is exactly as "
+    "humiliating as it sounds. Inside the house, a light flicks on. Someone is "
+    "already home. Claire freezes with one leg halfway through the flap -- and "
+    "that is how the night officially begins."
+)
+
+EN_STYLE_BLOCK = (
+    "\n\n=== NARRATIVE VOICE -- match this ENERGY and rhythm, never its words "
+    "or events ===\n" + EN_VOICE_EXEMPLAR +
+    "\n(Study how it opens sentences differently, chains cause to effect, and "
+    "sounds like someone talking. Your narration must feel equally spoken -- "
+    "never like a list of bullet points.)"
+)
+
+SYSTEM_POLISH = (
+    "You are the dialogue editor for a movie-recap YouTube channel. You take a "
+    "draft narration and rewrite it so it sounds like a person TALKING over "
+    "footage -- natural, propulsive, varied -- without changing what happens, "
+    "the order of events, or the number of sentences. Never mention being an AI."
+)
+
+POLISH_PROMPT = """Below is a DRAFT section of a movie recap, one sentence per array element, in strict story order.
+
+Rewrite it so it reads as natural spoken narration, not generated text:
+- Keep EXACTLY {n} sentences ({n} array elements). Never merge two sentences into one and never split one into two -- the video timing depends on it.
+- Keep the same events in the same order, and keep every character name and proper noun. Change the WORDS, not the story.
+- Sound like a storyteller talking: vary sentence length and how sentences open. Starting three in a row the same way should feel like an accident.
+- Kill robotic patterns: repeated "<Name> does X. <Name> does Y." listing, generic verbs (goes, gets, has) -> concrete ones (bolts, grabs, shoves, spots).
+- Keep each sentence short enough to say in one breath (about 8 to 22 words).
+- Present tense, third person. Never quote dialogue; never say "the movie", "the film", "we see", "the scene shows", "the camera".
+
+=== NARRATIVE VOICE -- match this ENERGY and rhythm, never its words or events ===
+{exemplar}
+
+=== DRAFT SECTION ===
+{draft}
+=== END DRAFT ===
+
+Respond with ONLY a JSON object: {{"sentences": [...]}} with exactly {n} strings.
 """
 
 
@@ -310,21 +361,176 @@ def _fmt_beat_lines(c: dict) -> str:
     return (c.get("summary") or "").strip()
 
 
+def _polish_section(
+    cfg_llm: dict, sents: list[str], exemplar_block: str
+) -> list[str]:
+    """English-only punch-up: rewrite a section to sound spoken and human.
+
+    One extra LLM call per section (DeepSeek is cheap). The rewrite MUST keep
+    the exact same number of sentences, so every sentence keeps the film
+    anchor it was generated with. Any deviation (model merged/split lines,
+    call failed, length drifted) discards the rewrite and keeps the draft --
+    the video timing must never be sacrificed for style.
+    """
+    import json
+    import os
+
+    if not sents:
+        return sents
+    if os.environ.get("RECAP_POLISH", "1").strip().lower() in (
+        "0", "false", "no", "off"
+    ):
+        return sents
+    user = POLISH_PROMPT.format(
+        n=len(sents), exemplar=exemplar_block or EN_VOICE_EXEMPLAR,
+        draft=json.dumps(sents, ensure_ascii=False),
+    )
+    try:
+        raw = llm.complete(
+            cfg_llm.get("provider", ""),
+            cfg_llm.get("model", ""),
+            SYSTEM_POLISH,
+            user,
+            base_url=cfg_llm.get("base_url"),
+            json_mode=True,
+            max_tokens=_out_tokens_for_words(max(60, len(sents) * 16)),
+        )
+        new = _parse_segment(raw)
+    except Exception:
+        return sents
+    if len(new) != len(sents) or new == sents:
+        return sents
+    old_w = count_words(" ".join(sents))
+    new_w = count_words(" ".join(new))
+    if abs(new_w - old_w) <= max(30.0, old_w * 0.35):
+        return new
+    return sents
+
+
+def _monotone_best_path(sims: list[list[float]]) -> list[int]:
+    """Best monotone (non-decreasing) path through an n x m similarity matrix.
+
+    Returns one beat-column index per sentence row, so sentences map to beats
+    in story order without ever jumping backwards. Pure function (no deps) so
+    it is unit-testable; embeddings are computed by the caller.
+    """
+    n = len(sims)
+    m = len(sims[0]) if n else 0
+    if n == 0 or m == 0:
+        return []
+    neg = float("-inf")
+    dp = [[neg] * m for _ in range(n)]
+    prev = [[0] * m for _ in range(n)]
+    for j in range(m):
+        dp[0][j] = float(sims[0][j])
+    for i in range(1, n):
+        run_best, run_arg = neg, 0
+        for j in range(m):
+            if dp[i - 1][j] > run_best:      # strict > keeps the earliest (smallest) arg
+                run_best, run_arg = dp[i - 1][j], j
+            prev[i][j] = run_arg if run_best > neg else j
+            dp[i][j] = float(sims[i][j]) + run_best if run_best > neg else float(sims[i][j])
+    path = [0] * n
+    j = max(range(m), key=lambda j: dp[n - 1][j])
+    for i in range(n - 1, -1, -1):
+        path[i] = j
+        if i > 0:
+            j = prev[i][j]
+    return path
+
+
+_EMBED_MODEL: object | None = None
+
+
+def _embed_model():
+    """Lazily load the local MiniLM embedder (used only for the English
+    sentence->beat alignment). Any failure (model missing / no numpy) returns
+    None and the pipeline silently falls back to positional anchoring."""
+    global _EMBED_MODEL
+    if _EMBED_MODEL is None:
+        try:
+            from sentence_transformers import SentenceTransformer  # type: ignore
+            _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+        except Exception:
+            _EMBED_MODEL = False
+    return _EMBED_MODEL or None
+
+
+def _sentence_anchor_values(
+    sentences: list[str], beats: list[dict]
+) -> list[float] | None:
+    """Best-effort: align each sentence to the beat it actually narrates.
+
+    Positional anchoring assumes the writer covered the chunk evenly, but a
+    real script spends two sentences on one big beat and skims another. Here
+    local embeddings score every sentence against every beat and a monotone
+    DP maps each sentence to its closest beat *in film order*, so the footage
+    shown for a line is the moment that line describes. Returns per-sentence
+    film times, or None (fall back to positional) when embeddings are
+    unavailable or the mapping is degenerate.
+    """
+    import os
+
+    if os.environ.get("RECAP_ALIGN", "1").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    if not sentences or not beats:
+        return None
+    pairs = sorted(
+        (
+            (float(b["t"]), (b.get("text") or "").strip())
+            for b in beats
+            if b.get("t") is not None and (b.get("text") or "").strip()
+        ),
+        key=lambda x: x[0],
+    )
+    if len(pairs) < 2 or len(sentences) < 2:
+        return None
+    times = [t for t, _ in pairs]
+    btexts = [tx for _, tx in pairs]
+    model = _embed_model()
+    if model is None:
+        return None
+    try:
+        import numpy as np  # type: ignore
+
+        def _emb(texts):
+            return np.asarray(
+                model.encode(
+                    list(texts), normalize_embeddings=True,
+                    convert_to_numpy=True, show_progress_bar=False,
+                ),
+                dtype="float32",
+            )
+
+        es = _emb(sentences)
+        eb = _emb(btexts)
+        sims = (es @ eb.T).tolist()
+    except Exception:
+        return None
+    path = _monotone_best_path(sims)
+    if len(path) != len(sentences):
+        return None
+    return [times[j] for j in path]
+
+
 def _anchor_windows(
     chunk_start: float,
     chunk_end: float,
     beats: list[dict],
     nsent: int,
+    *,
+    anchor_values: list[float] | None = None,
+    lead: float = 0.8,
+    tail: float = 6.0,
 ) -> list[tuple[float, float]]:
     """Map each narration sentence of one chunk to a tight film window.
 
-    The sentences are written in beat order and evenly spread over the chunk,
-    so sentence *k* of *N* describes the beats around story position
-    ``k/(N-1)``. This returns, per sentence, the window of film that moment
-    lives in — centred on the beat's own timestamp — instead of handing every
-    sentence the whole chunk window. When the summarizer produced no usable
-    timecodes (or there are no beats), the whole chunk window is returned for
-    every sentence (the old behaviour: the timeline then spreads them).
+    ``anchor_values`` — optional per-sentence anchor times (from
+    :func:`_sentence_anchor_values`, i.e. the beat each sentence actually
+    narrates). When absent, the sentences are evenly spread over the chunk's
+    beats (old behaviour). Either way each sentence's footage zone starts
+    ``lead`` seconds before its anchor (so the shot is already on the action
+    when the line lands) and extends up to ``tail`` seconds after it.
     """
     times = [
         float(b["t"])
@@ -332,39 +538,42 @@ def _anchor_windows(
         if b.get("t") is not None and (b.get("text") or "").strip()
     ]
     times.sort()
-    if not times or nsent <= 0:
+    if anchor_values is not None and len(anchor_values) == nsent:
+        anchors = [max(0.0, float(x)) for x in anchor_values]
+    elif not times or nsent <= 0:
         return [(chunk_start, chunk_end)] * max(nsent, 1)
+    else:
+        b, n = len(times), nsent
 
-    b, n = len(times), nsent
+        def _anchor(k: int) -> float:
+            if n == 1:
+                return times[b // 2]
+            return times[min(b - 1, int(round(k * (b - 1) / (n - 1))))]
 
-    def _anchor(k: int) -> float:
-        if n == 1:
-            return times[b // 2]
-        return times[min(b - 1, int(round(k * (b - 1) / (n - 1))))]
+        anchors = [_anchor(k) for k in range(n)]
 
-    anchors = [_anchor(k) for k in range(n)]
     wins: list[tuple[float, float]] = []
     prev_lo: float | None = None
     k = 0
-    while k < n:
+    while k < nsent:
         a = anchors[k]
         # Consecutive sentences anchored to the SAME beat (more sentences than
         # beats in a quiet chunk) form a run; split the beat's footage zone so
         # each one shows a different sliver of the moment instead of repeating.
         m = 1
-        while k + m < n and anchors[k + m] == a:
+        while k + m < nsent and anchors[k + m] == a:
             m += 1
-        # Footage zone for the run: ~2.5s before the moment (so the shot is
-        # already on the action when its line lands) through ~6s after it,
-        # compressed toward the midpoint of the nearest earlier/later anchor
-        # so two close beats never overlap footage and the film order holds.
-        lb = a - 2.5
+        # Footage zone for the run: ``lead`` before the anchor through ``tail``
+        # after it, compressed toward the midpoint of the nearest earlier/later
+        # anchor so two close beats never show overlapping footage and the film
+        # order holds.
+        lb = a - lead
         for j in range(k - 1, -1, -1):
             if anchors[j] < a:
                 lb = max(lb, (a + anchors[j]) / 2.0)
                 break
-        rb = a + 6.0
-        for j in range(k + m, n):
+        rb = a + tail
+        for j in range(k + m, nsent):
             if anchors[j] > a:
                 rb = min(rb, (a + anchors[j]) / 2.0)
                 break
@@ -413,8 +622,10 @@ def generate_segmented_script(
     if not usable:
         return []
 
+    is_en = not (lang_name and lang_name.lower() != "english")
+    exemplar_block = EN_STYLE_BLOCK if is_en else ""
     lang_instr = ""
-    if lang_name and lang_name.lower() != "english":
+    if not is_en:
         lang_instr = (
             f"\n\nLanguage: write the narration entirely in {lang_name} — "
             f"natural, idiomatic {lang_name} for a {lang_name}-speaking recap "
@@ -456,6 +667,8 @@ def generate_segmented_script(
             t0=_fmt_clock(t0), t1=_fmt_clock(t1), budget=budget, nsent=nsent,
             continuity=continuity, beats=_fmt_beat_lines(c),
         )
+        if exemplar_block:
+            user += exemplar_block
         if lang_instr:
             user += lang_instr
         raw = llm.complete(
@@ -489,9 +702,30 @@ def generate_segmented_script(
             if count_words(" ".join(retry)) > got:
                 sents = retry
 
+        # English-only punch-up pass: same sentence count, spoken style.
+        if sents and is_en:
+            sents = _polish_section(cfg_llm, sents, exemplar_block)
+
         # Anchor each sentence to the film moment(s) it narrates (beat
-        # timecodes) instead of giving the whole chunk to every sentence.
-        wins = _anchor_windows(t0, t1, beats, len(sents)) if sents else []
+        # timecodes) instead of giving the whole chunk to every sentence. For
+        # English, first align each sentence to the beat it actually describes
+        # (embedding + monotone DP); other languages keep the positional map.
+        if sents:
+            anchors = _sentence_anchor_values(sents, beats) if is_en else None
+            try:
+                _lead = float(os.environ.get("RECAP_ANCHOR_LEAD", "0.8"))
+            except (TypeError, ValueError):
+                _lead = 0.8
+            try:
+                _tail = float(os.environ.get("RECAP_ANCHOR_TAIL", "6.0"))
+            except (TypeError, ValueError):
+                _tail = 6.0
+            wins = _anchor_windows(
+                t0, t1, beats, len(sents),
+                anchor_values=anchors, lead=_lead, tail=_tail,
+            )
+        else:
+            wins = []
         for s, (lo, hi) in zip(sents, wins):
             out.append({"sentence": s, "film_start": lo, "film_end": hi})
         if sents:

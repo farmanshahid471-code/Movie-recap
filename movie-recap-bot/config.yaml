@@ -47,6 +47,17 @@ narration:
   # edge-tts pitch shift in Hz: "-8Hz" adds depth/gravitas, "+6Hz" brightens.
   # Keep "-0Hz" (off) unless a voice sounds thin. ElevenLabs/OpenAI ignore.
   pitch: "-0Hz"
+  # --- Naturalness / scene-sync knobs (English recap; env-tunable) ---
+  #   RECAP_POLISH=1         spoken-style "punch-up" rewrite of each English
+  #                          section (one extra DeepSeek call per section; the
+  #                          rewrite keeps the exact sentence count so every
+  #                          line keeps its film anchor). Set 0 to disable.
+  #   RECAP_ALIGN=1          align each English line to the beat it actually
+  #                          narrates (local embeddings, monotone film order)
+  #                          so the footage matches the words. Set 0 to disable.
+  #   RECAP_ANCHOR_LEAD=0.8  seconds of footage shown before a beat's line lands
+  #   RECAP_ANCHOR_TAIL=6.0  max follow-through footage after a beat
+  # (RECAP_POLISH / RECAP_ALIGN / RECAP_ANCHOR_* go in movie-recap-bot/.env)
 
 # Step A1-A2 — Whisper ASR tuning (used when no .srt sits next to the movie).
 dialogue:
