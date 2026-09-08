@@ -220,6 +220,43 @@ Rules of thumb:
 * Default narrators: **ar = `ar-SA-HamedNeural`** (Modern Standard Arabic),
   **es = `es-MX-JorgeNeural`** (Latin American Spanish) — override under
   `narration.lang_voice`.
+
+### Sounding closer to a top recap channel (natural narration + matching cuts)
+
+**Narration style** — the section writer narrates in the present tense like a
+storyteller over footage and varies sentence length/openers so the read never
+sounds like a list ("Woody does X. Woody does Y."). It is baked into the
+default prompt. The recap is plain text before it is voiced, so you can also
+hand-edit any line: after the run, `_work/script/script_en.txt` (and
+`_zh/_ar/_es`) holds one sentence per line — edit, re-run, and only the voice
++ render steps repeat (LLM steps stay cached).
+
+**Scene ↔ narration timing** — each narration sentence is anchored to the film
+moment its beat came from, and the camera cuts inside a tight window around
+that moment (~2.5 s of lead-in, never a scene from minutes before), so the
+picture is already on the action when the line lands. The recap stays
+strictly chronological: beat N always shows footage at or after beat N−1.
+
+**Voice** — swap `narration.lang_voice.<code>` (or the Studio per-language
+voice field) and re-run; only TTS + render repeat because upstream steps are
+cached, so auditioning a voice costs minutes. For English the deep/calm edge
+narrators to try, in rough order of fit for the *Fantastic Recaps* vibe:
+
+| Voice | Feel |
+|---|---|
+| `en-US-ChristopherNeural` (default) | deep, warm, storytelling |
+| `en-US-AndrewNeural` | natural, younger male |
+| `en-US-GuyNeural` | energetic, announcer-style |
+| `en-GB-RyanNeural` | deeper, British gravitas |
+| `en-US-EricNeural` | friendly, lighter |
+
+`rate: "-8%"` (slower = calmer) and `pitch: "-8Hz"` (deeper) tune the same
+line in `config.yaml` (`narration:`). Free edge voices are pleasant but still
+synthetic — recap channels you admire usually use a paid neural narrator. The
+single biggest voice upgrade is `tts_provider: elevenlabs` with an
+`ELEVENLABS_API_KEY` + `ELEVENLABS_VOICE_ID` in `.env` (pick a deep male voice
+in the ElevenLabs voice library; check elevenlabs.io for current pricing).
+
 * Subtitles burned on the clip use `subtitles.lang_font.ar` (default `Arial`,
   shaped Arabic) — swap to any installed Arabic font you prefer.
 * A language **without** its own subtitle is still rendered: it is translated

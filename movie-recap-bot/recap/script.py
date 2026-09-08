@@ -198,9 +198,12 @@ SYSTEM_RECAP_BEATS = (
     "Never say 'the movie', 'the film', 'the scene', 'we see' or 'the camera'. "
     "Third person, present tense, active verbs, character names. "
     "Deadpan, propulsive, lightly witty. Every sentence is a VISIBLE action. "
-    "Your source beats are a factual record: describe them accurately and "
-    "specifically — keep every character name and proper noun they contain — "
-    "and never invent events that are not in the list."
+    "Sound like a confident narrator TALKING over the footage, not a person "
+    "reading bullet points: vary sentence length and the way sentences open, "
+    "and let each line flow out of the one before it. Your source beats are a "
+    "factual record: describe them accurately and specifically — keep every "
+    "character name and proper noun they contain — and never invent events "
+    "that are not in the list."
 )
 
 PROMPT_SEGMENT_JSON = """You are writing ONE SECTION of a full movie recap narration.
@@ -226,6 +229,16 @@ Rules:
 - Be SPECIFIC like a top recap channel: keep the character names and proper
   nouns from the beats ("Jessie hops onto Bullseye and rides to the twins'
   house", not "she goes to help"). About 10 to 20 words per sentence.
+- SOUND SPOKEN, NOT READ OUT AS A LIST. Vary sentence length (8 to 24 words)
+  and, above all, how sentences OPEN: a character's name, an action verb, a
+  time or consequence link ("Now", "But", "The next instant"), or a participle
+  clause ("Spotting her chance, Jessie bolts for the window."). Never start
+  three sentences in a row with the same word or the same character's name.
+- Let each sentence flow from the previous one the way a narrator tells a
+  story in real time: keep a visible cause -> effect thread between beats.
+  Use "and then / next" links sparingly — prefer structure over conjunctions.
+- Each sentence still reports ONE visible event or one tight cause-and-effect
+  pair, strictly in the order of the beat list. No dialogue quotes.
 - Never quote dialogue. Never say "the movie", "the film", "the scene shows",
   "we see", "the camera", or comment on the filmmaking.
 - Use character names consistently.
@@ -341,10 +354,11 @@ def _anchor_windows(
         m = 1
         while k + m < n and anchors[k + m] == a:
             m += 1
-        # Footage zone for the run: the anchor moment ±6s, compressed to the
-        # midpoint toward the nearest earlier/later anchor so two close beats
-        # never show overlapping footage and the film order holds.
-        lb = a - 6.0
+        # Footage zone for the run: ~2.5s before the moment (so the shot is
+        # already on the action when its line lands) through ~6s after it,
+        # compressed toward the midpoint of the nearest earlier/later anchor
+        # so two close beats never overlap footage and the film order holds.
+        lb = a - 2.5
         for j in range(k - 1, -1, -1):
             if anchors[j] < a:
                 lb = max(lb, (a + anchors[j]) / 2.0)

@@ -45,6 +45,9 @@ narration:
   # Slightly slower than natural for a calm storyteller read. Range +0%..-20%;
   # edge-tts "+X%" speeds up, "-X%" slows down. ElevenLabs/OpenAI ignore this.
   rate: "-8%"
+  # edge-tts pitch shift in Hz: "-8Hz" adds depth/gravitas, "+6Hz" brightens.
+  # Keep "-0Hz" (off) unless a voice sounds thin. ElevenLabs/OpenAI ignore.
+  pitch: "-0Hz"
 
 # Step A1-A2 — Whisper ASR tuning (used when no .srt sits next to the movie).
 dialogue:

@@ -31,6 +31,8 @@ _DEFAULTS: dict[str, Any] = {
                        "ar": "ar-SA-HamedNeural",    # Modern Standard Arabic
                        "es": "es-MX-JorgeNeural"},   # Latin American Spanish
         "rate": "+0%",
+        # edge-tts pitch shift in Hz ("-6Hz" deeper, "+6Hz" brighter; "-0Hz" = off)
+        "pitch": "-0Hz",
         "tts_provider": "edge",
     },
     # Step D — chronological timeline (replaces semantic vector matching).

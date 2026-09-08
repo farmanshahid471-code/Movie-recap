@@ -66,11 +66,12 @@ class TTSProvider(Protocol):
 class EdgeTTS:
     name = "edge"
 
-    def __init__(self, rate: str = "+0%"):
+    def __init__(self, rate: str = "+0%", pitch: str = "-0Hz"):
         import edge_tts  # type: ignore
 
         self._edge = edge_tts
         self.rate = rate
+        self.pitch = pitch
 
     def synthesize(self, sentences: list[str], voice: str, out_mp3: Path) -> list[TimedCue]:
         """Synthesize with a few automatic retries for transient network faults.
@@ -100,7 +101,9 @@ class EdgeTTS:
 
     async def _sync(self, sentences: list[str], voice: str, out_mp3: Path) -> None:
         text = "\n".join(sentences)          # sentence separators -> natural pauses
-        communicate = self._edge.Communicate(text, voice, rate=self.rate)
+        communicate = self._edge.Communicate(
+            text, voice, rate=self.rate, pitch=self.pitch
+        )
         bounds: list[tuple[float, float, str]] = []
         words: list[tuple[float, float, str]] = []   # word-level timestamps
         audio = bytearray()
@@ -189,7 +192,10 @@ def _build_cues(bounds: list[tuple[float, float, str]], sentences: list[str]) ->
 def make_provider(name: str, cfg_narration: dict) -> TTSProvider:
     name = (name or "edge").strip().lower()
     if name == "edge":
-        return EdgeTTS(rate=cfg_narration.get("rate", "+0%"))
+        return EdgeTTS(
+            rate=cfg_narration.get("rate", "+0%"),
+            pitch=cfg_narration.get("pitch", "-0Hz"),
+        )
     if name == "elevenlabs":
         return _ElevenLabs(cfg_narration)
     if name == "openai":

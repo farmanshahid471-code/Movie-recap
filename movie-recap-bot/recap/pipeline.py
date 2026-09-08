@@ -663,7 +663,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
 
         b_marker = tdir / f"script_{code}.marker.json"
         b_sig = _sig(merged, cfg["llm"].get("provider"),
-                     cfg["llm"].get("model"), target, "segmented-v3")
+                     cfg["llm"].get("model"), target, "segmented-v4")
         seg_path = tdir / f"script_{code}.segments.json"
         segments = None
         if _marker_ok(b_marker, b_sig) and seg_path.exists():
@@ -747,7 +747,8 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         tj = wd / f"{code}.timing.json"
         c_marker = wd / f".nar_{code}.marker.json"
         c_sig = _sig(lines, voice, tts_cfg.get("tts_provider", "edge"),
-                     tts_cfg.get("rate", "+0%"))
+                     tts_cfg.get("rate", "+0%"),
+                     tts_cfg.get("pitch", "-0Hz"))
         if _marker_ok(c_marker, c_sig) and mp3.exists() and tj.exists():
             try:
                 nar_cues = [
