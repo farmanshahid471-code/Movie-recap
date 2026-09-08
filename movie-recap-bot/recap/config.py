@@ -58,6 +58,12 @@ _DEFAULTS: dict[str, Any] = {
         # boundaries (clause breaks: after commas, before and/but/while),
         # so the picture switches exactly when the narrator changes subject.
         "cut_on_words": True,
+        # Snap every cut's film position onto the film's REAL shot changes
+        # (one cached PySceneDetect pass per movie; `pip install
+        # scenedetect[opencv]`), so each visual begins on an actual camera
+        # cut the way a human edit does. No scenedetect -> un-snapped.
+        "snap_to_scenes": True,
+        "snap_tolerance": 0.8,   # max seconds to move a cut onto a boundary
     },
     # Whisper ASR tuning (auto-recap from the movie's own audio).
     "dialogue": {

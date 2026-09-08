@@ -359,6 +359,23 @@ voice. Shot lengths still respect `min_cut_seconds`, durations still sum to
 the audio span exactly, and without word timings it silently falls back to the
 even split.
 
+**3. No-replay playback (always on).** Every cut of the whole track is placed
+by one forward walk: a cut's film position is clamped to start at or after the
+**end of the previous cut's footage**. The film therefore never rewinds and no
+moment is ever shown twice — the "the same clip stutters back mid-sentence"
+artifact is impossible by construction. When a sentence's film window is
+exhausted, the footage simply plays on forward (like a held scene) instead of
+replaying.
+
+**4. `timeline.snap_to_scenes` (default on).** The film's real shot-change
+times are detected once per movie (PySceneDetect, cached in
+`_work/shot_boundaries.json`) and every cut's film position is snapped to the
+nearest actual camera cut within `snap_tolerance` (0.8s). Each visual then
+begins on a real cut of the film instead of drifting in mid-shot — the crisp
+edit feel of the reference channels. Optional dependency: `pip install
+scenedetect[opencv]`; without it the run simply skips snapping (and says so in
+the log).
+
 * Subtitles burned on the clip use `subtitles.lang_font.ar` (default `Arial`,
   shaped Arabic) — swap to any installed Arabic font you prefer.
 * A language **without** its own subtitle is still rendered: it is translated
@@ -590,6 +607,7 @@ python tests/test_timeline_sync.py       # length lock + chronology regressions
 python tests/test_semantic_engine.py     # chunking, JSON parsing (legacy matcher)
 python tests/test_engine_integration.py  # full Steps A-F orchestration
 python tests/test_narration_sync.py      # whisper alignment, word-locked cuts, outro
+python tests/test_visual_flow.py        # no-replay cuts + shot-boundary snapping
 ```
 
 ## 🎛️ Tuning the timeline (Step D)
@@ -606,5 +624,9 @@ After a run, inspect `output/_work/beats_<lang>.json`: every beat carries its
 * `cut_on_words` — switch shots on measured word boundaries inside a sentence
   (needs `narration.whisper_align`, or edge-tts word boundaries); `false`
   gives the old even split.
+* `snap_to_scenes` / `snap_tolerance` — land cuts on the film's real shot
+  changes (PySceneDetect, cached; `pip install scenedetect[opencv]`).
+* No-replay playback is always on: cuts never re-show footage, so the montage
+  walks the film strictly forward.
 * `semantic.clip.mode` — `reencode` (frame-exact, default) vs `copy` (fast
   preview; snaps to keyframes and reintroduces drift).

@@ -127,6 +127,16 @@ timeline:
                            # the picture cuts exactly when the narrator moves
                            # to the next subject. Needs narration.whisper_align
                            # (or edge-tts word boundaries). false = even split.
+  snap_to_scenes: true     # land every cut on the film's REAL shot changes
+                           # (one cached PySceneDetect pass per movie), so each
+                           # visual starts on an actual camera cut instead of
+                           # drifting in mid-shot. Needs `pip install
+                           # scenedetect[opencv]`; without it this is skipped.
+  snap_tolerance: 0.8      # max seconds a cut may move onto a boundary
+
+  # NO-REPLAY PLAYBACK (always on): every cut must show footage at or after
+  # the end of the previous cut's footage, so the film never rewinds and no
+  # moment is ever shown twice during the narration.
 
 # (legacy) semantic vector matching — no longer used for beat selection.
 semantic:

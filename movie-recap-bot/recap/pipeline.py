@@ -844,6 +844,24 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
     # nearest keyframe, and those errors accumulate into seconds of A/V drift.
     clip_mode = str((sem.get("clip") or {}).get("mode", "reencode")).lower()
 
+    # Optional: the film's real shot boundaries, so every visual cut lands on
+    # an actual camera cut (the reference-channel edit feel — no mid-shot
+    # drift-ins). One cached PySceneDetect pass per movie.
+    snap_bounds: list[float] = []
+    if tl_cfg.get("snap_to_scenes", True):
+        try:
+            snap_bounds, _method = scenes.scene_boundaries(movie, vcfg, wd)
+            if snap_bounds:
+                print(f"  * {len(snap_bounds)} shot boundaries on file — "
+                      "visual cuts will land on the film's real shot changes")
+            else:
+                print("  * shot boundaries unavailable (optional: "
+                      "`pip install scenedetect[opencv]` unlocks "
+                      "cut-on-shot-change) — continuing un-snapped")
+        except Exception as exc:
+            print(f"  ! shot-boundary detection failed ({exc}); "
+                  "continuing without snapping.")
+
     results: list[Path] = []
     for code, (mp3, cues_t) in audios.items():
         out_mp4 = outd / f"{name}_{code}.mp4"
@@ -874,10 +892,12 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
             seg_for_lang, durations, movie_dur, tl_cfg,
             word_times=[c.words for c in cues_t],
             stats=tl_stats,
+            scene_bounds=snap_bounds,
         )
         _write_json(beats, wd / f"beats_{code}.json")
         _report = timeline.timeline_report(
-            beats, audio_span, tl_stats.get("word_locked_beats", 0)
+            beats, audio_span, tl_stats.get("word_locked_beats", 0),
+            tl_stats.get("snapped_cuts", 0),
         )
         print(f"  * [{code}] timeline: {_report}")
 

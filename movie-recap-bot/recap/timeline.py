@@ -33,9 +33,25 @@ Two further properties the old code lacked:
   boundaries (after a comma, before "and"/"but"/"while"/...) measured from
   the audio — so the picture switches at the exact moment the narrator moves
   to the next subject, not at an arbitrary even split of the sentence.
+
+* **No-replay playback.** All cuts of the whole track are placed by one
+  forward walk: every cut's film start is clamped to start at or after the
+  END of the previous cut's footage. The film therefore never rewinds and no
+  moment is ever shown twice — the "same clip stutters back" artifact of the
+  old per-beat placement is impossible by construction. When a beat's film
+  window is exhausted the footage simply plays on forward, the way recap
+  channels hold a scene.
+
+* **Shot-boundary snapping.** With the film's real shot-change times
+  (detected once per movie, cached — see ``scenes.scene_boundaries``), each
+  cut's film start is snapped to the nearest actual camera cut within a
+  tolerance. Every visual therefore begins on a real cut of the film instead
+  of drifting in mid-shot, which is what makes reference-channel edits feel
+  crisp.
 """
 from __future__ import annotations
 
+import bisect
 import re
 from typing import Sequence
 
@@ -152,28 +168,21 @@ def _select_shot_boundaries(
     return chosen or None
 
 
-def _micro_cuts(
-    film_pos: float,
-    film_span: float,
+def _shot_split(
     duration: float,
-    movie_dur: float,
+    fracs: list[float] | None,
     *,
     micro_target: float,
     max_cuts: int,
     min_cut: float,
-    pre_roll: float,
-    fracs: list[float] | None = None,
 ) -> list[tuple[float, float]]:
-    """Split one narration beat into 1..max_cuts short shots.
+    """Split one narration beat into shots: ``[(seconds, film_fraction), ...]``.
 
-    The shots walk forward through ``[film_pos, film_pos + film_span]`` so even
-    a single sentence shows visual progression instead of one frozen clip. The
-    returned durations always sum to exactly ``duration``.
-
-    ``fracs`` — optional switch points inside the beat (fractions of its
-    duration, from ``_word_boundary_fractions``). When given, the shot lengths
-    follow the SPOKEN clause boundaries (the picture cuts exactly when the
-    narrator reaches the next clause); when absent the split is even.
+    The ``seconds`` sum to exactly ``duration`` (the A/V lock depends on it).
+    ``film_fraction`` is where inside the beat's film window the shot's
+    footage comes from (0.0 = window start, 1.0 = window end). With
+    ``fracs`` (measured word-boundary fractions) the split lands on clause
+    boundaries; otherwise it is even.
     """
     duration = max(float(duration), 0.05)
     n = int(round(duration / max(micro_target, 0.5))) or 1
@@ -190,20 +199,27 @@ def _micro_cuts(
     if bounds is None:
         bounds = [k / n for k in range(n + 1)]
 
-    cuts: list[tuple[float, float]] = []
-    for k in range(len(bounds) - 1):
-        # spread the shot start points across the beat's film window — using
-        # the same fractions as the timing, so the film advances in step with
-        # the narration inside the sentence
-        f0 = bounds[k]
-        per = (bounds[k + 1] - f0) * duration
-        start = film_pos + f0 * max(film_span, 0.0) - pre_roll
-        start = max(0.0, start)
-        if movie_dur > 0:
-            # keep the whole shot inside the film
-            start = min(start, max(movie_dur - per, 0.0))
-        cuts.append((start, per))
-    return cuts
+    return [
+        ((bounds[k + 1] - bounds[k]) * duration, bounds[k])
+        for k in range(len(bounds) - 1)
+    ]
+
+
+def _snap_to_boundary(start: float, bounds: list[float], tolerance: float) -> float:
+    """Move ``start`` to the nearest real shot change within ``tolerance``.
+
+    Returns ``start`` unchanged when no boundary is close enough.
+    """
+    if not bounds or tolerance <= 0:
+        return start
+    i = bisect.bisect_left(bounds, start)
+    best, best_d = start, tolerance
+    for j in (i - 1, i):
+        if 0 <= j < len(bounds):
+            d = abs(bounds[j] - start)
+            if d < best_d:
+                best, best_d = bounds[j], d
+    return best
 
 
 def build_timeline(
@@ -213,6 +229,7 @@ def build_timeline(
     cfg_timeline: dict | None = None,
     word_times: list | None = None,
     stats: dict | None = None,
+    scene_bounds: list[float] | None = None,
 ) -> list[dict]:
     """Build the chronological, audio-locked beat list.
 
@@ -225,12 +242,21 @@ def build_timeline(
     TTS provider or the faster-whisper alignment pass). When present, the
     micro-cuts inside each sentence land on measured clause boundaries.
 
+    ``scene_bounds`` — optional real shot-change times of the film (see
+    ``scenes.scene_boundaries``). Each cut's film start is snapped to the
+    nearest boundary within ``timeline.snap_tolerance`` seconds, so every
+    visual begins on an actual camera cut.
+
     Guarantees:
       * beat starts never move backwards (strict chronology),
       * ``sum(cut durations) == sum(durations)`` (frame-accurate A/V lock),
-      * the playhead walks the whole film from start to end,
+      * NO REPLAY: every cut shows footage at or after the end of the
+        previous cut's footage — the film never rewinds, no moment is shown
+        twice (except the unavoidable end-of-film clamp when the narration
+        outlasts the movie),
       * with word timings, every intra-sentence shot change happens on a
-        spoken word boundary, not mid-word.
+        spoken word boundary, not mid-word,
+      * with scene bounds, every cut starts on a real shot change.
     """
     cfg = cfg_timeline or {}
     micro_target = float(cfg.get("micro_cut_seconds", 3.0))
@@ -238,6 +264,8 @@ def build_timeline(
     min_cut = float(cfg.get("min_cut_seconds", 1.2))
     pre_roll = float(cfg.get("pre_roll", 0.4))
     cut_on_words = bool(cfg.get("cut_on_words", True))
+    snap_tol = float(cfg.get("snap_tolerance", 0.8))
+    scene_bounds = sorted(scene_bounds or [])
 
     n = min(len(sentences), len(durations))
     if n == 0:
@@ -268,8 +296,11 @@ def build_timeline(
         groups[0]["film_end"] = movie_dur
 
     beats: list[dict] = []
-    playhead = 0.0  # enforces global monotonicity across groups
+    playhead = 0.0        # beat-level monotonicity across groups
+    film_playhead = 0.0   # END of the last cut's footage: nothing may replay
     word_locked = 0
+    snapped = 0
+    pushed = 0
 
     for g in groups:
         f0 = max(float(g["film_start"]), playhead)
@@ -301,11 +332,34 @@ def build_timeline(
                 if fracs:
                     word_locked += 1
 
-            cuts = _micro_cuts(
-                film_pos, film_span, d, movie_dur,
-                micro_target=micro_target, max_cuts=max_cuts,
-                min_cut=min_cut, pre_roll=pre_roll, fracs=fracs,
+            shots = _shot_split(
+                d, fracs, micro_target=micro_target, max_cuts=max_cuts,
+                min_cut=min_cut,
             )
+
+            cuts: list[tuple[float, float]] = []
+            for per, frac in shots:
+                desired = film_pos + frac * max(film_span, 0.0) - pre_roll
+                # NO-REPLAY RULE: never show footage the previous cut already
+                # played. If this beat's window is behind the film playhead
+                # (its moment was consumed by a longer earlier cut), the
+                # footage simply plays on forward from there.
+                start = max(desired, film_playhead)
+                if start > desired + 1e-9:
+                    pushed += 1
+                # Snap to the film's real shot change when one is close —
+                # but a snap may never rewind below the film playhead.
+                if scene_bounds:
+                    s2 = _snap_to_boundary(start, scene_bounds, snap_tol)
+                    if s2 != start and s2 >= film_playhead:
+                        start = s2
+                        snapped += 1
+                if movie_dur > 0 and start + per > movie_dur:
+                    # keep the whole shot inside the film (the only place a
+                    # replay can still happen: narration outlasts the movie)
+                    start = max(0.0, min(start, max(movie_dur - per, 0.0)))
+                cuts.append((round(start, 3), round(per, 3)))
+                film_playhead = start + per
 
             beats.append(
                 {
@@ -314,7 +368,7 @@ def build_timeline(
                     "film_start": round(film_pos, 3),
                     "film_end": round(film_pos + film_span, 3),
                     "duration": round(d, 3),
-                    "cuts": [(round(a, 3), round(b, 3)) for a, b in cuts],
+                    "cuts": cuts,
                 }
             )
             acc += d
@@ -323,6 +377,8 @@ def build_timeline(
     beats.sort(key=lambda b: b["index"])
     if stats is not None:
         stats["word_locked_beats"] = word_locked
+        stats["snapped_cuts"] = snapped
+        stats["pushed_cuts"] = pushed
     return beats
 
 
@@ -335,15 +391,19 @@ def flatten_cuts(beats: list[dict]) -> list[tuple[float, float]]:
 
 
 def timeline_report(beats: list[dict], audio_span: float,
-                    word_locked: int = 0) -> str:
+                    word_locked: int = 0, snapped: int = 0) -> str:
     """One-line human summary used in the run log."""
     cuts = flatten_cuts(beats)
     total = sum(d for _, d in cuts)
     starts = [b["film_start"] for b in beats]
     monotone = all(starts[i] <= starts[i + 1] + 1e-6 for i in range(len(starts) - 1))
-    wl = f", word-locked {word_locked}/{len(beats)} beats" if word_locked else ""
+    bits = [f"{len(beats)} beats / {len(cuts)} cuts"]
+    if word_locked:
+        bits.append(f"word-locked {word_locked}/{len(beats)} beats")
+    if snapped:
+        bits.append(f"{snapped} cuts on shot changes")
     return (
-        f"{len(beats)} beats / {len(cuts)} cuts{wl}, "
+        f"{', '.join(bits)}, "
         f"video {total:.1f}s vs narration {audio_span:.1f}s "
         f"(drift {abs(total - audio_span) * 1000:.0f}ms), "
         f"chronological={'yes' if monotone else 'NO'}, "
