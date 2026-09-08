@@ -167,7 +167,8 @@ Rewrite it so it reads like a human recap narrator TALKING over footage, not gen
 
 MUST KEEP (the video timing depends on it):
 - EXACTLY {n} sentences ({n} array elements). Never merge two sentences into one and never split one into two.
-- The same events in the same order, and every character name and proper noun. Change the WORDS, not the story.
+- The same events in the same order. Change the WORDS, not the story.
+- Every one of these names must still be spoken somewhere in the section: {names}.
 - Roughly the same total length (within 25%), so the narration still fits its audio budget.
 
 MAKE IT SOUND LIKE A RECAP NARRATOR:
@@ -338,7 +339,9 @@ HOW THIS NARRATOR SOUNDS (follow it exactly):
 - CONVERSATIONS: never quote dialogue. Sum up what is said as indirect narration ("Jessie insists that nothing can replace a real friend, but Lilypad fires back that Bonnie already has friends.").
 - EMOTION: let the viewer feel reactions ("she begins to wonder if maybe she's the problem", "to her delight", "hurt and disappointed").
 - CONTRACTIONS: it's, she's, doesn't, can't, they're — natural spoken English.
+- NAMES, NAMES, NAMES: viewers cannot follow "he", "she" or "the man". Use the characters' NAMES constantly — introduce each by name at first appearance ("a toy named Woody"), then the bare name, several times per scene. Never replace a named character with a generic noun.
 - Be SPECIFIC: "Jessie hops onto Bullseye and rides to the twins' house", not "she goes to help". Keep every character name and proper noun from the beats.
+{names_block}
 
 COVERAGE RULES:
 - Walk the section strictly in order from its first beat to its last. Never jump backwards, never skip an entire scene.
@@ -413,8 +416,67 @@ def _fmt_beat_lines(c: dict) -> str:
     return (c.get("summary") or "").strip()
 
 
+# ---------------------------------------------------------------------------
+# Name enforcement — recap viewers cannot follow "he"/"she"/"the man".
+# Names live in the beat lines; the writer must carry them into the narration.
+# ---------------------------------------------------------------------------
+import re as _re
+
+_COMMON_WORDS = {
+    "the", "a", "an", "and", "but", "so", "then", "when", "while", "as", "at",
+    "on", "in", "to", "from", "with", "after", "before", "of", "for", "by",
+    "up", "down", "out", "into", "over", "back", "next", "still", "even",
+    "also", "again", "just", "only", "now", "not", "no", "yes", "ok",
+    "he", "she", "it", "they", "we", "you", "i", "his", "her", "their",
+    "its", "our", "this", "that", "there", "here", "what", "who", "how",
+    "why", "where", "which", "all", "both", "each", "one", "two", "three",
+    "suddenly", "meanwhile", "determined", "excited", "hurt", "thanks",
+    "little", "mom", "dad", "guys", "kids", "people", "man", "woman",
+    "girl", "boy", "sir", "ma'am", "everyone", "somebody", "nobody",
+    "years", "days", "later", "moments", "morning", "night", "soon",
+    "inside", "outside", "nearby", "since", "despite", "hours", "minutes",
+}
+
+_PUNCT_STRIP = ".,:;!?\"'()[]{}<>*#“”‘’…-"
+
+
+def _clean_tok(w: str) -> str:
+    w = w.strip(_PUNCT_STRIP)
+    # possessive suffix: "Bonnie's" -> "Bonnie"
+    if w.endswith(("'s", "’s")) and len(w) > 3:
+        w = w[:-2]
+    return w
+
+
+def _proper_nouns(text: str, limit: int = 12) -> list[str]:
+    """Pull character/place/object names out of beat lines.
+
+    Beat lines are written like "Jessie rides Bullseye across the yard" —
+    the acting character's name is very often the FIRST word of the line, so
+    line-initial capitalized words count too; common sentence-starting words
+    are filtered by the stoplist. Returns the most frequent surface forms,
+    most-used first.
+    """
+    counts: dict[str, int] = {}
+    for line in (text or "").splitlines():
+        body = _re.sub(r"^\[[^\]]*\]\s*", "", line.strip())   # drop [HH:MM:SS]
+        for w in (_clean_tok(x) for x in body.split()):
+            if w and w[0].isupper() and w.lower() not in _COMMON_WORDS \
+                    and any(ch.isalpha() for ch in w):
+                counts[w] = counts.get(w, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [w for w, _ in ranked[:limit]]
+
+
+def _missing_names(names: list[str], text: str) -> list[str]:
+    """Which of the beat-derived names never made it into the narration."""
+    tl = (text or "").lower()
+    return [n for n in names if n.lower() not in tl]
+
+
 def _polish_section(
-    cfg_llm: dict, sents: list[str], exemplar_block: str
+    cfg_llm: dict, sents: list[str], exemplar_block: str,
+    names: list[str] | None = None,
 ) -> list[str]:
     """English-only punch-up: rewrite a section to sound spoken and human.
 
@@ -436,6 +498,7 @@ def _polish_section(
     user = POLISH_PROMPT.format(
         n=len(sents),
         exemplar=exemplar_block or (EN_EXEMPLAR_OPENING + "\n\n" + EN_EXEMPLAR_FLOW),
+        names=", ".join(names) if names else "keep every character name",
         draft=json.dumps(sents, ensure_ascii=False),
     )
     try:
@@ -563,6 +626,10 @@ def _sentence_anchor_values(
     path = _monotone_best_path(sims)
     if len(path) != len(sentences):
         return None
+    # The recap's opening sentence narrates the film's opening moment; never
+    # let a fuzzy embedding match bind it to a later beat (which would show
+    # the wrong footage while the narration covers the beginning).
+    path[0] = 0
     return [times[j] for j in path]
 
 
@@ -621,6 +688,12 @@ def _anchor_windows(
         # anchor so two close beats never show overlapping footage and the film
         # order holds.
         lb = a - lead
+        if k == 0:
+            # The recap's very first visual must open on the film's opening
+            # frames (chunk_start == 0.0), not 0.8s before the first beat:
+            # the narration says "It all begins ..." and the picture must
+            # begin with the film.
+            lb = chunk_start
         for j in range(k - 1, -1, -1):
             if anchors[j] < a:
                 lb = max(lb, (a + anchors[j]) / 2.0)
@@ -644,6 +717,81 @@ def _anchor_windows(
             prev_lo = wl
         k += m
     return wins
+
+
+GLOBAL_POLISH_PROMPT = """You have just finished narrating an entire movie, section by section. Below is the FULL script, one sentence per array element, in story order — the final cut before recording.
+
+Read it through once, as one continuous voice. Then deliver the final pass:
+
+MUST KEEP (the video timing depends on it):
+- EXACTLY {n} sentences: never merge two into one, never split one into two.
+- The same story, the same events, in the same order.
+- Every character name stays in the script (names in play: {names}).
+- Roughly the same total length (within 25%).
+
+FIX WHAT ONLY A FULL READ-THROUGH CATCHES:
+- A sentence that repeats the opener of the one right before it ("Meanwhile, ..." twice in a row) — vary it.
+- The same moment or beat told twice at a section seam — keep the better telling, make the next sentence move the story forward.
+- A character referred to only as "he"/"she"/"the man" for a long stretch — say their name again.
+- Rhythm gone flat: several same-length sentences in a row, or a run of sentences that all start with the subject's name — re-break them so the narration breathes (long, long, short).
+- A name spelled two different ways — pick one and use it everywhere.
+
+Leave good lines alone. Do not add events, do not add an intro or outro.
+
+=== FULL DRAFT ===
+{draft}
+=== END ===
+
+Respond with ONLY a JSON object: {{"sentences": [...]}} with exactly {n} strings.
+"""
+
+
+def _global_polish(
+    cfg_llm: dict, sentences: list[str], names: list[str]
+) -> list[str]:
+    """Final narrator read-through of the WHOLE script (English only).
+
+    The per-section polish fixes lines in isolation; this one pass reads the
+    full recap as a continuous voice and repairs what only a full read
+    catches — repeated openers at section seams, double-told beats, name
+    drift, flat rhythm runs. Same safety rules as the section polish: the
+    sentence count must stay EXACT (every sentence owns a film window) and
+    the length within 30%; any deviation discards the rewrite. Disable with
+    RECAP_GLOBAL_POLISH=0.
+    """
+    import json
+    import os
+
+    if not sentences or len(sentences) < 10:
+        return sentences
+    if os.environ.get("RECAP_GLOBAL_POLISH", "1").strip().lower() in (
+        "0", "false", "no", "off"
+    ):
+        return sentences
+    total_words = count_words(" ".join(sentences))
+    user = GLOBAL_POLISH_PROMPT.format(
+        n=len(sentences),
+        names=", ".join(names[:15]) or "keep every character name",
+        draft=json.dumps(sentences, ensure_ascii=False),
+    )
+    try:
+        raw = llm.complete(
+            cfg_llm.get("provider", ""), cfg_llm.get("model", ""),
+            SYSTEM_POLISH, user,
+            base_url=cfg_llm.get("base_url"),
+            json_mode=True,
+            max_tokens=_out_tokens_for_words(int(total_words * 1.1)),
+        )
+        new = _parse_segment(raw)
+    except Exception:
+        return sentences
+    if len(new) != len(sentences) or new == sentences:
+        return sentences
+    old_w = total_words
+    new_w = count_words(" ".join(new))
+    if abs(new_w - old_w) <= max(40.0, old_w * 0.30):
+        return new
+    return sentences
 
 
 def generate_segmented_script(
@@ -746,9 +894,21 @@ def generate_segmented_script(
             "Continue the story in order."
         )
 
+        # Characters/places this section MUST name — pulled from the beats
+        # themselves so the writer sees the exact list (and the retry below
+        # verifies they survived into the narration).
+        names = _proper_nouns(_fmt_beat_lines(c), limit=10)
+        names_block = (
+            "NAMES THAT MUST BE SPOKEN IN THIS SECTION (viewers cannot follow "
+            "\"he\"/\"she\"/\"the man\" — use these names, each at least "
+            "once): " + ", ".join(names) + "."
+            if names else ""
+        )
+
         user = PROMPT_SEGMENT_JSON.format(
             t0=_fmt_clock(t0), t1=_fmt_clock(t1), budget=budget, nsent=nsent,
             continuity=continuity, beats=_fmt_beat_lines(c),
+            names_block=names_block,
         )
         if exemplar_block:
             user += exemplar_block
@@ -785,9 +945,34 @@ def generate_segmented_script(
             if count_words(" ".join(retry)) > got:
                 sents = retry
 
+        # Names check: if the writer dropped most of the section's characters
+        # ("she goes to help" instead of "Jessie rides Bullseye"), one retry
+        # with the missing names spelled out.
+        if names and sents:
+            missing = _missing_names(names, " ".join(sents))
+            if len(missing) >= max(2, int(len(names) * 0.5)):
+                fixed = llm.complete(
+                    cfg_llm.get("provider", ""), cfg_llm.get("model", ""),
+                    SYSTEM_RECAP_BEATS,
+                    user + (
+                        "\n\nIMPORTANT: your narration dropped these names: "
+                        + ", ".join(missing)
+                        + ". Rewrite the section keeping ALL of them (a name "
+                        "can appear as the bare name or inside \"a <role> "
+                        "named <Name>\"). Same JSON shape, same word budget."
+                    ),
+                    base_url=cfg_llm.get("base_url"),
+                    json_mode=True,
+                    max_tokens=_out_tokens_for_words(budget),
+                )
+                retry = _parse_segment(fixed)
+                if retry and len(retry) == len(sents) and \
+                        len(_missing_names(names, " ".join(retry))) < len(missing):
+                    sents = retry
+
         # English-only punch-up pass: same sentence count, spoken style.
         if sents and is_en:
-            sents = _polish_section(cfg_llm, sents, exemplar_block)
+            sents = _polish_section(cfg_llm, sents, exemplar_block, names)
 
         # Anchor each sentence to the film moment(s) it narrates (beat
         # timecodes) instead of giving the whole chunk to every sentence. For
@@ -812,10 +997,23 @@ def generate_segmented_script(
         for s, (lo, hi) in zip(sents, wins):
             out.append({"sentence": s, "film_start": lo, "film_end": hi})
         if sents:
-            tail = sents[-1]
+            tail = " ".join(sents[-2:])   # two sentences of carry-over context
 
         if progress:
             progress(pos + 1, len(usable), count_words(" ".join(sents)), budget)
+
+    # Final read-through (English): one pass over the WHOLE script for seam
+    # quality, name consistency and rhythm — with the same count lock, so
+    # every sentence keeps the film window it was generated with.
+    if is_en and out:
+        all_names = _proper_nouns(
+            "\n".join(_fmt_beat_lines(c) for c in usable), limit=15
+        )
+        before = [o["sentence"] for o in out]
+        polished = _global_polish(cfg_llm, before, all_names)
+        if polished != before and len(polished) == len(out):
+            for o, s in zip(out, polished):
+                o["sentence"] = s
 
     _append_sign_off(out, lang_name=lang_name, enabled=sign_off)
 

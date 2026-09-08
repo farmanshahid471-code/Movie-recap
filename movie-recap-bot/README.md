@@ -323,6 +323,28 @@ description falls back to the model's default encyclopedic voice):
   invented — which is what keeps the factual record underneath the narration
   trustworthy.
 
+**Names enforcement (viewers cannot follow "he/she/the man").** The names are
+extracted from each section's beat lines and injected into the writer prompt
+as an explicit must-use list; if the draft drops most of them, one retry is
+issued with the missing names spelled out. The polish passes get the same
+list, and the beat extractor itself is instructed to always log who acts by
+name. (Chunk signatures change with this update, so summaries + scripts
+regenerate on the next run — the new name behavior applies from scratch.)
+
+**Opening accuracy.** The first chunk now always starts at 0:00 (previously it
+started at the first *spoken* cue, so a dialogue-free cold open was narrated
+but never shown), the recap's first sentence is pinned to the film's first
+beat, and its footage window reaches back to the film's very first frames —
+"It all begins..." now plays over the film's actual opening.
+
+**Global read-through** (`RECAP_GLOBAL_POLISH=1`, default on): after all
+sections are written, one final narrator pass reads the WHOLE script and
+fixes what only a full read catches — a sentence repeating the previous
+sentence's opener at a section seam, the same beat told twice, a name spelled
+two ways, a run of flat same-length sentences. Sentence count is locked
+exactly (every sentence keeps its film window), any deviating rewrite is
+discarded. Costs about as much as two extra sections.
+
 Structural touches that match how those videos open and close:
 
 * the first section starts *inside the film's first scene* ("It all begins

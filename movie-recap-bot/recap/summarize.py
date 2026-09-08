@@ -57,7 +57,9 @@ Rules:
   transcript block where the beat happens (round to the nearest listed one). Times must increase
   down the list. The dialogue may discuss the past: use the time the flashback/recollection
   happens on screen, not the time it is spoken about.
-- Name the characters who act (use the name the dialogue uses — "Buzz", "Jessie", "Lilypad").
+- ALWAYS name who acts, using the name the dialogue uses ("Buzz", "Jessie",
+  "Lilypad") — never just "he", "she", "the man" or "the girl". If the dialogue
+  reveals a character's name anywhere in the block, use it from then on.
   Keep proper nouns: places, devices, objects, and app names when they matter.
 - Present tense, third person, VISIBLE action only ("Jessie hops onto Bullseye and rides off"),
   inferred from what is said — never quote dialogue verbatim.

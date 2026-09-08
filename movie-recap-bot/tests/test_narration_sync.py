@@ -201,9 +201,11 @@ def test_prompts_render() -> None:
     user = script.PROMPT_SEGMENT_JSON.format(
         t0="00:00:00", t1="00:03:00", budget=90, nsent=5,
         continuity="This is the OPENING of the recap.", beats="[00:00:05] beat.",
+        names_block="",
     )
     assert "SENTENCE RHYTHM" in user and "{beats}" not in user
-    pol = script.POLISH_PROMPT.format(n=4, exemplar="x", draft='["a"]')
+    pol = script.POLISH_PROMPT.format(n=4, exemplar="x", names="",
+                                      draft='["a"]')
     assert "MUST KEEP" in pol
     js = script.render_script_json_prompt("summary", 2000, 1500, 2500)
     assert "JSON array" in js
@@ -236,6 +238,113 @@ def test_strict_personas() -> None:
     print("ok: strict personas on every LLM role (narrator + script supervisor)")
 
 
+def test_first_chunk_covers_film_start() -> None:
+    """A dialogue-free opening must not push the first film window late."""
+    from recap import chunk as chunk_mod
+
+    cues = [{"text": f"line {i}", "start": 45.0 + i * 5.0,
+             "end": 49.0 + i * 5.0} for i in range(40)]
+    chunks = chunk_mod.chunk_cues(cues, window_seconds=180, overlap_seconds=30)
+    assert chunks, "chunks must exist"
+    assert chunks[0]["start"] == 0.0, (
+        "first chunk must start at the film's start, not the first cue "
+        f"(got {chunks[0]['start']})"
+    )
+    print("ok: first chunk window starts at 0:00 even with a silent opening")
+
+
+def test_first_sentence_window_reaches_film_start() -> None:
+    """The recap's first visual opens on the film's first frames."""
+    beats = [{"t": 60.0, "text": "The hero arrives"},   # first beat is LATE
+             {"t": 120.0, "text": "The hero fights"},
+             {"t": 180.0, "text": "The hero wins"}]
+    wins = script._anchor_windows(0.0, 200.0, beats, 3, lead=0.8, tail=6.0)
+    assert wins[0][0] == 0.0, (
+        f"first window must start at the film start, got {wins[0][0]}"
+    )
+    assert all(w[0] < w[1] for w in wins)
+    print("ok: first sentence's footage window starts at the film's start")
+
+
+def test_opening_sentence_anchors_to_first_beat() -> None:
+    """The embedding path must bind sentence 0 to the first beat."""
+    import numpy as np
+
+    model = script._embed_model()
+    if model is None:
+        print("  (skip: embeddings unavailable in this environment)")
+        return
+    beats = [{"t": 10.0, "text": "A soldier wakes up on an island"},
+             {"t": 100.0, "text": "The soldier builds a raft"},
+             {"t": 200.0, "text": "The soldier sails home"}]
+    # sentence 0 deliberately phrased to be closer to beat 1 than beat 0
+    sents = ["It all begins with a raft and the open sea.",
+             "The soldier builds a raft and sails away."]
+    vals = script._sentence_anchor_values(sents, beats)
+    if vals is None:
+        print("  (skip: alignment unavailable)")
+        return
+    assert vals[0] == 10.0, f"sentence 0 must anchor to the first beat, got {vals[0]}"
+    print("ok: opening sentence is pinned to the film's first beat")
+
+
+def test_proper_noun_extraction() -> None:
+    beats = """[00:00:12] Jessie rides Bullseye across the yard.
+[00:01:40] Bonnie tells Lilypad that she already has friends.
+[00:02:05] Jessie warns Bonnie that the man grabs his gun.
+[00:03:00] Years have passed and everyone plays alone."""
+    names = script._proper_nouns(beats)
+    for expected in ("Jessie", "Bonnie", "Bullseye", "Lilypad"):
+        assert expected in names, f"{expected} missing from {names}"
+    assert "Years" not in names and "everyone" not in names
+    assert script._missing_names(["Jessie"], "Bonnie runs.") == ["Jessie"]
+    print(f"ok: names extracted and checked ({names})")
+
+
+def test_section_prompt_carries_names_block() -> None:
+    user = script.PROMPT_SEGMENT_JSON.format(
+        t0="00:00:00", t1="00:03:00", budget=90, nsent=5,
+        continuity="This is the OPENING of the recap.",
+        beats="[00:00:05] Jessie rides Bullseye.",
+        names_block="NAMES THAT MUST BE SPOKEN IN THIS SECTION: Jessie, Bullseye.",
+    )
+    assert "NAMES THAT MUST BE SPOKEN" in user and "Jessie" in user
+    pol = script.POLISH_PROMPT.format(
+        n=3, exemplar="x", names="Jessie, Bullseye", draft='["a"]'
+    )
+    assert "Jessie" in pol, "polish prompt must carry the names"
+    print("ok: writer + polish prompts carry the must-use names")
+
+
+def test_global_polish_count_lock() -> None:
+    """The full-script pass never changes the sentence count (or is dropped)."""
+    import json as _json
+
+    sentences = [f"Sentence number {i} of the recap." for i in range(12)]
+    calls = {"n": 0}
+
+    def fake_complete(provider, model, system, user, **kw):
+        calls["n"] += 1
+        # bad answer: wrong count -> must be discarded
+        if calls["n"] == 1:
+            return _json.dumps({"sentences": sentences[:9]})
+        # good answer: same count, reworded
+        return _json.dumps({"sentences": [s + " Reworded." for s in sentences]})
+
+    original = script.llm.complete
+    script.llm.complete = fake_complete
+    try:
+        out1 = script._global_polish({"provider": "x", "model": "y"},
+                                     sentences, ["Jessie"])
+        assert out1 == sentences, "wrong-count rewrite must be discarded"
+        out2 = script._global_polish({"provider": "x", "model": "y"},
+                                     sentences, ["Jessie"])
+        assert len(out2) == 12 and out2[0].endswith("Reworded.")
+    finally:
+        script.llm.complete = original
+    print("ok: global polish keeps the count lock (bad rewrites discarded)")
+
+
 if __name__ == "__main__":
     test_map_words_to_sentences_perfect_match()
     test_map_words_to_sentences_tolerant_match()
@@ -249,4 +358,10 @@ if __name__ == "__main__":
     test_sign_off_disabled()
     test_prompts_render()
     test_strict_personas()
+    test_first_chunk_covers_film_start()
+    test_first_sentence_window_reaches_film_start()
+    test_opening_sentence_anchors_to_first_beat()
+    test_proper_noun_extraction()
+    test_section_prompt_carries_names_block()
+    test_global_polish_count_lock()
     print("\nALL NARRATION-SYNC TESTS PASSED")

@@ -65,6 +65,9 @@ narration:
   #                          section (one extra DeepSeek call per section; the
   #                          rewrite keeps the exact sentence count so every
   #                          line keeps its film anchor). Set 0 to disable.
+  #   RECAP_GLOBAL_POLISH=1  one final read-through of the whole script that
+  #                          fixes section seams, repeated openers and name
+  #                          drift (count-locked; same cost as ~2 sections).
   #   RECAP_ALIGN=1          align each English line to the beat it actually
   #                          narrates (local embeddings, monotone film order)
   #                          so the footage matches the words. Set 0 to disable.
