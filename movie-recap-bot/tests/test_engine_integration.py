@@ -207,7 +207,7 @@ def test_full_semantic_flow() -> None:
 
     rec = _install_stubs.recorded
     span = rec["audio_span"]
-    cut_total = sum(d for _, d in rec["cuts"])
+    cut_total = sum(d for _, d, *rest in rec["cuts"])
     assert abs(cut_total - span) < 0.5, (
         f"BUG 1: visual {cut_total:.2f}s must equal narration {span:.2f}s"
     )

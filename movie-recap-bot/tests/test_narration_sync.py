@@ -142,8 +142,8 @@ def test_micro_cuts_land_on_word_boundaries() -> None:
     # narration-time cut points: 0 -> 3.10 -> 4.40 -> 7.2
     assert abs(cuts[0][1] - 3.10) < 0.05, cuts
     assert abs(cuts[1][1] - (4.40 - 3.10)) < 0.05, cuts
-    assert abs(sum(d for _, d in cuts) - dur) < 1e-6
-    print(f"ok: micro-cuts on word boundaries ({[round(d,2) for _, d in cuts]})")
+    assert abs(sum(d for _, d, _f in cuts) - dur) < 1e-6
+    print(f"ok: micro-cuts on word boundaries ({[round(d,2) for _, d, _f in cuts]})")
 
 
 def test_micro_cuts_even_without_words() -> None:
@@ -157,8 +157,8 @@ def test_micro_cuts_even_without_words() -> None:
         None, {},
     )
     cuts = beats[0]["cuts"]
-    assert abs(sum(d for _, d in cuts) - 6.0) < 1e-6
-    assert all(abs(d - cuts[0][1]) < 1e-9 for _, d in cuts)  # even
+    assert abs(sum(d for _, d, _f in cuts) - 6.0) < 1e-6
+    assert all(abs(d - cuts[0][1]) < 1e-9 for _, d, _f in cuts)  # even
     print("ok: even micro-cuts without word timings")
 
 

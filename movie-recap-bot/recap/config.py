@@ -64,6 +64,11 @@ _DEFAULTS: dict[str, Any] = {
         # cut the way a human edit does. No scenedetect -> un-snapped.
         "snap_to_scenes": True,
         "snap_tolerance": 0.8,   # max seconds to move a cut onto a boundary
+        # How far the visuals may run AHEAD of the moment being narrated
+        # (forward-play in dense sections). Beyond this the picture HOLDS
+        # its last frame until the narration catches up, so the footage
+        # always matches the story being told.
+        "max_lead_seconds": 3.0,
     },
     # Whisper ASR tuning (auto-recap from the movie's own audio).
     "dialogue": {

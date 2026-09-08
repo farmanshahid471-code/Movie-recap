@@ -381,13 +381,18 @@ voice. Shot lengths still respect `min_cut_seconds`, durations still sum to
 the audio span exactly, and without word timings it silently falls back to the
 even split.
 
-**3. No-replay playback (always on).** Every cut of the whole track is placed
-by one forward walk: a cut's film position is clamped to start at or after the
-**end of the previous cut's footage**. The film therefore never rewinds and no
-moment is ever shown twice — the "the same clip stutters back mid-sentence"
-artifact is impossible by construction. When a sentence's film window is
-exhausted, the footage simply plays on forward (like a held scene) instead of
-replaying.
+**3. No-replay playback + bounded lead (always on).** Every cut of the whole
+track is placed by one forward walk: a cut's film position is clamped to start
+at or after the **end of the previous cut's footage**. The film therefore never
+rewinds and no moment is ever shown twice — the "the same clip stutters back
+mid-sentence" artifact is impossible by construction. And the walk is bounded
+by `timeline.max_lead_seconds` (default 3s): new footage may run at most ~one
+shot ahead of the moment being narrated. In dialogue-dense sections (where the
+narration is longer than the footage behind it) the picture now HOLDS its last
+frame — an editor's held shot, rendered as a frame freeze — until the
+narration catches up, instead of silently drifting up to minutes ahead of the
+story being told. The run log reports held shots; wide-window sections play
+straight through with zero holds.
 
 **4. `timeline.snap_to_scenes` (default on).** The film's real shot-change
 times are detected once per movie (PySceneDetect, cached in
@@ -648,6 +653,10 @@ After a run, inspect `output/_work/beats_<lang>.json`: every beat carries its
   gives the old even split.
 * `snap_to_scenes` / `snap_tolerance` — land cuts on the film's real shot
   changes (PySceneDetect, cached; `pip install scenedetect[opencv]`).
+* `max_lead_seconds` (default 3.0) — how far the visuals may run ahead of the
+  narrated moment before holding the shot. Raise it (e.g. 5) for smoother
+  flow with looser matching; lower it (e.g. 1.5) for stricter matching with
+  more held shots.
 * No-replay playback is always on: cuts never re-show footage, so the montage
   walks the film strictly forward.
 * `semantic.clip.mode` — `reencode` (frame-exact, default) vs `copy` (fast
