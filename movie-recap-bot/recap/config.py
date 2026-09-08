@@ -65,10 +65,16 @@ _DEFAULTS: dict[str, Any] = {
         "snap_to_scenes": True,
         "snap_tolerance": 0.8,   # max seconds to move a cut onto a boundary
         # How far the visuals may run AHEAD of the moment being narrated
-        # (forward-play in dense sections). Beyond this the picture HOLDS
-        # its last frame until the narration catches up, so the footage
-        # always matches the story being told.
+        # (safety valve; group pacing keeps the typical lead near zero).
         "max_lead_seconds": 3.0,
+        # MOTION GUARANTEE: in dialogue-dense sections the narration can be
+        # longer than the footage behind it. Instead of freezing the picture
+        # or running ahead, the footage plays in slow motion down to this
+        # speed (0.35x still looks smooth at 30fps). 1.0 disables slow-mo.
+        "min_speed": 0.35,
+        # A cut must show at least this much NEW film, otherwise it continues
+        # the current footage seamlessly (micro-jumps read as stutters).
+        "min_new_footage": 0.8,
     },
     # Whisper ASR tuning (auto-recap from the movie's own audio).
     "dialogue": {

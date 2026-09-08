@@ -898,6 +898,8 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         _report = timeline.timeline_report(
             beats, audio_span, tl_stats.get("word_locked_beats", 0),
             tl_stats.get("snapped_cuts", 0),
+            tl_stats.get("slowed_groups", 0),
+            tl_stats.get("slowed_seconds", 0.0),
         )
         print(f"  * [{code}] timeline: {_report}")
 

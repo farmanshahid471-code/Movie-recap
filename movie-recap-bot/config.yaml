@@ -137,9 +137,16 @@ timeline:
                            # scenedetect[opencv]`; without it this is skipped.
   snap_tolerance: 0.8      # max seconds a cut may move onto a boundary
   max_lead_seconds: 3.0    # how far the visuals may run AHEAD of the moment
-                           # being narrated. Beyond it the picture HOLDS its
-                           # last frame (freeze) until the narration catches
-                           # up, so the footage always matches the story.
+                           # being narrated (safety valve; pacing keeps the
+                           # typical lead near zero)
+  min_speed: 0.35          # MOTION GUARANTEE: in dialogue-dense sections the
+                           # narration can outlast the footage behind it. The
+                           # picture then plays in SLOW MOTION (down to this
+                           # speed) instead of freezing or running ahead.
+                           # 1.0 disables slow motion.
+  min_new_footage: 0.8     # every cut must show at least this much NEW film;
+                           # smaller advances continue the current footage
+                           # seamlessly (micro-jumps read as stutter)
 
   # NO-REPLAY PLAYBACK (always on): every cut must show footage at or after
   # the end of the previous cut's footage, so the film never rewinds and no

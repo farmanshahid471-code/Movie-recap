@@ -39,12 +39,12 @@ def test_no_replay_same_window() -> None:
              for c in cues]
     beats = timeline.build_timeline(sents, durs, 6000.0, CFG)
     prev_end = -1.0
-    for s, d, f in _cuts_in_order(beats):
+    for s, d, f, sp in _cuts_in_order(beats):
         assert s >= prev_end - 1e-6, (
             f"cut at {s:.2f}s replays footage that ended at {prev_end:.2f}s"
         )
         # a freeze-hold does not consume film: track the moving footage end
-        prev_end = max(prev_end, s + d - f)
+        prev_end = max(prev_end, s + (d - f) * sp)
     print("ok: tight same-window beats never replay (was 5 rewinds before)")
 
 
@@ -59,11 +59,11 @@ def test_no_replay_overlapping_windows() -> None:
              for i, c in enumerate(cues)]
     beats = timeline.build_timeline(sents, durs, 6000.0, CFG)
     prev_end = -1.0
-    for s, d, f in _cuts_in_order(beats):
+    for s, d, f, sp in _cuts_in_order(beats):
         assert s >= prev_end - 1e-6, f"rewind: {s:.2f} < {prev_end:.2f}"
-        prev_end = max(prev_end, s + d - f)
+        prev_end = max(prev_end, s + (d - f) * sp)
     # length lock still exact
-    total = sum(d for _, d, _f in _cuts_in_order(beats))
+    total = sum(d for _, d, _f, _v in _cuts_in_order(beats))
     assert abs(total - 16.0) < 1e-6
     print("ok: overlapping anchor windows never rewind, length locked")
 
@@ -82,12 +82,12 @@ def test_no_replay_long_run_random_windows() -> None:
                       "film_end": min(t + w, 5900.0)})
     beats = timeline.build_timeline(sents, durs, 6000.0, CFG)
     prev_end = -1.0
-    for s, d, f in _cuts_in_order(beats):
+    for s, d, f, sp in _cuts_in_order(beats):
         assert s >= prev_end - 1e-6, (
             f"beat rewound the film: {s:.2f}s after {prev_end:.2f}s"
         )
-        prev_end = max(prev_end, s + d - f)
-    total = sum(d for _, d, _f in _cuts_in_order(beats))
+        prev_end = max(prev_end, s + (d - f) * sp)
+    total = sum(d for _, d, _f, _v in _cuts_in_order(beats))
     assert abs(total - span) < 0.5
     print(f"ok: 150-sentence montage strictly forward, {total:.0f}s locked")
 
@@ -119,13 +119,13 @@ def test_timeline_uses_scene_bounds() -> None:
     prev_end = -1.0
     on_boundary = 0
     total_cuts = 0
-    for s, d, f in _cuts_in_order(beats):
+    for s, d, f, sp in _cuts_in_order(beats):
         assert s >= prev_end - 1e-6, "snap caused a rewind"
         if any(abs(s - b) < 1e-6 for b in bounds):
             on_boundary += 1
         total_cuts += 1
-        prev_end = max(prev_end, s + d - f)
-    total = sum(d for _, d, _f in _cuts_in_order(beats))
+        prev_end = max(prev_end, s + (d - f) * sp)
+    total = sum(d for _, d, _f, _v in _cuts_in_order(beats))
     assert abs(total - 34.0) < 1e-6
     print(f"ok: {on_boundary}/{total_cuts} cuts land on real shot boundaries, "
           f"no rewind, length locked")
@@ -142,9 +142,9 @@ def test_snap_never_breaks_monotonic_playhead() -> None:
     bounds = [101.0, 104.09, 108.0]
     beats = timeline.build_timeline(sents, durs, 600.0, CFG, scene_bounds=bounds)
     prev_end = -1.0
-    for s, d, f in _cuts_in_order(beats):
+    for s, d, f, sp in _cuts_in_order(beats):
         assert s >= prev_end - 1e-6, "snap rewound below the film playhead"
-        prev_end = max(prev_end, s + d - f)
+        prev_end = max(prev_end, s + (d - f) * sp)
     print("ok: snapping respects the film playhead (no forced rewinds)")
 
 
@@ -156,18 +156,18 @@ def test_end_of_film_stays_in_bounds() -> None:
     sents = [{"sentence": c.text, "film_start": 0.0, "film_end": 300.0}
              for c in cues]
     beats = timeline.build_timeline(sents, durs, 300.0, CFG)
-    for s, d, _f in _cuts_in_order(beats):
+    for s, d, _f, _v in _cuts_in_order(beats):
         assert 0.0 <= s <= 300.0
-    total = sum(d for _, d, _f in _cuts_in_order(beats))
+    total = sum(d for _, d, _f, _v in _cuts_in_order(beats))
     assert abs(total - span) < 0.5
     print("ok: end-of-film clamp keeps every cut inside the movie")
 
 
 def test_visuals_never_run_ahead_of_the_narration() -> None:
     """Dense-beat section: the narration is LONGER than its footage. Before
-    the bounded-lead fix the forward walk made the visuals run up to ~86s of
-    film ahead of the story being narrated. Now the lead is capped and the
-    excess time becomes a freeze-hold on the current shot."""
+    the pacing fix the forward walk made the visuals run up to ~86s of film
+    ahead of the story. Now the section plays in SLOW MOTION: the picture
+    never stops, never repeats, and stays with the narrated moment."""
     # 25 sentences, 6s narration each (149s) over beats only 2.4s apart.
     cues = [TimedCue(f"S{i}.", i * 6.0, i * 6.0 + 5.0) for i in range(25)]
     span = 24 * 6.0 + 5.0
@@ -177,34 +177,36 @@ def test_visuals_never_run_ahead_of_the_narration() -> None:
               "film_end": 1002.4 + i * 2.4}
              for i, c in enumerate(cues)]
     cfg = dict(CFG)
-    cfg["max_lead_seconds"] = 3.0
+    cfg["min_speed"] = 0.35
     stats: dict = {}
     beats = timeline.build_timeline(sents, durs, 6000.0, cfg, stats=stats)
 
     max_lead_seen = 0.0
     prev_end = -1.0
     for b in beats:
-        for s, d, _f in b["cuts"]:
-            # a cut may start at most max_lead (+ window/pre_roll slack)
-            # past the moment its sentence narrates
+        for s, d, f, sp in b["cuts"]:
             lead = s - b["film_start"]
             max_lead_seen = max(max_lead_seen, lead)
             assert s >= prev_end - 1e-6, "no-replay must still hold"
-            prev_end = max(prev_end, s + d - _f)
-    assert max_lead_seen <= 3.0 + 3.0 + 0.5, (
+            prev_end = max(prev_end, s + (d - f) * sp)
+    assert max_lead_seen <= 8.0, (
         f"visuals ran {max_lead_seen:.1f}s ahead of the narration "
-        "(was ~86s before the bounded-lead fix)"
+        "(was ~86s before pacing)"
     )
-    # durations still sum to the narration exactly (freeze time included)
-    total = sum(d for _, d, _f in _cuts_in_order(beats))
+    # THE MOTION GUARANTEE: not a single frozen frame mid-film
+    frozen = sum(f for _, _d, f, _v in _cuts_in_order(beats))
+    assert frozen == 0.0, "mid-film freezes are forbidden (slow-mo instead)"
+    assert stats.get("held_shots", 0) == 0
+    # the dense section was paced in slow motion, never below min_speed
+    assert stats.get("slowed_groups", 0) > 0
+    for _s, _d, _f, sp in _cuts_in_order(beats):
+        assert sp >= 0.35 - 1e-6, "speed must respect min_speed"
+    # durations still sum to the narration exactly
+    total = sum(d for _, d, _f, _v in _cuts_in_order(beats))
     assert abs(total - span) < 1e-6
-    # the dense section held shots instead of sprinting forward
-    assert stats.get("held_shots", 0) > 0
-    played = sum(d - f for _, d, f in _cuts_in_order(beats))
-    frozen = sum(f for _, _d, f in _cuts_in_order(beats))
-    print(f"ok: dense section lead capped at {max_lead_seen:.1f}s "
-          f"(was ~86s); {stats['held_shots']} held shots, "
-          f"{played:.0f}s of footage + {frozen:.0f}s of holds = {span:.0f}s")
+    print(f"ok: dense section -> lead {max_lead_seen:.1f}s (was ~86s), "
+          f"{stats['slowed_groups']} slow-mo groups, 0 frozen seconds, "
+          f"{total:.0f}s locked")
 
 
 def test_holds_keep_av_lock_in_sparse_sections() -> None:
@@ -218,11 +220,45 @@ def test_holds_keep_av_lock_in_sparse_sections() -> None:
     stats: dict = {}
     beats = timeline.build_timeline(sents, durs, 6000.0, dict(CFG), stats=stats)
     assert stats.get("held_shots", 0) == 0, "no holds expected when windows are wide"
-    frozen = sum(f for _, _d, f in _cuts_in_order(beats))
-    assert frozen == 0.0
-    total = sum(d for _, d, _f in _cuts_in_order(beats))
+    assert stats.get("slowed_groups", 0) == 0, "no slow-mo when film is ample"
+    for _s, _d, f, sp in _cuts_in_order(beats):
+        assert f == 0.0 and abs(sp - 1.0) < 1e-9
+    total = sum(d for _, d, _f, _v in _cuts_in_order(beats))
     assert abs(total - span) < 1e-6
-    print("ok: wide-window sections play straight through, no holds")
+    print("ok: wide-window sections play straight through at 1x speed")
+
+
+def test_slow_motion_cut_command() -> None:
+    """A paced (slow-mo) cut reads only duration*speed of film and slows it
+    with setpts so the motion is continuous (no freeze, no fps drop)."""
+    from recap import clip
+
+    captured: list[list[str]] = []
+    original_run, original_which = clip.run, clip.which_ffmpeg
+
+    def fake_run(cmd, **kw):
+        captured.append(list(cmd))
+
+    clip.run = fake_run
+    clip.which_ffmpeg = lambda: "ffmpeg"
+    try:
+        # 8s of screen time at 0.5x = 4s of film
+        clip.cut_segment(Path("movie.mp4"), Path("seg.mp4"), 100.0, 8.0,
+                         {"fps": 30}, mode="reencode", exact=True,
+                         freeze=0.0, speed=0.5)
+    finally:
+        clip.run = original_run
+        clip.which_ffmpeg = original_which
+
+    cmd = captured[0]
+    assert cmd[cmd.index("-t") + 1] == "4.000", \
+        f"input must read 8*0.5=4s of film: {cmd}"
+    assert cmd[cmd.index("-t", cmd.index("-i")) + 1] == "8.000", \
+        "output must be the full 8s"
+    joined = " ".join(cmd)
+    assert "setpts=PTS/0.5000" in joined, "slowdown via setpts"
+    assert "tpad" not in joined, "no freeze in a pure slow-mo cut"
+    print("ok: slow-mo cut = 4s of film stretched to a full 8s of motion")
 
 
 def test_freeze_cut_command() -> None:
@@ -271,5 +307,6 @@ if __name__ == "__main__":
     test_end_of_film_stays_in_bounds()
     test_visuals_never_run_ahead_of_the_narration()
     test_holds_keep_av_lock_in_sparse_sections()
+    test_slow_motion_cut_command()
     test_freeze_cut_command()
     print("\nALL VISUAL-FLOW TESTS PASSED")

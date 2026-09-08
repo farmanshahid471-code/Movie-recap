@@ -381,18 +381,31 @@ voice. Shot lengths still respect `min_cut_seconds`, durations still sum to
 the audio span exactly, and without word timings it silently falls back to the
 even split.
 
-**3. No-replay playback + bounded lead (always on).** Every cut of the whole
-track is placed by one forward walk: a cut's film position is clamped to start
-at or after the **end of the previous cut's footage**. The film therefore never
-rewinds and no moment is ever shown twice — the "the same clip stutters back
-mid-sentence" artifact is impossible by construction. And the walk is bounded
-by `timeline.max_lead_seconds` (default 3s): new footage may run at most ~one
-shot ahead of the moment being narrated. In dialogue-dense sections (where the
-narration is longer than the footage behind it) the picture now HOLDS its last
-frame — an editor's held shot, rendered as a frame freeze — until the
-narration catches up, instead of silently drifting up to minutes ahead of the
-story being told. The run log reports held shots; wide-window sections play
-straight through with zero holds.
+**3. No-replay playback + pacing (always on).** Every cut of the whole track
+is placed by one forward walk: a cut's film position is clamped to start at or
+after the **end of the previous cut's consumed footage**. The film therefore
+never rewinds and no moment is ever shown twice — the "same clip stutters back
+mid-sentence" artifact is impossible by construction.
+
+**Motion guarantee — the picture never stops.** When a section's narration is
+longer than the film behind it (a dialogue-dense stretch), the timeline paces
+that window — `speed = window / narration`, clamped to `timeline.min_speed`
+(0.35x) — so the footage plays as gentle slow motion that stays locked to the
+moment being narrated. Exactly what a human editor does. Mid-film the picture
+is therefore ALWAYS moving: new footage at 1x, or the same moment in slow
+motion. A frozen frame now occurs only if the narration outlasts the entire
+movie. In the stress fixture (25 sentences over 2.4s-apart beats) this took
+the visual lead from ~86s of look-ahead down to under a second — with zero
+frozen frames and the durations still summing to the narration exactly.
+
+**Smooth, non-laggy transitions.** Three rules give the reference-channel cut
+feel: (1) every cut opens on the film's REAL shot change when scenedetect is
+installed (`pip install scenedetect[opencv]`); (2) a cut must show at least
+`timeline.min_new_footage` (0.8s) of genuinely new film — smaller advances
+continue the current footage seamlessly instead of a stuttering micro-jump;
+(3) every cut is re-encoded to its exact frame duration, so there is no
+keyframe snapping or timing jitter. Like the reference channel, transitions
+are hard cuts — clean and instant, never crossfades.
 
 **4. `timeline.snap_to_scenes` (default on).** The film's real shot-change
 times are detected once per movie (PySceneDetect, cached in
@@ -653,10 +666,14 @@ After a run, inspect `output/_work/beats_<lang>.json`: every beat carries its
   gives the old even split.
 * `snap_to_scenes` / `snap_tolerance` — land cuts on the film's real shot
   changes (PySceneDetect, cached; `pip install scenedetect[opencv]`).
-* `max_lead_seconds` (default 3.0) — how far the visuals may run ahead of the
-  narrated moment before holding the shot. Raise it (e.g. 5) for smoother
-  flow with looser matching; lower it (e.g. 1.5) for stricter matching with
-  more held shots.
+* `min_speed` (default 0.35) — the slow-motion floor for dialogue-dense
+  sections. Lower (0.25) = tighter narration sync but heavier slow-mo; higher
+  (0.6) = milder slow-mo with a slightly larger visual lead; 1.0 = never slow
+  down (sections then run ahead of the narration instead).
+* `min_new_footage` (default 0.8) — minimum of genuinely new film a cut must
+  show before it counts as a cut; smaller steps continue the shot seamlessly.
+* `max_lead_seconds` (default 3.0) — safety valve on how far the visuals may
+  run ahead of the narrated moment.
 * No-replay playback is always on: cuts never re-show footage, so the montage
   walks the film strictly forward.
 * `semantic.clip.mode` — `reencode` (frame-exact, default) vs `copy` (fast

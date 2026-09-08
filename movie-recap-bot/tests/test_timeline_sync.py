@@ -68,7 +68,7 @@ def test_no_truncation_for_a_900s_request() -> None:
     ]
     beats = timeline.build_timeline(sentences, durations, movie_dur=6000.0)
     cuts = timeline.flatten_cuts(beats)
-    video_len = sum(d for _, d, _f in cuts)
+    video_len = sum(d for _, d, _f, _v in cuts)
 
     assert abs(video_len - span) < 0.5, (
         f"video {video_len:.1f}s must equal narration {span:.1f}s "
@@ -116,10 +116,10 @@ def test_micro_cuts_break_up_long_beats() -> None:
     assert multi, "long beats must be split into micro-cuts"
     for b in beats:
         assert len(b["cuts"]) <= 3
-        assert abs(sum(d for _, d, _f in b["cuts"]) - b["duration"]) < 1e-6, (
+        assert abs(sum(d for _, d, _f, _v in b["cuts"]) - b["duration"]) < 1e-6, (
             "micro-cuts must exactly fill their beat"
         )
-        starts = [s for s, _d, _f in b["cuts"]]
+        starts = [s for s, _d, _f, _v in b["cuts"]]
         assert starts == sorted(starts), "shots inside a beat advance forward"
     print(f"  {len(multi)}/{len(beats)} beats split into multiple shots")
 
@@ -134,11 +134,11 @@ def test_cuts_stay_inside_the_film() -> None:
     ]
     beats = timeline.build_timeline(sentences, durations, movie_dur)
     for b in beats:
-        for start, dur, _frz in b["cuts"]:
+        for start, dur, _frz, _spd in b["cuts"]:
             assert start >= 0.0, "negative seek"
             assert start <= movie_dur, f"seek {start} past end {movie_dur}"
     # length lock still holds
-    assert abs(sum(d for _, d, _f in timeline.flatten_cuts(beats)) - span) < 0.5
+    assert abs(sum(d for _, d, _f, _v in timeline.flatten_cuts(beats)) - span) < 0.5
     print(f"  all cuts within a {movie_dur:.0f}s film, length still locked")
 
 

@@ -32,6 +32,7 @@ def cut_segment(
     mode: str = "copy",
     exact: bool = False,
     freeze: float = 0.0,
+    speed: float = 1.0,
 ) -> Path:
     """Cut one segment of the source film.
 
@@ -42,24 +43,29 @@ def cut_segment(
     the input for a fast seek but re-states ``-t`` on the output so the written
     file is exactly ``duration`` long regardless of keyframe placement.
 
-    ``freeze>0`` renders the timeline's freeze-hold cuts: only the first
-    ``duration - freeze`` seconds are read from the film, then the final frame
-    is cloned for the remaining ``freeze`` seconds (``tpad``), so the output is
-    still exactly ``duration`` long — the picture holds the shot instead of
-    running ahead of the narration. Stream copy cannot freeze, so a freeze cut
-    is always re-encoded.
+    ``speed<1`` renders the timeline's slow-motion pacing: only
+    ``(duration - freeze) * speed`` seconds are read from the film and played
+    out over ``duration - freeze`` seconds (``setpts``), so the output is
+    still exactly ``duration`` long and the motion never stops. ``freeze>0``
+    additionally clones the final frame for the last ``freeze`` seconds
+    (end-of-film only). Stream copy cannot slow or freeze, so any such cut is
+    always re-encoded.
     """
     out.parent.mkdir(parents=True, exist_ok=True)
     start = max(float(start), 0.0)
     duration = max(float(duration), 0.05 if exact else 0.2)
     freeze = min(max(float(freeze or 0.0), 0.0), max(duration - 0.05, 0.0))
+    speed = min(max(float(speed if speed and speed > 0 else 1.0), 0.1), 4.0)
+    special = freeze > 0 or abs(speed - 1.0) > 1e-3
+
+    # film seconds the source must supply for the moving part of the shot
+    film_needed = max((duration - freeze) * speed, 0.05)
 
     cmd = [which_ffmpeg(), "-y", "-ss", f"{start:.3f}"]
-    if freeze > 0:
-        # read only the moving part of the shot from the source
-        cmd += ["-t", f"{max(duration - freeze, 0.05):.3f}"]
+    if special:
+        cmd += ["-t", f"{film_needed:.3f}"]
     cmd += ["-i", str(movie), "-t", f"{duration:.3f}"]
-    if mode == "copy" and freeze <= 0:
+    if mode == "copy" and not special:
         cmd += [
             "-c", "copy",
             "-avoid_negative_ts", "make_zero",
@@ -69,9 +75,11 @@ def cut_segment(
         fps = int(cfg_video.get("fps", 30))
         vf = (
             "scale=1920:1080:force_original_aspect_ratio=increase,"
-            "crop=1920:1080,setsar=1,"
-            f"fps={fps}"
+            "crop=1920:1080,setsar=1"
         )
+        if abs(speed - 1.0) > 1e-3:
+            vf += f",setpts=PTS/{speed:.4f}"
+        vf += f",fps={fps}"
         if freeze > 0:
             vf += f",tpad=stop_mode=clone:stop_duration={freeze:.3f}"
         vf += ",setpts=PTS-STARTPTS"
@@ -177,7 +185,8 @@ def _visual_plan_id(movie: Path, cuts: list[tuple[float, float]],
             "movie": movie_id,
             "cuts": [
                 [round(float(cut[0]), 4), round(float(cut[1]), 4),
-                 round(float(cut[2]), 4) if len(cut) > 2 else 0.0]
+                 round(float(cut[2]), 4) if len(cut) > 2 else 0.0,
+                 round(float(cut[3]), 4) if len(cut) > 3 and cut[3] else 1.0]
                 for cut in cuts
             ],
             "mode": mode,
@@ -219,12 +228,14 @@ def build_locked_visual(
     if mode not in ("copy", "reencode"):
         mode = "reencode"
 
-    # cuts are (film_start, duration, freeze?) — legacy 2-tuples still accepted
-    norm_cuts: list[tuple[float, float, float]] = []
+    # cuts are (film_start, duration, freeze?, speed?); legacy 2/3-tuples
+    # (no speed) are still accepted
+    norm_cuts: list[tuple[float, float, float, float]] = []
     for cut in cuts:
         _a, _b = float(cut[0]), float(cut[1])
         _f = float(cut[2]) if len(cut) > 2 else 0.0
-        norm_cuts.append((_a, _b, _f))
+        _v = float(cut[3]) if len(cut) > 3 and cut[3] else 1.0
+        norm_cuts.append((_a, _b, _f, _v))
 
     cutdir = Path(workdir) / "beats"
     cutdir.mkdir(parents=True, exist_ok=True)
@@ -257,14 +268,14 @@ def build_locked_visual(
                     pass
             if removed:
                 print(f"  * [{mode}] cleared {removed} stale clip segment(s)", flush=True)
-        for i, (start, dur, freeze) in enumerate(norm_cuts):
+        for i, (start, dur, freeze, speed) in enumerate(norm_cuts):
             cut_segment(movie, segments[i], start, dur, cfg_video,
-                        mode=mode, exact=True, freeze=freeze)
+                        mode=mode, exact=True, freeze=freeze, speed=speed)
         stamp.write_text(plan, encoding="utf-8")
 
     raw = Path(workdir) / "visual_raw.mp4"
     raw_stamp = Path(workdir) / ".raw.json"
-    total = sum(max(d, 0.0) for _, d, _f in norm_cuts)
+    total = sum(max(d, 0.0) for _, d, _f, _v in norm_cuts)
     if raw_stamp.exists() and raw_stamp.read_text(encoding="utf-8").strip() == plan \
             and raw.exists() and raw.stat().st_size > 0:
         print(f"  * reusing concatenated visual {raw.name} "

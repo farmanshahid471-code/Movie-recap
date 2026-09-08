@@ -40,15 +40,18 @@ Two further properties the old code lacked:
   moment is ever shown twice — the "same clip stutters back" artifact of the
   old per-beat placement is impossible by construction.
 
-* **Bounded lead (visuals stay with the narration).** Forward-play alone has
-  a failure mode: in a dialogue-dense section the narration can be LONGER
-  than the footage behind it, and blindly playing on made the visuals run
-  tens of seconds AHEAD of the story being narrated. So new footage may lead
-  the narration by at most ``max_lead_seconds`` (default 3.0, about one
-  shot). Beyond that the picture HOLDS its last frame (an editor's held
-  shot — the cut's extra time becomes a freeze) until the narration's
-  anchors catch back up. No replay, no look-ahead, and the durations still
-  sum to the narration exactly.
+* **Bounded lead + motion guarantee (visuals stay WITH the narration, and
+  they never stop moving).** In a dialogue-dense section the narration can
+  be LONGER than the footage behind it; blindly playing on made the visuals
+  run tens of seconds AHEAD of the story. The fix is what a human editor
+  does: pace each window — ``speed = window / narration`` clamped to
+  ``min_speed`` (0.35x) — so a starved stretch plays as gentle slow motion
+  that stays locked to the narrated moment. The picture therefore always
+  MOVES (new footage at 1x, or the same moment in slow motion); a frozen
+  frame happens only when the narration outlasts the entire movie. And a
+  cut never opens less than ``min_new_footage`` (0.8s) past the previous
+  footage — micro-jumps that read as stutters become seamless
+  continuations instead. Durations still sum to the narration exactly.
 
 * **Shot-boundary snapping.** With the film's real shot-change times
   (detected once per movie, cached — see ``scenes.scene_boundaries``), each
@@ -262,10 +265,12 @@ def build_timeline(
         previous cut's footage — the film never rewinds, no moment is shown
         twice (except the unavoidable end-of-film clamp when the narration
         outlasts the movie),
-      * BOUNDED LEAD: a cut never starts more than ``max_lead_seconds``
-        ahead of the moment its sentence narrates; the excess time becomes
-        a freeze-frame hold on the previous shot (cuts are
-        ``(film_start, duration, freeze)`` triples),
+      * MOTION GUARANTEE: mid-film the picture NEVER freezes. When a
+        section's narration is longer than the film behind it, the footage
+        plays in slow motion (down to ``min_speed``) instead of running
+        ahead or holding a frame — cuts are
+        ``(film_start, duration, freeze, speed)`` tuples and ``freeze`` is
+        non-zero only when the narration outlasts the movie itself,
       * with word timings, every intra-sentence shot change happens on a
         spoken word boundary, not mid-word,
       * with scene bounds, every cut starts on a real shot change.
@@ -278,6 +283,8 @@ def build_timeline(
     cut_on_words = bool(cfg.get("cut_on_words", True))
     snap_tol = float(cfg.get("snap_tolerance", 0.8))
     max_lead = max(float(cfg.get("max_lead_seconds", 3.0)), 0.0)
+    min_speed = min(max(float(cfg.get("min_speed", 0.35)), 0.1), 1.0)
+    min_new = float(cfg.get("min_new_footage", 0.8))
     scene_bounds = sorted(scene_bounds or [])
 
     n = min(len(sentences), len(durations))
@@ -310,14 +317,13 @@ def build_timeline(
 
     beats: list[dict] = []
     playhead = 0.0        # beat-level monotonicity across groups
-    film_playhead = 0.0   # END of the last cut's footage: nothing may replay
-    # Most recent cut of the whole track, as a mutable [start, dur, freeze]:
-    # freeze-holds extend it when new footage would run too far ahead.
-    last_cut: list[float] | None = None
+    film_playhead = 0.0   # END of the last cut's consumed film: no replays
     word_locked = 0
     snapped = 0
     pushed = 0
-    held = 0
+    held = 0              # freeze events (end-of-film only)
+    slowed = 0            # groups paced below 1x (slow motion)
+    slowed_secs = 0.0     # narration seconds played in slow motion
 
     for g in groups:
         f0 = max(float(g["film_start"]), playhead)
@@ -331,6 +337,26 @@ def build_timeline(
         idxs = g["idx"]
         total_nar = sum(max(durations[i], 0.05) for i in idxs) or 1.0
         span = f1 - f0
+
+        # ---- GROUP PACING (the motion guarantee) --------------------------
+        # How much narration time does this window of film have to cover?
+        # When the narration is LONGER than the film behind it (a dialogue-
+        # dense section), playing at 1x would either run the visuals far
+        # ahead of the story or force a frozen frame. A human editor plays
+        # that stretch in slow motion instead: the footage keeps MOVING at a
+        # reduced speed and stays locked to the moment being narrated. The
+        # speed is clamped at min_speed (0.35x default = still smooth at
+        # 30fps) and is 1.0 whenever the window has enough film, so normal
+        # sections are untouched.
+        entry = max(f0, film_playhead)
+        room = f1 - entry
+        if total_nar > 0 and room > 0:
+            grp_speed = min(1.0, max(min_speed, room / total_nar))
+        else:
+            grp_speed = min_speed if room <= 0 else 1.0
+        if grp_speed < 0.999:
+            slowed += 1
+            slowed_secs += total_nar * (1.0 - grp_speed) / max(grp_speed, 1e-6)
 
         acc = 0.0
         for i in idxs:
@@ -360,10 +386,18 @@ def build_timeline(
                 # NO-REPLAY RULE: never show footage the previous cut already
                 # played. If this beat's window is behind the film playhead
                 # (its moment was consumed by a longer earlier cut), the
-                # footage plays on forward from there —
+                # footage plays on forward from there.
                 start = max(desired, film_playhead)
                 if start > desired + 1e-9:
                     pushed += 1
+                # ANTI-HICCUP: a cut that advances the film by only a
+                # fraction of a second lands on a near-identical frame — it
+                # reads as a stutter, not a cut ("laggy"). Prefer a seamless
+                # continuation of the current footage over a micro-jump; the
+                # next REAL cut (a shot boundary or a full step forward)
+                # will provide the visual change.
+                if 0.0 < start - film_playhead < min_new:
+                    start = film_playhead
                 # Snap to the film's real shot change when one is close —
                 # but a snap may never rewind below the film playhead.
                 if scene_bounds:
@@ -371,26 +405,27 @@ def build_timeline(
                     if s2 != start and s2 >= film_playhead:
                         start = s2
                         snapped += 1
-                # — but only up to max_lead ahead of the moment being
-                # narrated. Further than that and the visuals would be
-                # telling a FUTURE part of the story while the narrator is
-                # still on this one (in dense sections that drift reached
-                # tens of seconds). Instead HOLD the last frame: the cut's
-                # time becomes a freeze on the current shot and the film
-                # playhead waits for the narration to catch up.
-                if last_cut is not None and start - desired > max_lead:
-                    last_cut[1] += per          # duration grows ...
-                    last_cut[2] += per          # ... all of it freeze
-                    held += 1
-                    continue
-                if movie_dur > 0 and start + per > movie_dur:
-                    # keep the whole shot inside the film (the only place a
-                    # replay can still happen: narration outlasts the movie)
-                    start = max(0.0, min(start, max(movie_dur - per, 0.0)))
-                cut = [start, per, 0.0]
+                # SAFETY VALVE: never open a cut far ahead of the moment
+                # being narrated (the pacing above keeps this rare).
+                if start - desired > max_lead:
+                    start = film_playhead
+                # Freeze ONLY when the film itself has run out (the narration
+                # outlasts the movie). Everywhere else the picture moves:
+                # new footage at 1x, or the same moment in slow motion.
+                freeze = 0.0
+                moving = per * grp_speed
+                if movie_dur > 0 and start + moving > movie_dur:
+                    film_left = max(movie_dur - max(start, 0.0), 0.0)
+                    if film_left >= moving - 1e-9:
+                        pass
+                    else:
+                        # show whatever film remains, freeze the rest
+                        moving = film_left
+                        freeze = per - moving / max(grp_speed, 1e-6)
+                        held += 1
+                cut = [start, per, freeze, grp_speed]
                 cuts.append(cut)
-                last_cut = cut
-                film_playhead = start + per
+                film_playhead = start + moving
 
             beats.append(
                 {
@@ -406,26 +441,30 @@ def build_timeline(
             playhead = max(playhead, film_pos)
 
     beats.sort(key=lambda b: b["index"])
-    for b in beats:  # freeze the mutable [start, dur, freeze] into tuples
+    for b in beats:  # freeze the mutable [start, dur, freeze, speed] into tuples
         b["cuts"] = [
-            (round(float(s), 3), round(float(d), 3), round(float(f), 3))
-            for s, d, f in b["cuts"]
+            (round(float(s), 3), round(float(d), 3), round(float(f), 3),
+             round(float(v), 3))
+            for s, d, f, v in b["cuts"]
         ]
     if stats is not None:
         stats["word_locked_beats"] = word_locked
         stats["snapped_cuts"] = snapped
         stats["pushed_cuts"] = pushed
         stats["held_shots"] = held
+        stats["slowed_groups"] = slowed
+        stats["slowed_seconds"] = round(slowed_secs, 1)
     return beats
 
 
 def flatten_cuts(beats: list[dict]) -> list[tuple[float, float, float]]:
     """All micro-cuts of every beat, in play order.
 
-    Each cut is a ``(film_start, duration, freeze)`` triple: ``duration`` is
-    the narration-locked on-screen time and ``freeze`` of those seconds are a
-    hold on the final frame (see "bounded lead" above); the moving part is
-    ``duration - freeze``.
+    Each cut is a ``(film_start, duration, freeze, speed)`` tuple:
+    ``duration`` is the narration-locked on-screen time, ``speed`` the
+    playback rate of the moving part (1.0 = normal; < 1.0 = slow motion),
+    and ``freeze`` seconds at the end hold the final frame (end-of-film
+    only). Film consumed by a cut = ``(duration - freeze) * speed``.
     """
     out: list[tuple[float, float]] = []
     for b in beats:
@@ -434,10 +473,11 @@ def flatten_cuts(beats: list[dict]) -> list[tuple[float, float, float]]:
 
 
 def timeline_report(beats: list[dict], audio_span: float,
-                    word_locked: int = 0, snapped: int = 0) -> str:
+                    word_locked: int = 0, snapped: int = 0,
+                    slowed: int = 0, slowed_secs: float = 0.0) -> str:
     """One-line human summary used in the run log."""
     cuts = flatten_cuts(beats)
-    total = sum(d for _, d, _f in cuts)
+    total = sum(d for _, d, _f, _v in cuts)
     starts = [b["film_start"] for b in beats]
     monotone = all(starts[i] <= starts[i + 1] + 1e-6 for i in range(len(starts) - 1))
     bits = [f"{len(beats)} beats / {len(cuts)} cuts"]
@@ -445,6 +485,8 @@ def timeline_report(beats: list[dict], audio_span: float,
         bits.append(f"word-locked {word_locked}/{len(beats)} beats")
     if snapped:
         bits.append(f"{snapped} cuts on shot changes")
+    if slowed:
+        bits.append(f"{slowed} slow-mo sections ({slowed_secs:.0f}s)")
     return (
         f"{', '.join(bits)}, "
         f"video {total:.1f}s vs narration {audio_span:.1f}s "
