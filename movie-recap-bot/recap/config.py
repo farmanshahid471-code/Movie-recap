@@ -45,6 +45,13 @@ _DEFAULTS: dict[str, Any] = {
         # Close every video with the channel outro ("If you enjoyed the
         # video, don't forget to leave a like...") like real recap channels.
         "sign_off": True,
+        # VISUAL MATCH: size each section's narration to the film time it
+        # covers (instead of by beat density), cap dense sections at what
+        # their footage can show at 1x, and pace sentence anchors so every
+        # sentence's window is at least as long as the sentence. This is
+        # what lets the whole recap play at normal speed -- no slow motion,
+        # no frozen frames (those remain only as a safety net).
+        "visual_match": True,
     },
     # Step D — chronological timeline (replaces semantic vector matching).
     # Beats advance monotonically through the film and every beat's visual is

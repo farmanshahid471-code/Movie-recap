@@ -297,6 +297,107 @@ def test_freeze_cut_command() -> None:
     print("ok: freeze cut = 3s of film + 5s frame-hold, output exactly 8s")
 
 
+def test_visual_matched_budgets() -> None:
+    """Section budgets are sized by FILM TIME and capped at 1x footage."""
+    from recap import script as script_mod
+
+    # 10 sections x 150s of distinct film; cap = 150/60*150*0.8 = 300 words
+    film_secs = [150.0] * 10
+    caps = [s / 60 * 150 * 0.8 for s in film_secs]
+    b = script_mod._visual_matched_budgets(2250, film_secs, caps)
+    assert len(b) == 10 and all(x <= 300 for x in b)
+    assert abs(sum(b) - 2250) <= 10, "normal target preserved"
+
+    # extreme target: caps bind but nothing exceeds its footage capacity
+    b2 = script_mod._visual_matched_budgets(6000, film_secs, caps)
+    assert all(x <= 300 for x in b2), "no section may outrun its footage"
+
+    # one dialogue-dense (tiny) section: capped, the others absorb the excess
+    film_secs2 = [150.0, 150.0, 20.0, 150.0]
+    caps2 = [s / 60 * 150 * 0.8 for s in film_secs2]
+    b3 = script_mod._visual_matched_budgets(600, film_secs2, caps2)
+    assert b3[2] <= caps2[2] + 0.5, "dense section capped at 1x footage"
+    assert abs(sum(b3) - 600) <= 20, "total preserved (rounding/floor slack)"
+    print("ok: budgets sized by film time, dense sections capped, total kept")
+
+
+def test_paced_anchors_spread_clusters() -> None:
+    """Clustered anchors are spread one narration-length apart; well-spread
+    anchors are left alone."""
+    from recap import script as script_mod
+
+    sents = ["The pilot wakes up in a forest full of tall dark trees."] * 4
+    # four sentences all anchored onto one busy 2-second moment
+    raw = [1001.0, 1001.4, 1001.8, 1002.2]
+    out = script_mod._paced_anchors(raw, sents, 1000.0, 1150.0, 150)
+    assert all(out[i] > out[i - 1] for i in range(1, 4)), "must be monotone"
+    # each gap must fit BOTH adjacent windows: _anchor_windows splits every
+    # gap at the midpoint and each window reaches `lead` back to its anchor,
+    # so a gap must be 2 x (narration - lead) wide
+    est = 12 / 150 * 60 * 1.15 + 1.0
+    need = 2 * (est - 0.8)
+    assert all(out[i] - out[i - 1] >= need - 1e-6 for i in range(1, 4))
+    assert out[-1] <= 1150.0
+
+    # already-spread anchors stay where they are (except the half-step for
+    # the first window, by design)
+    raw2 = [1000.0, 1100.0, 1200.0]
+    out2 = script_mod._paced_anchors(raw2, sents[:3], 1000.0, 1300.0, 150)
+    assert out2[1:] == raw2[1:] and out2[0] >= raw2[0]
+
+    # impossible clustering (no room) -> even spread, still in bounds
+    out3 = script_mod._paced_anchors([1148.0] * 4, sents, 1000.0, 1150.0, 150)
+    assert all(1000.0 <= a <= 1150.0 for a in out3)
+    assert all(out3[i] > out3[i - 1] for i in range(1, 4))
+    print("ok: clustered anchors paced apart; sparse anchors untouched")
+
+
+def test_matched_script_plays_at_1x() -> None:
+    """THE PAYOFF: a script budgeted by film time, with paced anchors, plays
+    every section at NORMAL SPEED -- even over beats packed 2.4s apart. No
+    slow motion, no frozen frames, exact A/V lock."""
+    from recap import script as script_mod
+
+    # 63 beats, 2.4s apart, in the film window [1000, 1150)
+    beats = [{"t": 1000.0 + i * 2.4, "text": f"beat {i}"} for i in range(63)]
+    # film-time budget -> only ~5 sentences for this window (not 63)
+    sents = ["The pilot wakes up in a forest full of tall dark trees.",
+             "He crawls toward the burning wreck of his own plane.",
+             "An armed stranger inspects the smoke and finds him there.",
+             "The stranger raises his gun and shouts a warning at him.",
+             "The pilot grabs the barrel and both men fall down hard."]
+    # writer anchored the 5 sentences onto the FIRST five (clustered) beats
+    raw = [b["t"] for b in beats[:5]]
+    paced = script_mod._paced_anchors(raw, sents, 1000.0, 1150.0, 150)
+    wins = script_mod._anchor_windows(
+        1000.0, 1150.0, beats, len(sents),
+        anchor_values=paced, lead=0.8, tail=6.0,
+    )
+    segs = [{"sentence": s, "film_start": lo, "film_end": hi}
+            for s, (lo, hi) in zip(sents, wins)]
+
+    # narration: 4.8s speech + 0.4s pause per sentence
+    cues = [TimedCue(s, i * 5.2, i * 5.2 + 4.8) for i, s in enumerate(sents)]
+    span = 4 * 5.2 + 4.8
+    durs = timeline.lock_durations(cues, span)
+    stats: dict = {}
+    beats_tl = timeline.build_timeline(segs, durs, 6000.0, dict(CFG), stats=stats)
+
+    assert stats.get("slowed_groups", 0) == 0, "no slow motion anywhere"
+    assert stats.get("held_shots", 0) == 0, "no frozen frames"
+    for _s, _d, f, sp in _cuts_in_order(beats_tl):
+        assert abs(sp - 1.0) < 1e-9, f"expected 1x, got {sp}x"
+        assert f == 0.0
+    total = sum(d for _, d, _f, _v in _cuts_in_order(beats_tl))
+    assert abs(total - span) < 1e-6, "A/V lock exact"
+    prev_end = -1.0
+    for s, d, f, sp in _cuts_in_order(beats_tl):
+        assert s >= prev_end - 1e-6, "no replay"
+        prev_end = max(prev_end, s + (d - f) * sp)
+    print(f"ok: matched script over 2.4s-packed beats -> all 1x, "
+          f"{total:.1f}s locked, no slow-mo, no freeze")
+
+
 if __name__ == "__main__":
     test_no_replay_same_window()
     test_no_replay_overlapping_windows()
@@ -309,4 +410,7 @@ if __name__ == "__main__":
     test_holds_keep_av_lock_in_sparse_sections()
     test_slow_motion_cut_command()
     test_freeze_cut_command()
+    test_visual_matched_budgets()
+    test_paced_anchors_spread_clusters()
+    test_matched_script_plays_at_1x()
     print("\nALL VISUAL-FLOW TESTS PASSED")

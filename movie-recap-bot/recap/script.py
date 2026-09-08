@@ -794,6 +794,96 @@ def _global_polish(
     return sentences
 
 
+def _visual_matched_budgets(
+    target_words: int,
+    film_secs: list[float],
+    cap_words: list[float],
+    min_words: int = 40,
+) -> list[int]:
+    """Allocate the narration budget across sections by FILM TIME.
+
+    Each section may not ask for more narration seconds than its own footage
+    can show at 1x -- asking for more is exactly what forces slow motion (or
+    look-ahead) downstream. Dense sections are capped and their excess words
+    are redistributed to sections with spare footage, so the TOTAL target is
+    preserved whenever the film supports it (a recap is normally far shorter
+    than its film, so there is plenty of room).
+    """
+    total_secs = float(sum(film_secs)) or 1.0
+    budgets = [
+        max(min_words, int(round(target_words * s / total_secs)))
+        for s in film_secs
+    ]
+    for _round in range(10):
+        excess = 0.0
+        room: list[int] = []
+        for i, b in enumerate(budgets):
+            cap = max(float(cap_words[i]), min_words)
+            if b > cap:
+                excess += b - cap
+                budgets[i] = int(cap)
+            elif b < cap:
+                room.append(i)
+        if excess < 1.0 or not room:
+            break
+        wsum = sum(film_secs[i] for i in room) or 1.0
+        for i in room:
+            budgets[i] += int(round(excess * film_secs[i] / wsum))
+    return budgets
+
+
+def _paced_anchors(
+    raw: list[float],
+    sentences: list[str],
+    lo: float,
+    hi: float,
+    words_per_minute: int,
+    lead: float = 0.8,
+) -> list[float]:
+    """Space sentence anchors so each sentence's footage window is at least
+    as long as its own narration -- the script-level half of the motion
+    guarantee.
+
+    ``_anchor_windows`` splits every gap between neighbouring anchors at the
+    midpoint (so footage never repeats), so a sentence's window is only
+    ``lead + gap/2`` wide, NOT the full gap. Consecutive anchors must
+    therefore sit ``2 x (narration_length - lead)`` apart. When anchors
+    cluster (several sentences narrating one busy moment), each sentence's
+    window would be shorter than the sentence takes to say and the timeline
+    would have to slow the footage down; this pushes the anchors forward
+    until every sentence CAN play at 1x. Genuinely over-budget sections
+    fall back to an even spread over the zone (the timeline's pacing then
+    handles the remainder, which is rare by construction: the section
+    budgets already cap words at what the footage can show).
+    """
+    n = len(raw)
+    if n < 2:
+        return list(raw)
+    rate = max(float(words_per_minute or 150), 60.0)
+    # generous estimate: TTS rate variance + the pause after the sentence
+    est = [max(count_words(s) / rate * 60.0 * 1.15 + 1.0, 2.5)
+           for s in sentences]
+    # gap required between anchor i-1 and i: BOTH adjacent windows draw on
+    # it (each gets half), and each window also reaches `lead` back to its
+    # own anchor, hence 2 x (narration - lead).
+    need = [max(2.0 * (max(est[i - 1], est[i]) - lead), 1.0)
+            for i in range(1, n)]
+    out = [min(max(float(a), lo), hi) for a in raw]
+    # the first sentence's window reaches back to `lo` (see _anchor_windows),
+    # so half a step in gives it a full narration-length window
+    out[0] = max(out[0], lo + est[0] / 2.0)
+    for i in range(1, n):
+        out[i] = max(out[i], out[i - 1] + need[i - 1])
+    if out[-1] > hi:
+        # clustered + full budget: even spread across the whole zone
+        span = max(hi - lo, 1.0)
+        out = [lo + (k + 0.5) * span / n for k in range(n)]
+        for i in range(1, n):
+            out[i] = max(out[i], out[i - 1] + 0.5)
+        out = [min(a, hi) for a in out]
+    return out
+
+
 def generate_segmented_script(
     chunk_summaries: list[dict],
     cfg_llm: dict,
@@ -803,6 +893,7 @@ def generate_segmented_script(
     progress=None,
     lang_name: str = "English",
     sign_off: bool = True,
+    visual_match: bool = True,
 ) -> list[dict]:
     """Write the recap chunk-by-chunk, in film order, hitting the word target.
 
@@ -839,24 +930,51 @@ def generate_segmented_script(
             f"{lang_name} forms, consistently)."
         )
 
-    # Distribute the word budget across chunks by how much story each holds:
-    # beat count when available (a 20-beat chunk gets more narration room than
-    # a 5-beat one even if their summaries are similar in length), otherwise
-    # the summary's own word count.
     def _weight(c: dict) -> float:
+        """Legacy weighting (visual_match=false): budget by beat count."""
         beats = c.get("beats") or []
         if beats:
             n = len([b for b in beats if (b.get("text") or "").strip()])
             return float(max(n, 1))
         return float(max(len((c.get("summary") or "").split()), 20))
 
-    weights = [_weight(c) for c in usable]
-    wsum = float(sum(weights)) or 1.0
+    # ---- VISUAL MATCH: size each section's narration to its footage ------
+    # How many seconds of DISTINCT film each section can show at 1x. Windows
+    # overlap (chunk N's tail is re-covered by chunk N+1's head), so a
+    # section's own footage is the STEP between window starts; the last
+    # section owns its full window.
+    starts_ = [float(c.get("start", 0.0)) for c in usable]
+    ends_ = [float(c.get("end", 0.0)) for c in usable]
+    film_secs: list[float] = []
+    zone_hi: list[float] = []
+    for i in range(len(usable)):
+        win = max(ends_[i] - starts_[i], 1.0)
+        step = starts_[i + 1] - starts_[i] if i + 1 < len(usable) else win
+        if not (1.0 < step < win):
+            step = win
+        film_secs.append(float(step))
+        zone_hi.append(starts_[i] + film_secs[-1])
+    # 0.4 safety factor: _anchor_windows splits every gap between neighbouring
+    # anchors at the midpoint (so footage never repeats), so a sentence can
+    # only use lead + gap/2 of film -- 1x-safe narration tops out around half
+    # the film time, and 0.4 leaves margin for TTS pauses and rate variance.
+    cap_words = [s / 60.0 * max(words_per_minute, 60) * 0.4 for s in film_secs]
+
+    if visual_match:
+        budgets = _visual_matched_budgets(target_words, film_secs, cap_words)
+        print(f"  * visual match: {len(usable)} sections budgeted by film "
+              f"time ({sum(budgets)} words; dense sections capped at their "
+              "1x footage)")
+    else:
+        weights = [_weight(c) for c in usable]
+        wsum = float(sum(weights)) or 1.0
+        budgets = [max(40, int(round(target_words * (w / wsum))))
+                   for w in weights]
 
     out: list[dict] = []
-    tail = ""  # last sentence of the previous section, for continuity
-    for pos, (c, w) in enumerate(zip(usable, weights)):
-        budget = max(40, int(round(target_words * (w / wsum))))
+    tail = ""  # last sentences of the previous section, for continuity
+    for pos, c in enumerate(usable):
+        budget = int(budgets[pos])
         nsent = max(3, int(round(budget / 17)))
         t0, t1 = float(c.get("start", 0.0)), float(c.get("end", 0.0))
         beats = c.get("beats") or []
@@ -975,11 +1093,14 @@ def generate_segmented_script(
             sents = _polish_section(cfg_llm, sents, exemplar_block, names)
 
         # Anchor each sentence to the film moment(s) it narrates (beat
-        # timecodes) instead of giving the whole chunk to every sentence. For
-        # English, first align each sentence to the beat it actually describes
-        # (embedding + monotone DP); other languages keep the positional map.
+        # timecodes) instead of giving the whole chunk to every sentence.
+        # English aligns each sentence to the beat it actually describes
+        # (embedding + monotone DP); every language falls back to an even
+        # positional map. With visual_match on, the anchors are then PACED
+        # (see _paced_anchors) so each sentence's footage window is at least
+        # as long as the sentence itself -- the guarantee that the timeline
+        # can play everything at 1x, no slow motion.
         if sents:
-            anchors = _sentence_anchor_values(sents, beats) if is_en else None
             try:
                 _lead = float(os.environ.get("RECAP_ANCHOR_LEAD", "0.8"))
             except (TypeError, ValueError):
@@ -988,6 +1109,29 @@ def generate_segmented_script(
                 _tail = float(os.environ.get("RECAP_ANCHOR_TAIL", "6.0"))
             except (TypeError, ValueError):
                 _tail = 6.0
+            anchors = _sentence_anchor_values(sents, beats) if is_en else None
+            if anchors is None:
+                times = sorted(
+                    float(b["t"]) for b in (beats or [])
+                    if b.get("t") is not None and (b.get("text") or "").strip()
+                )
+                n_s, n_b = len(sents), len(times)
+                if n_b >= 1 and n_s >= 1:
+                    anchors = [
+                        times[min(n_b - 1,
+                                  int(round(k * (n_b - 1) / max(n_s - 1, 1))))]
+                        for k in range(n_s)
+                    ]
+                else:
+                    anchors = [
+                        t0 + (k + 0.5) * max(t1 - t0, 1.0) / max(n_s, 1)
+                        for k in range(n_s)
+                    ]
+            if visual_match and anchors:
+                anchors = _paced_anchors(
+                    anchors, sents, t0, min(t1, zone_hi[pos]),
+                    words_per_minute, lead=_lead,
+                )
             wins = _anchor_windows(
                 t0, t1, beats, len(sents),
                 anchor_values=anchors, lead=_lead, tail=_tail,

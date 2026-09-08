@@ -60,6 +60,13 @@ narration:
   # don't forget to leave a like, subscribe, and turn on notifications..."),
   # the way real recap channels end. Set false (or RECAP_SIGN_OFF=0) to stop.
   sign_off: true
+  # VISUAL MATCH: size each section's narration to the film time it covers,
+  # cap dialogue-dense sections at what their footage can show at 1x, and
+  # pace the sentence anchors so every sentence's window is at least as long
+  # as the sentence itself. The recap then plays at normal speed end to end
+  # — no slow motion, no frozen frames (kept only as a safety net). Set
+  # false for the old beat-count budgeting.
+  visual_match: true
   # --- Naturalness / scene-sync knobs (English recap; env-tunable) ---
   #   RECAP_POLISH=1         spoken-style "punch-up" rewrite of each English
   #                          section (one extra DeepSeek call per section; the

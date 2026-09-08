@@ -387,6 +387,23 @@ after the **end of the previous cut's consumed footage**. The film therefore
 never rewinds and no moment is ever shown twice — the "same clip stutters back
 mid-sentence" artifact is impossible by construction.
 
+**Visual match — the script is sized to the footage (`narration.visual_match`,
+default on).** The recap's *script* is now written to the movie, not the other
+way round. The pipeline measures how much distinct film time each section
+covers (from the beat map) and gives the LLM a per-section word budget of what
+that footage can show at 1x speed — so a section can never be given more
+narration than its own film time. On top of that, each sentence's anchor is
+*paced*: consecutive sentences are pushed apart until every sentence's footage
+window (the film between its moment and the next sentence's moment) is at
+least as long as the sentence takes to say. The result: the recap plays at
+normal speed from the first cut to the last — the narration and the picture
+advance in lockstep, and neither slow motion nor a held frame is ever *needed*
+to keep them together. (For a typical movie this is far from binding — a
+17-minute recap of a 2-hour film uses ~15% of the film time — it matters for
+dense films or long targets, where the budget now trims the script to what
+the footage can carry at 1x.) Set `narration.visual_match: false` to go back
+to the old beat-count budgeting.
+
 **Motion guarantee — the picture never stops.** When a section's narration is
 longer than the film behind it (a dialogue-dense stretch), the timeline paces
 that window — `speed = window / narration`, clamped to `timeline.min_speed`
@@ -397,6 +414,9 @@ motion. A frozen frame now occurs only if the narration outlasts the entire
 movie. In the stress fixture (25 sentences over 2.4s-apart beats) this took
 the visual lead from ~86s of look-ahead down to under a second — with zero
 frozen frames and the durations still summing to the narration exactly.
+With `visual_match` on this is a *safety net* — the script budgets already
+keep almost every section at 1x — but it stays on so no input can ever
+produce a still frame.
 
 **Smooth, non-laggy transitions.** Three rules give the reference-channel cut
 feel: (1) every cut opens on the film's REAL shot change when scenedetect is
@@ -505,6 +525,7 @@ Edit `config.yaml` (template: `config.example.yaml`). Key knobs:
 | `narration.lang_voice.ar` | Arabic narrator (default `ar-SA-HamedNeural`) |
 | `narration.lang_voice.es` | Spanish narrator (default `es-MX-JorgeNeural`) |
 | `narration.rate` | speaking rate, e.g. `+5%` |
+| `narration.visual_match` | size each section's script to the film time it covers, and pace sentence anchors so the recap plays at 1x end to end (default `true`; `false` = old beat-count budgets) |
 | `narration.words_target` | desired narration length |
 | `subtitles.font` | must include CJK glyphs for 中文 (default `Noto Serif CJK SC`) |
 | `subtitles.lang_font.ar` | Arabic subtitle font (default `Arial`, shaped) |

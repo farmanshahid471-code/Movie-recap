@@ -692,6 +692,18 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         nar = cfg["narration"]
         target = int(nar.get("words_target", 2000))
         wpm = int(nar.get("words_per_minute", 150))
+        # VISUAL MATCH: never ask for more narration than the film can show
+        # at 1x. A recap is normally far shorter than its film, so this only
+        # fires for extreme targets (e.g. 25 minutes out of a 30-minute
+        # movie) -- the picture then stays at full speed instead of drifting
+        # into permanent slow motion.
+        if nar.get("visual_match", True) and movie_dur > 0:
+            film_cap = int(movie_dur / 60.0 * wpm * 0.75)
+            if film_cap >= 600 and target > film_cap:
+                print(f"  * visual match: target {target} words exceeds what "
+                      f"the film can show at 1x ({film_cap} words); clamping "
+                      "so the narration never outruns the footage.")
+                target = film_cap
         print(f"  * Target: {target} words ≈ "
               f"{target / max(wpm, 1) * 60:.0f}s of speech at {wpm} wpm")
 
@@ -704,7 +716,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         b_marker = tdir / f"script_{code}.marker.json"
         b_sig = _sig(merged, cfg["llm"].get("provider"),
                      cfg["llm"].get("model"), target,
-                     bool(nar.get("sign_off", True)), "segmented-v9")
+                     bool(nar.get("sign_off", True)), "segmented-v10")
         seg_path = tdir / f"script_{code}.segments.json"
         segments = None
         if _marker_ok(b_marker, b_sig) and seg_path.exists():
@@ -730,6 +742,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                 chunk_summaries, cfg["llm"], target,
                 words_per_minute=wpm, progress=_prog, lang_name=lang_name,
                 sign_off=bool(nar.get("sign_off", True)),
+                visual_match=bool(nar.get("visual_match", True)),
             )
             if len(segments) < 10:
                 raise DialogueError(
