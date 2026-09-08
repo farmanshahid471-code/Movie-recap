@@ -34,6 +34,17 @@ _DEFAULTS: dict[str, Any] = {
         # edge-tts pitch shift in Hz ("-6Hz" deeper, "+6Hz" brighter; "-0Hz" = off)
         "pitch": "-0Hz",
         "tts_provider": "edge",
+        # Re-run the GENERATED narration audio through faster-whisper and lock
+        # every cue (and word) to what is actually spoken. Works with ANY TTS
+        # provider — for openai/elevenlabs this replaces guessed cue times
+        # with measured ones. Cached per audio content; set false to skip.
+        "whisper_align": True,
+        # Optional smaller/faster model just for the narration alignment
+        # (defaults to dialogue.whisper_model, i.e. "small").
+        "whisper_align_model": None,
+        # Close every video with the channel outro ("If you enjoyed the
+        # video, don't forget to leave a like...") like real recap channels.
+        "sign_off": True,
     },
     # Step D — chronological timeline (replaces semantic vector matching).
     # Beats advance monotonically through the film and every beat's visual is
@@ -43,6 +54,10 @@ _DEFAULTS: dict[str, Any] = {
         "max_cuts_per_beat": 3,    # a long sentence becomes up to 3 micro-shots
         "min_cut_seconds": 1.2,    # never flash a shot shorter than this
         "pre_roll": 0.4,           # start each shot slightly before its moment
+        # Place the micro-cut points inside a sentence ON MEASURED WORD
+        # boundaries (clause breaks: after commas, before and/but/while),
+        # so the picture switches exactly when the narrator changes subject.
+        "cut_on_words": True,
     },
     # Whisper ASR tuning (auto-recap from the movie's own audio).
     "dialogue": {
@@ -212,6 +227,15 @@ def load_config(path: str | Path | None = None) -> dict:
     cfg["narration"]["tts_provider"] = os.environ.get(
         "TTS_PROVIDER", cfg["narration"].get("tts_provider", "edge")
     )
+    # Narration sync/style toggles (see recap/align.py + recap/script.py).
+    if "RECAP_WHISPER_ALIGN" in os.environ:
+        cfg["narration"]["whisper_align"] = os.environ[
+            "RECAP_WHISPER_ALIGN"
+        ].strip().lower() not in ("0", "false", "no", "off")
+    if "RECAP_SIGN_OFF" in os.environ:
+        cfg["narration"]["sign_off"] = os.environ[
+            "RECAP_SIGN_OFF"
+        ].strip().lower() not in ("0", "false", "no", "off")
     # Vision pass toggles (see recap/vision.py). Keys come from the provider's
     # env var (gemini -> GEMINI_API_KEY), which _load_dotenv already imported.
     if "VISION_ENABLED" in os.environ:

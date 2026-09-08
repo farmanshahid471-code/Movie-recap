@@ -23,7 +23,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from . import (chunk, clip, dialogue, languages, llm, scenes, script,
+from . import (align, chunk, clip, dialogue, languages, llm, scenes, script,
                subtitles, summarize, timeline, translate, tts, video, vision)
 from .config import out_dir, work_dir
 from .dialogue import DialogueError
@@ -405,6 +405,43 @@ def _write_json(obj, path: Path) -> None:
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _align_narration_for(
+    wd: Path,
+    code: str,
+    mp3: Path,
+    lines: list[str],
+    cues: list,
+    narr_cfg: dict,
+    dlg_cfg: dict,
+):
+    """Whisper-align one narration track to its own audio (see recap/align.py).
+
+    Returns ``(mp3, cues, aligned)``. The timing sidecar is rewritten with the
+    refined cues so a resumed run reloads the aligned times without
+    re-transcribing.
+    """
+    audio_span = max(probe_duration(mp3), cues[-1].end if cues else 0.0)
+    model_size = narr_cfg.get("whisper_align_model") \
+        or dlg_cfg.get("whisper_model", "small")
+    cues, aligned = align.align_narration(
+        mp3, lines, cues, audio_span, wd, code=code,
+        model_size=model_size,
+        device=dlg_cfg.get("whisper_device", "auto"),
+        language=code,
+        enabled=bool(narr_cfg.get("whisper_align", True)),
+    )
+    if aligned:
+        try:
+            (wd / f"{code}.timing.json").write_text(
+                json.dumps([c.as_dict() for c in cues], ensure_ascii=False,
+                           indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+    return mp3, cues, aligned
+
+
 def auto_recap(cfg: dict, movie: Path) -> list[Path]:
     """Run the full Step A-F flow on a movie file.
 
@@ -414,9 +451,12 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
     Step B  section-by-section narration pass -> sentences tagged with the film
             window they describe, sized to hit the word target
     Step C  TTS narration per language with sentence (+word) timestamps;
-            languages without their own dialogue are line-aligned translations
-            of the authored master recap (their sentences reuse the master's
-            film windows)
+            the generated audio is then re-measured with faster-whisper
+            (narration.whisper_align, default on) so every cue and word is
+            locked to what is actually spoken — required for openai/elevenlabs
+            voices, which return a bare mp3. Languages without their own
+            dialogue are line-aligned translations of the authored master
+            recap (their sentences reuse the master's film windows)
     Step D  chronological timeline: beats advance monotonically through the
             film, each locked to its narration cue (no vector search)
     Step E  ffmpeg-clip each micro-shot frame-exactly from the movie
@@ -663,7 +703,8 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
 
         b_marker = tdir / f"script_{code}.marker.json"
         b_sig = _sig(merged, cfg["llm"].get("provider"),
-                     cfg["llm"].get("model"), target, "segmented-v6")
+                     cfg["llm"].get("model"), target,
+                     bool(nar.get("sign_off", True)), "segmented-v7")
         seg_path = tdir / f"script_{code}.segments.json"
         segments = None
         if _marker_ok(b_marker, b_sig) and seg_path.exists():
@@ -688,6 +729,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
             segments = script.generate_segmented_script(
                 chunk_summaries, cfg["llm"], target,
                 words_per_minute=wpm, progress=_prog, lang_name=lang_name,
+                sign_off=bool(nar.get("sign_off", True)),
             )
             if len(segments) < 10:
                 raise DialogueError(
@@ -769,9 +811,23 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                       f"{code}.mp3 to re-narrate.")
                 continue
         print(f"  * Narrating {code} ({voice}) — {len(lines)} lines ...")
-        audios[code] = tts.synthesize_language(
+        mp3, cues_t = tts.synthesize_language(
             lines, {"code": code, "voice": voice}, wd, prov, False
         )
+        # --- Whisper alignment (Step C+) -----------------------------------
+        # Run the GENERATED narration audio back through faster-whisper and
+        # re-anchor every cue (and every word) to what is actually spoken.
+        # This is what keeps the visuals glued to the voice for ANY TTS
+        # provider: edge-tts already reports word boundaries, but OpenAI /
+        # ElevenLabs return a bare mp3 (the old code guessed their cue times
+        # proportionally, drifting seconds off). Cached per audio content.
+        align_cfg = cfg["narration"]
+        if align_cfg.get("whisper_align", True):
+            dlg_cfg = cfg.get("dialogue", {})
+            mp3, cues_t, _ = _align_narration_for(
+                wd, code, mp3, lines, cues_t, align_cfg, dlg_cfg
+            )
+        audios[code] = (mp3, cues_t)
         _write_marker(c_marker, c_sig)
         print(f"    -> {audios[code][0]}  "
               f"({audios[code][1][-1].end:.1f}s total)")
@@ -800,6 +856,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
 
         # Chronological, audio-locked beat plan for this language.
         durations = timeline.lock_durations(cues_t, audio_span)
+        tl_stats: dict = {}
         if code in authored:
             seg_for_lang = authored[code]["segments"]
         else:
@@ -813,11 +870,16 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                  "film_end": ms[min(i, len(ms) - 1)]["film_end"]}
                 for i, c in enumerate(cues_t)
             ]
-        beats = timeline.build_timeline(seg_for_lang, durations, movie_dur,
-                                        tl_cfg)
+        beats = timeline.build_timeline(
+            seg_for_lang, durations, movie_dur, tl_cfg,
+            word_times=[c.words for c in cues_t],
+            stats=tl_stats,
+        )
         _write_json(beats, wd / f"beats_{code}.json")
-        print(f"  * [{code}] timeline: "
-              f"{timeline.timeline_report(beats, audio_span)}")
+        _report = timeline.timeline_report(
+            beats, audio_span, tl_stats.get("word_locked_beats", 0)
+        )
+        print(f"  * [{code}] timeline: {_report}")
 
         # Resume: if the final render already exists for these exact inputs
         # (narration + beats + movie + subtitle/assembly settings), skip the

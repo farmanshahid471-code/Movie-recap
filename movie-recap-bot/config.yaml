@@ -47,6 +47,19 @@ narration:
   # edge-tts pitch shift in Hz: "-8Hz" adds depth/gravitas, "+6Hz" brightens.
   # Keep "-0Hz" (off) unless a voice sounds thin. ElevenLabs/OpenAI ignore.
   pitch: "-0Hz"
+  # Re-run the GENERATED narration audio through faster-whisper and lock every
+  # cue/word to what is actually spoken. This is what glues the visuals to the
+  # voice for ANY TTS provider (openai/elevenlabs return a bare mp3 — without
+  # this their cue times are guesses). Cached per audio content, so re-renders
+  # are free. Set false (or RECAP_WHISPER_ALIGN=0 in .env) to skip.
+  whisper_align: true
+  # Optional smaller/faster model just for that alignment pass (default:
+  # dialogue.whisper_model, i.e. "small").
+  whisper_align_model: null
+  # Close every video with the channel outro ("If you enjoyed the video,
+  # don't forget to leave a like, subscribe, and turn on notifications..."),
+  # the way real recap channels end. Set false (or RECAP_SIGN_OFF=0) to stop.
+  sign_off: true
   # --- Naturalness / scene-sync knobs (English recap; env-tunable) ---
   #   RECAP_POLISH=1         spoken-style "punch-up" rewrite of each English
   #                          section (one extra DeepSeek call per section; the
@@ -57,7 +70,10 @@ narration:
   #                          so the footage matches the words. Set 0 to disable.
   #   RECAP_ANCHOR_LEAD=0.8  seconds of footage shown before a beat's line lands
   #   RECAP_ANCHOR_TAIL=6.0  max follow-through footage after a beat
-  # (RECAP_POLISH / RECAP_ALIGN / RECAP_ANCHOR_* go in movie-recap-bot/.env)
+  #   RECAP_WHISPER_ALIGN=1  re-measure the narration audio with faster-whisper
+  #                          and lock cues/words to it (see whisper_align above)
+  #   RECAP_SIGN_OFF=1       append the channel outro line to the script
+  # (these go in movie-recap-bot/.env)
 
 # Step A1-A2 — Whisper ASR tuning (used when no .srt sits next to the movie).
 dialogue:
@@ -106,6 +122,11 @@ timeline:
   max_cuts_per_beat: 4     # one sentence becomes up to 4 micro-shots
   min_cut_seconds: 1.2     # never flash a shot shorter than this
   pre_roll: 0.4            # start each shot slightly before its moment
+  cut_on_words: true       # switch shots ON measured word boundaries inside a
+                           # sentence (after commas, before and/but/while), so
+                           # the picture cuts exactly when the narrator moves
+                           # to the next subject. Needs narration.whisper_align
+                           # (or edge-tts word boundaries). false = even split.
 
 # (legacy) semantic vector matching — no longer used for beat selection.
 semantic:

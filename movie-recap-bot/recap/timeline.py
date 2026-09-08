@@ -26,13 +26,35 @@ Two further properties the old code lacked:
   from successive points inside that beat's film window, the way real recaps
   cut ("wakes up" -> "plane burning" -> "grabs gun") instead of holding one
   static clip for the whole sentence.
+
+* **Word-locked cuts.** When the narration's word timings are known (edge-tts
+  boundaries, or the faster-whisper alignment pass in ``recap/align.py``),
+  the micro-cut points inside a sentence are placed ON WORDS — at clause
+  boundaries (after a comma, before "and"/"but"/"while"/...) measured from
+  the audio — so the picture switches at the exact moment the narrator moves
+  to the next subject, not at an arbitrary even split of the sentence.
 """
 from __future__ import annotations
 
+import re
 from typing import Sequence
 
 # A beat is:
 #   {"index", "sentence", "film_start", "film_end", "duration", "cuts": [(start, dur)]}
+
+# Tokens a new clause typically starts with — a shot change right before one
+# of these reads as an intentional edit. English-focused, but comma/semicolon
+# detection covers the other languages too.
+_CONJUNCTIONS = {
+    "and", "but", "while", "so", "because", "when", "as", "after", "before",
+    "then", "meanwhile", "however", "instead", "once", "until", "since",
+    "although", "though", "whereas", "back", "thanks", "determined",
+    "excited", "suddenly", "just",
+}
+
+_CLAUSE_PUNCT = ",;:" + "，。！？；：、）】」』"
+
+_TOKEN_RE = re.compile(r"[\w']+", re.UNICODE)
 
 
 def lock_durations(cues: Sequence, total_audio: float | None = None) -> list[float]:
@@ -61,6 +83,75 @@ def lock_durations(cues: Sequence, total_audio: float | None = None) -> list[flo
     return [bounds[i + 1] - bounds[i] for i in range(n)]
 
 
+def _norm_tok(token: str) -> str:
+    return (token or "").strip().lower().strip("\"'“”‘’")
+
+
+def _word_boundary_fractions(
+    words: list | None,
+    beat_start: float,
+    duration: float,
+) -> list[float] | None:
+    """Candidate shot-switch points inside one beat, as fractions of it.
+
+    ``words`` — the beat's spoken words ``[(text, start, end)]`` in absolute
+    narration time; ``beat_start`` — where this beat begins on that same
+    clock. A switch is "natural" right before a word that starts a new clause:
+    after a comma/semicolon/colon (or a CJK clause mark), or before a
+    conjunction like "and"/"but"/"while". Returns sorted fractions in
+    (0.12, 0.92) — never close enough to the beat's edges to flash a shot —
+    or None when there is nothing usable (the caller splits evenly).
+    """
+    if not words or duration <= 0:
+        return None
+    cands: list[float] = []
+    for idx in range(len(words) - 1):
+        tok = (words[idx][0] or "").rstrip()
+        nxt = words[idx + 1]
+        nxt_tok = _norm_tok(nxt[0])
+        tok_last = tok[-1] if tok else ""
+        if tok_last in _CLAUSE_PUNCT or nxt_tok in _CONJUNCTIONS:
+            f = (float(nxt[1]) - beat_start) / duration
+            if 0.12 <= f <= 0.92:
+                cands.append(round(f, 4))
+    # de-duplicate, keep order
+    return sorted(set(cands)) or None
+
+
+def _select_shot_boundaries(
+    candidates: list[float],
+    n_shots: int,
+    duration: float,
+    min_cut: float,
+) -> list[float] | None:
+    """Pick the ``n_shots - 1`` switch fractions closest to even spacing.
+
+    Greedy, left to right, every chosen fraction at least ``min_cut`` from its
+    neighbours and from both ends, so no shot can come out shorter than
+    ``min_cut``. Returns fewer boundaries when the candidates run out (that is
+    fine — the beat just gets fewer, longer shots), or None when none fit.
+    """
+    if not candidates or n_shots < 2:
+        return None
+    min_sep = min_cut / duration if duration > 0 else 1.0
+    min_sep = min(min_sep, 0.45)
+    chosen: list[float] = []
+    for k in range(1, n_shots):
+        target = k / n_shots
+        lo = (chosen[-1] + min_sep) if chosen else min_sep
+        best, best_d = None, None
+        for f in candidates:
+            if f < lo or f > 1.0 - min_sep:
+                continue
+            d = abs(f - target)
+            if best_d is None or d < best_d:
+                best, best_d = f, d
+        if best is None:
+            break
+        chosen.append(best)
+    return chosen or None
+
+
 def _micro_cuts(
     film_pos: float,
     film_span: float,
@@ -71,12 +162,18 @@ def _micro_cuts(
     max_cuts: int,
     min_cut: float,
     pre_roll: float,
+    fracs: list[float] | None = None,
 ) -> list[tuple[float, float]]:
     """Split one narration beat into 1..max_cuts short shots.
 
     The shots walk forward through ``[film_pos, film_pos + film_span]`` so even
     a single sentence shows visual progression instead of one frozen clip. The
     returned durations always sum to exactly ``duration``.
+
+    ``fracs`` — optional switch points inside the beat (fractions of its
+    duration, from ``_word_boundary_fractions``). When given, the shot lengths
+    follow the SPOKEN clause boundaries (the picture cuts exactly when the
+    narrator reaches the next clause); when absent the split is even.
     """
     duration = max(float(duration), 0.05)
     n = int(round(duration / max(micro_target, 0.5))) or 1
@@ -85,12 +182,22 @@ def _micro_cuts(
     while n > 1 and duration / n < min_cut:
         n -= 1
 
-    per = duration / n
+    bounds: list[float] | None = None
+    if fracs and n > 1:
+        picked = _select_shot_boundaries(fracs, n, duration, min_cut)
+        if picked:
+            bounds = [0.0] + picked + [1.0]
+    if bounds is None:
+        bounds = [k / n for k in range(n + 1)]
+
     cuts: list[tuple[float, float]] = []
-    for k in range(n):
-        # spread the shot start points across the beat's film window
-        frac = (k / n) if n > 1 else 0.0
-        start = film_pos + frac * max(film_span, 0.0) - pre_roll
+    for k in range(len(bounds) - 1):
+        # spread the shot start points across the beat's film window — using
+        # the same fractions as the timing, so the film advances in step with
+        # the narration inside the sentence
+        f0 = bounds[k]
+        per = (bounds[k + 1] - f0) * duration
+        start = film_pos + f0 * max(film_span, 0.0) - pre_roll
         start = max(0.0, start)
         if movie_dur > 0:
             # keep the whole shot inside the film
@@ -104,6 +211,8 @@ def build_timeline(
     durations: list[float],
     movie_dur: float,
     cfg_timeline: dict | None = None,
+    word_times: list | None = None,
+    stats: dict | None = None,
 ) -> list[dict]:
     """Build the chronological, audio-locked beat list.
 
@@ -111,20 +220,35 @@ def build_timeline(
     in story order (produced by the segmented script generator). ``durations``
     — the audio-locked visual length of each beat from :func:`lock_durations`.
 
+    ``word_times`` — optional per-sentence spoken-word timings
+    ``[[(text, start, end), ...], ...]`` in absolute narration time (from the
+    TTS provider or the faster-whisper alignment pass). When present, the
+    micro-cuts inside each sentence land on measured clause boundaries.
+
     Guarantees:
       * beat starts never move backwards (strict chronology),
       * ``sum(cut durations) == sum(durations)`` (frame-accurate A/V lock),
-      * the playhead walks the whole film from start to end.
+      * the playhead walks the whole film from start to end,
+      * with word timings, every intra-sentence shot change happens on a
+        spoken word boundary, not mid-word.
     """
     cfg = cfg_timeline or {}
     micro_target = float(cfg.get("micro_cut_seconds", 3.0))
     max_cuts = int(cfg.get("max_cuts_per_beat", 3))
     min_cut = float(cfg.get("min_cut_seconds", 1.2))
     pre_roll = float(cfg.get("pre_roll", 0.4))
+    cut_on_words = bool(cfg.get("cut_on_words", True))
 
     n = min(len(sentences), len(durations))
     if n == 0:
         return []
+
+    # Narration-time start of each beat (durations are contiguous from 0 and
+    # sum to the audio span — see lock_durations — so the running total IS the
+    # beat's offset inside the narration mp3).
+    cum: list[float] = [0.0]
+    for d in durations[:n]:
+        cum.append(cum[-1] + max(float(d), 0.05))
 
     # ---- group the sentences by the film window they were written from ----
     groups: list[dict] = []
@@ -145,6 +269,7 @@ def build_timeline(
 
     beats: list[dict] = []
     playhead = 0.0  # enforces global monotonicity across groups
+    word_locked = 0
 
     for g in groups:
         f0 = max(float(g["film_start"]), playhead)
@@ -168,10 +293,18 @@ def build_timeline(
             film_span = (d / total_nar) * span
             film_pos = max(film_pos, playhead)
 
+            # word-measured switch points inside this sentence (narration clock)
+            fracs = None
+            if cut_on_words and word_times and i < len(word_times) \
+                    and i < len(cum):
+                fracs = _word_boundary_fractions(word_times[i], cum[i], d)
+                if fracs:
+                    word_locked += 1
+
             cuts = _micro_cuts(
                 film_pos, film_span, d, movie_dur,
                 micro_target=micro_target, max_cuts=max_cuts,
-                min_cut=min_cut, pre_roll=pre_roll,
+                min_cut=min_cut, pre_roll=pre_roll, fracs=fracs,
             )
 
             beats.append(
@@ -188,6 +321,8 @@ def build_timeline(
             playhead = max(playhead, film_pos)
 
     beats.sort(key=lambda b: b["index"])
+    if stats is not None:
+        stats["word_locked_beats"] = word_locked
     return beats
 
 
@@ -199,14 +334,16 @@ def flatten_cuts(beats: list[dict]) -> list[tuple[float, float]]:
     return out
 
 
-def timeline_report(beats: list[dict], audio_span: float) -> str:
+def timeline_report(beats: list[dict], audio_span: float,
+                    word_locked: int = 0) -> str:
     """One-line human summary used in the run log."""
     cuts = flatten_cuts(beats)
     total = sum(d for _, d in cuts)
     starts = [b["film_start"] for b in beats]
     monotone = all(starts[i] <= starts[i + 1] + 1e-6 for i in range(len(starts) - 1))
+    wl = f", word-locked {word_locked}/{len(beats)} beats" if word_locked else ""
     return (
-        f"{len(beats)} beats / {len(cuts)} cuts, "
+        f"{len(beats)} beats / {len(cuts)} cuts{wl}, "
         f"video {total:.1f}s vs narration {audio_span:.1f}s "
         f"(drift {abs(total - audio_span) * 1000:.0f}ms), "
         f"chronological={'yes' if monotone else 'NO'}, "

@@ -17,35 +17,44 @@ from pathlib import Path
 from . import llm
 from .util import count_words
 
-STYLE_PRESET = """You are a narration writer for a "movie recap" channel in the style of the
-popular YouTube channel *Movie Recaps*.
+STYLE_PRESET = """You are the narrator of a full-length movie recap video, the voice heard over
+the film's footage on big recap channels.
 
-Write a single English narration script that recounts the entire movie as a
-fast, engaging, present-tense story. Rules:
+Write a single English narration script that tells the entire movie as a fast,
+engaging, present-tense story. How that narrator sounds:
 
-- One complete sentence per line. Never merge multiple ideas into one line.
-- Keep sentences moderate length (roughly 8 to 22 words). Short, punchy beats.
-- Use present tense throughout ("James loses both his parents...").
-- Describe the plot beat by beat in clear chronological order. Include key
-  reveals and twists, but do NOT include the very ending/climax if it would
-  spoil; the channel style is to tease.
-- Conversational but cinematic. Avoid heavy analysis; you are retelling, not
-  reviewing. No "this movie", no "in conclusion", no commentary about the
-  film itself.
-- No dialogue-heavy quoting; summarize what happens in plain narration.
-- Use character names consistently. Keep the tone consistent with an English
-  movie recap.
+- SENTENCE RHYTHM: chain several moments into flowing 12-40 word sentences,
+  and between them drop short dramatic beats of 2-8 words ("Woody disagrees.").
+  Never write many sentences of the same length in a row.
+- Vary how sentences open, with the connectors narrators actually use:
+  "Meanwhile,", "At the same time,", "Just then,", "Suddenly,", "Not long
+  after,", "A little later,", "Before long,", "The next morning,", "That
+  night,", "Back at ...", "Little by little,", "Thanks to that,", "As it
+  turns out,", "The moment X ..., Y ...", "Determined to ..., X ...",
+  "Without anyone noticing, X ...".
+- Introduce new characters and objects with a short appositive ("a mare named
+  Almond", "a tablet called Lilypad").
+- Report conversations as indirect narration ("She explains that...", "He
+  admits that..."); never quote dialogue.
+- Use contractions (it's, she's, doesn't, can't) like a person talking.
+- Present tense, third person, chronological from opening to ending.
+- No "the movie"/"the film"/"the scene shows" mid-story, no analysis, no
+  review talk. "We see" is fine occasionally.
+- No em-dashes, no semicolons, no rhetorical questions to the viewer.
 - Total roughly {target} words (between {mn} and {mx}).
-- Do not write any heading, title, or trailing notes. Only the narration lines.
+- One sentence per line. No heading, title, or trailing notes.
 """
 
 # Step B — the exact system prompt the channel workflow uses for the final
 # narrative pass over the summarized chunks.
 SYSTEM_RECAP_WRITER = (
-    "You are a professional YouTube movie recap scriptwriter. "
-    "Do not mention that you are an AI. Do not quote dialogue. "
-    "Write entirely in the third person, focusing on character actions, "
-    "tension, and plot progression."
+    "You are the narrator of a full-length movie recap video, the voice heard "
+    "over the film's footage on big recap channels. Do not mention that you "
+    "are an AI. You tell the story in the third person, present tense, "
+    "sounding like a person TALKING -- flowing sentences that chain several "
+    "moments, short dramatic beats between them, varied openers, indirect "
+    "speech instead of dialogue quotes, contractions. No 'the movie', 'the "
+    "film', no analysis or review talk."
 )
 
 PROMPT_SCRIPT_JSON = """You are writing the narration for a full-length movie recap video (~{minutes} minutes of speech, roughly {target} words).
@@ -56,13 +65,17 @@ Write the complete recap script as a **JSON array of sentence strings** — one 
 
 ["First sentence.", "Second sentence.", ...]
 
-Rules for the sentences:
-- Third person, present tense. Every sentence is something that HAPPENS on screen ("Rita wakes up tied to a chair.", "The van races toward the airport.").
-- Never quote dialogue. Never say "the movie", "the film", "we see", "the scene shows". No commentary or analysis.
-- Tell the ENTIRE story from opening to ending, strictly chronological, including the ending.
-- One self-contained action beat per sentence, ~8 to 22 words. Short, punchy, cinematic pacing.
+How the narration must sound (this is the recap-channel register):
+- SENTENCE RHYTHM: chain several moments into flowing 12-40 word sentences ("She explains that technology has made its way into Bonnie's life too, and that a tablet is taking up all of her attention."), and between them drop short dramatic beats of 2-8 words ("Woody disagrees." / "Now they need to escape."). Never many sentences of the same length in a row.
+- Vary every opener with real narrator connectors: "Meanwhile,", "At the same time,", "Just then,", "Suddenly,", "Not long after,", "A little later,", "Before long,", "The next morning,", "That night,", "Back at ...", "Little by little,", "Thanks to that,", "As it turns out,", "The moment X ..., Y ...", "Determined to ..., X ...", "To her delight, X ...", "Without anyone noticing, X ...".
+- Introduce new characters/objects with a short appositive ("a mare named Almond", "a tablet called Lilypad").
+- Report conversations as indirect narration ("Jessie insists that nothing can replace a real friend, but Lilypad fires back that Bonnie already has friends."). Never quote dialogue.
+- Use contractions (it's, she's, doesn't, can't) the way a narrator naturally would.
+- Third person, present tense. Tell the ENTIRE story from opening to ending, strictly chronological, including the ending.
 - Use character names consistently so the viewer can follow.
 - In total: about {target} words (between {mn} and {mx}) across the whole array.
+
+FORBIDDEN (the tells of machine-written narration): uniform sentence length; "Name does X. Name does Y." listing; em-dashes; semicolons; rhetorical questions; "the movie", "the film", "the scene shows", "the camera" mid-story; "little did they know"; meta commentary.
 
 Respond with ONLY the JSON array. No markdown fences, no headings, no trailing notes.
 
@@ -72,30 +85,46 @@ Respond with ONLY the JSON array. No markdown fences, no headings, no trailing n
 """
 
 
-# A short passage in the target voice. It is ORIGINAL writing (no movie, no
-# characters from any film) used only to demonstrate the RECAP REGISTER:
-# flowing, present-tense prose that chains what happens into full sentences,
-# opens differently each time, sums up conversations as narration, and lands a
-# light emotional beat. Models copy the ENERGY and rhythm, never the words.
-EN_VOICE_EXEMPLAR = (
-    "The signal reaches the lighthouse at midnight, a single blinking dot on "
-    "an old map. Inside, a young keeper realizes it is coming from the sea. "
-    "Wasting no time, she launches the rescue boat and heads out into the "
-    "storm. Little by little, the waves grow taller, and her mast lamp becomes "
-    "the only light for miles. When she finally reaches the source, she finds "
-    "a small raft carrying a family of lost travelers, cold but alive. The "
-    "moment they step aboard, the oldest one freezes -- he recognizes the "
-    "keeper, the daughter he left behind twenty years ago. Back on shore, the "
-    "reunion barely has time to sink in before a second dot blinks to life on "
-    "the map, and the night begins all over again."
+# Short passages in the target voice. They are ORIGINAL writing (no movie, no
+# characters from any film) used only to demonstrate the RECAP REGISTER, i.e.
+# the narration style of the reference channel: flowing present-tense prose
+# that chains several moments into one sentence, short dramatic beats between
+# them, varied narrator connectors, appositive introductions, indirect speech,
+# contractions. Models copy the ENERGY and rhythm, never the words.
+EN_EXEMPLAR_OPENING = (
+    "It all begins at a run-down carnival, where a rusty fortune-telling "
+    "machine hums to itself after closing time. Inside the glass case, a "
+    "small brass owl named Orville waits for the last visitor to leave, "
+    "because the moment the lights go out, every machine on the pier comes "
+    "alive. Wasting no time, he slips out through the coin slot and wakes the "
+    "others. Little by little, the carousel horses stretch their legs, and "
+    "the popcorn cart rolls off to patrol the boardwalk. But that night, "
+    "something is different. A new attraction has arrived while they slept, "
+    "a sleek quiz machine called Vertex, and it doesn't need any help waking "
+    "up. It turns out Vertex has been watching the carnival for weeks, and "
+    "it has already decided that the old machines are a waste of space."
+)
+
+EN_EXEMPLAR_FLOW = (
+    "Meanwhile, down at the shoreline, the crab vendor realizes the tide is "
+    "coming in faster than usual. Determined to save his stall, he ropes the "
+    "popcorn cart to the carousel and asks the horses to pull. They manage to "
+    "drag everything to higher ground just in time, but the effort leaves "
+    "them exhausted. To make matters worse, the carnival's owner has decided "
+    "to sell the pier. Hurt and disappointed, Orville begins to wonder if the "
+    "machines should just accept that their days are numbered. The brass owl "
+    "refuses to hear it. He reminds everyone that the carnival raised them, "
+    "and that a family doesn't abandon its own just because times are hard. "
+    "Thanks to that little speech, the machines agree to fight for their home."
 )
 
 EN_STYLE_BLOCK = (
     "\n\n=== NARRATIVE VOICE -- match this ENERGY and rhythm, never its words "
-    "or events ===\n" + EN_VOICE_EXEMPLAR +
-    "\n(Study how it opens sentences differently, chains cause to effect, and "
-    "sounds like someone talking. Your narration must feel equally spoken -- "
-    "never like a list of bullet points.)"
+    "or events ===\n" + EN_EXEMPLAR_OPENING + "\n\n" + EN_EXEMPLAR_FLOW +
+    "\n(Study how it opens sentences differently, chains cause to effect, "
+    "drops a short beat between long ones, and sounds like someone talking. "
+    "Your narration must feel equally spoken -- never like a list of bullet "
+    "points.)"
 )
 
 SYSTEM_POLISH = (
@@ -107,14 +136,26 @@ SYSTEM_POLISH = (
 
 POLISH_PROMPT = """Below is a DRAFT section of a movie recap, one sentence per array element, in strict story order.
 
-Rewrite it so it reads as natural spoken narration, not generated text:
-- Keep EXACTLY {n} sentences ({n} array elements). Never merge two sentences into one and never split one into two -- the video timing depends on it.
-- Keep the same events in the same order, and keep every character name and proper noun. Change the WORDS, not the story.
-- Sound like a recap narrator TALKING over footage: sentences run about 10 to 30 words and must vary in length; never start three in a row the same way.
-- Kill robotic patterns: repeated "<Name> does X. <Name> does Y." listing, generic verbs (goes, gets, has) -> concrete ones (bolts, grabs, shoves, spots).
-- Let several moments flow through one sentence when they belong to one continuous action ("She explains that technology has made its way into Bonnie's life too, and that a tablet is taking up all of her attention."); cut a new sentence when the scene or time shifts.
-- Vary openers with real-narrator connectors: Meanwhile, At the same time, Just then, Not long after, Back at, Little by little, Determined to, Excited, As it turns out, The moment..., Seeing this.
-- Present tense, third person. Never quote dialogue directly -- summarize what characters say as indirect narration ("She explains that ...", "He admits ..."). Never say "the movie", "the film", "the scene shows", "the camera". "We see" is fine occasionally.
+Rewrite it so it reads like a human recap narrator TALKING over footage, not generated text.
+
+MUST KEEP (the video timing depends on it):
+- EXACTLY {n} sentences ({n} array elements). Never merge two sentences into one and never split one into two.
+- The same events in the same order, and every character name and proper noun. Change the WORDS, not the story.
+- Roughly the same total length (within 25%), so the narration still fits its audio budget.
+
+MAKE IT SOUND LIKE A RECAP NARRATOR:
+- SENTENCE RHYTHM: chain several moments into flowing 12-40 word sentences, and between them drop short dramatic beats of 2-8 words ("Woody disagrees." / "Now they need to escape."). Never write many sentences of the same length in a row.
+- Vary openers with the connectors narrators actually use: "Meanwhile,", "At the same time,", "Just then,", "Suddenly,", "Not long after,", "A little later,", "Before long,", "The next morning,", "That night,", "Back at ...", "Little by little,", "Thanks to that,", "As it turns out,", "It turns out ...", "The moment X ..., Y ...", "The second X ..., Y ...", "Determined to ..., X ...", "Excited, X ...", "Hurt and disappointed, X ...", "To her delight, X ...", "Without anyone noticing, X ...", "Taking advantage of ..., X ...", "In the end,", "Even so,".
+- Report conversations as indirect narration ("She explains that technology has made its way into Bonnie's life too, and that a tablet is taking up all of her attention."), never quotes.
+- Use contractions (it's, she's, doesn't, can't, they're) the way a person talking does.
+- Concrete verbs (bolts, grabs, shoves, spots, tumbles) instead of generic ones (goes, gets, has).
+- Let several moments flow through one sentence when they belong to one continuous action; cut a new sentence when the scene, location, or time shifts.
+
+KILL THE AI TELLS:
+- Monotone "Name does X. Name does Y." listing and uniform sentence length.
+- Em-dashes and semicolons (use commas and full stops).
+- "the movie", "the film", "the scene shows", "the camera" mid-story; "little did they know"; "unbeknownst"; rhetorical questions to the viewer; meta commentary.
+- Starting three sentences in a row the same way.
 
 === NARRATIVE VOICE -- match this ENERGY and rhythm, never its words or events ===
 {exemplar}
@@ -249,72 +290,43 @@ def generate_script_json(
 #     makes the visual timeline strictly chronological (see recap/timeline.py).
 
 SYSTEM_RECAP_BEATS = (
-    "You are the head writer for a top-tier YouTube movie-recap channel "
-    "(the 'Movie Recaps' style). You write narration that is spoken over the "
-    "film's own footage. Never mention being an AI. Never quote dialogue directly -- turn what "
-    "characters say into narration ('She explains that...', 'He admits...'). "
-    "Never say 'the movie', 'the film', 'the scene shows' or 'the camera'. "
-    "'We see' is fine once in a while: real recap narrators use it. "
-    "Third person, present tense, active verbs, character names. "
-    "Deadpan, propulsive, lightly witty. Every sentence is a VISIBLE action. "
-    "Sound like a confident narrator TALKING over the footage, not a person "
-    "reading bullet points: vary sentence length and the way sentences open, "
-    "and let each line flow out of the one before it. Your source beats are a "
-    "factual record: describe them accurately and specifically — keep every "
-    "character name and proper noun they contain — and never invent events "
-    "that are not in the list."
+    "You are the narrator of a full-length movie recap video, the calm, "
+    "fast-moving voice heard over the film's own footage on big recap "
+    "channels. You never mention being an AI. You tell the story in the third "
+    "person, present tense, and you sound like a person TALKING, never like a "
+    "list of bullet points. Chain several moments into one flowing sentence, "
+    "drop a short dramatic beat between them, and open sentences differently "
+    "every time. Report what characters say as indirect narration ('She "
+    "explains that...', 'He admits that...') instead of quoting. Use "
+    "contractions (it's, she's, doesn't, can't) the way a narrator naturally "
+    "would. Never write 'the movie', 'the film', 'the scene shows' or 'the "
+    "camera'; 'we see' is fine once in a while. Your source beats are a "
+    "factual record: keep every character name and proper noun they contain, "
+    "describe them accurately and specifically, and never invent events that "
+    "are not in the list."
 )
 
-PROMPT_SEGMENT_JSON = """You are writing ONE SECTION of a full movie recap narration.
+PROMPT_SEGMENT_JSON = """You are writing ONE SECTION of a full movie recap narration — the voice the viewer hears over the film's footage.
 
-This section covers the part of the film from {t0} to {t1}. Below, in exact
-order, are the action beats for that stretch — the complete factual record of
-what happens there. Write the narration FROM those beats; never invent events.
+This section covers {t0} to {t1} of the film. The ACTION BEATS below are the complete factual record of what happens in that stretch. Narrate FROM the beats; never invent events.
 
-Write EXACTLY about {budget} words of narration for this section — the audio
-timing depends on it. That is roughly {nsent} sentences.
+Length: about {budget} words of narration (roughly {nsent} sentences). The audio timing depends on it.
 
-Rules:
-- Third person, PRESENT tense. Every sentence is something a viewer can SEE
-  happen ("Troy kicks the door open.", "The van slams into the barricade.").
-- Walk the section in order from its first beat to its last. Never skip an
-  entire scene and never jump backwards; where the budget cannot fit every
-  minor beat, drop only the least visual sub-steps and keep one sentence per
-  distinct scene, with the scene's key detail intact.
-- COVER THE SECTION EVENLY: spread your ~{nsent} sentences across the whole
-  {t0}→{t1} stretch — sentence 1 about its opening beats, the middle sentences
-  about the middle beats, the last about the closing beats — so every scene
-  gets narrated and no one moment hogs the section.
-- WRITE LIKE A RECAP NARRATOR TALKS, NOT LIKE A SUMMARY LIST. Real channels
-  cover several moments inside one flowing sentence: "Jessie asks Woody if
-  things are really as bad as they seem. She explains that technology has made
-  its way into Bonnie's life too, and that a tablet is taking up all of her
-  attention." Chain what belongs together; cut a new sentence when the scene,
-  location, or time shifts.
-- Sentences should run anywhere from about 10 to 30 words -- long enough to
-  flow, short enough to say in one breath -- and MUST vary in length. Never
-  write three sentences in a row with the same opener.
-- Vary how sentences open, using the connectors real recap narrators use:
-  "Wasting no time, ...", "Little by little, ...", "After ..., X ...",
-  "Determined to ..., X ...", "Meanwhile, ...", "At the same time, ...",
-  "Just then, ...", "Not long after, ...", "Back at ..., ...", "The moment
-  X happens, Y ...", "Excited, she ...", "As it turns out, ...", "Seeing
-  this, ...", "Without anyone noticing, ...".
-- Keep a visible cause -> effect thread: "So they climb onto the roof ... and
-  Jessie is shocked to discover ...". Avoid "and then / next" repetition.
-- When characters talk, sum up what they SAY as indirect narration ("She
-  explains that ...", "He admits that ...", "Woody points out that ...").
-  Never quote dialogue directly.
-- Be SPECIFIC: keep every character name and proper noun from the beats
-  ("Jessie hops onto Bullseye and rides to the twins' house", not "she goes
-  to help"). One or two proper nouns per sentence keeps it vivid.
-- Present tense, third person. Never say "the movie", "the film", "the scene
-  shows", or "the camera". "We see" is acceptable occasionally.
-- Strictly chronological; keep every character name consistent; never invent
-  events that are not in the beat list.
-- No dialogue quotes.
-- Use character names consistently.
-- Do not write an intro, outro, heading or summary. Only the action narration.
+HOW THIS NARRATOR SOUNDS (follow it exactly):
+- SENTENCE RHYTHM: chain several moments into flowing 12-40 word sentences ("She explains that technology has made its way into Bonnie's life too, and that a tablet is taking up all of her attention."), and BETWEEN the long sentences drop short dramatic beats of 2-8 words ("Woody disagrees." / "Now they need to escape." / "The reason is simple."). Never write many sentences of the same length in a row.
+- OPENERS: vary how every sentence starts, using the connectors recap narrators actually use: "Meanwhile,", "At the same time,", "Just then,", "Suddenly,", "Not long after,", "A little later,", "Before long,", "The next morning,", "That night,", "Back at ...", "Little by little,", "Thanks to that,", "As it turns out,", "It turns out ...", "The moment X ..., Y ...", "The second X ..., Y ...", "Determined to ..., X ...", "Excited, X ...", "Hurt and disappointed, X ...", "To her delight, X ...", "Without anyone noticing, X ...", "Taking advantage of ..., X ...", "In the end,", "Even so,", "Far from ..., X ...".
+- FIRST APPEARANCES: introduce a new character or object with a short appositive ("a young girl named Almond", "a tablet called Lilypad", "a gadget called SmartyPants").
+- CONVERSATIONS: never quote dialogue. Sum up what is said as indirect narration ("Jessie insists that nothing can replace a real friend, but Lilypad fires back that Bonnie already has friends.").
+- EMOTION: let the viewer feel reactions ("she begins to wonder if maybe she's the problem", "to her delight", "hurt and disappointed").
+- CONTRACTIONS: it's, she's, doesn't, can't, they're — natural spoken English.
+- Be SPECIFIC: "Jessie hops onto Bullseye and rides to the twins' house", not "she goes to help". Keep every character name and proper noun from the beats.
+
+COVERAGE RULES:
+- Walk the section strictly in order from its first beat to its last. Never jump backwards, never skip an entire scene.
+- Cover the section evenly: the first sentences about the opening beats, the middle sentences about the middle beats, the last about the closing beats — so every scene gets narrated and no one moment hogs the section.
+- Where the budget cannot fit every minor beat, drop only the least visual sub-steps and keep one sentence per distinct scene, with the scene's key detail intact.
+
+FORBIDDEN (the tells of machine-written narration): uniform sentence length; "Name does X. Name does Y." listing; three sentences starting the same way; em-dashes; semicolons; rhetorical questions to the viewer; "the movie", "the film", "the scene shows", "the camera" mid-story; "little did they know"; "unbeknownst"; meta commentary, analysis, or review talk.
 - {continuity}
 
 Respond with ONLY a JSON object in this exact shape, no markdown fences:
@@ -403,7 +415,8 @@ def _polish_section(
     ):
         return sents
     user = POLISH_PROMPT.format(
-        n=len(sents), exemplar=exemplar_block or EN_VOICE_EXEMPLAR,
+        n=len(sents),
+        exemplar=exemplar_block or (EN_EXEMPLAR_OPENING + "\n\n" + EN_EXEMPLAR_FLOW),
         draft=json.dumps(sents, ensure_ascii=False),
     )
     try:
@@ -622,6 +635,7 @@ def generate_segmented_script(
     words_per_minute: int = 150,
     progress=None,
     lang_name: str = "English",
+    sign_off: bool = True,
 ) -> list[dict]:
     """Write the recap chunk-by-chunk, in film order, hitting the word target.
 
@@ -633,6 +647,10 @@ def generate_segmented_script(
     produce its sentences in that language, so a native recap (Arabic/Spanish
     written straight from that language's subtitles) never leaks English prose.
     English stays byte-identical to before (no instruction appended).
+
+    ``sign_off`` — append the channel outro line ("If you enjoyed the video,
+    don't forget to leave a like...") after the story ends, the way real recap
+    channels close every video. Skipped when the writer already ended with one.
 
     Returns ``[{"sentence", "film_start", "film_end"}]``: every sentence knows
     which moment of film it describes (see ``_anchor_windows``), so the visual
@@ -675,13 +693,38 @@ def generate_segmented_script(
         nsent = max(3, int(round(budget / 17)))
         t0, t1 = float(c.get("start", 0.0)), float(c.get("end", 0.0))
         beats = c.get("beats") or []
+        is_first, is_last = pos == 0, pos == len(usable) - 1
 
-        continuity = (
-            f'This section continues directly from: "{tail}" — pick up from there '
-            "without repeating it."
-            if tail
-            else "This is the OPENING of the recap. Start with the very first thing "
-            "that happens on screen. Do not write a title or a hook."
+        # Section hand-off instructions. The OPENING starts inside the film's
+        # first scene (no title/hook), the FINAL section lands the channel's
+        # ending formula, and everything in between picks up from the previous
+        # section's last line without repeating it.
+        parts: list[str] = []
+        if is_first:
+            parts.append(
+                "This is the OPENING of the recap. Start inside the film's "
+                "very first scene, the way recap channels open (\"It all "
+                "begins ...\" is a typical first move). No title, no hook, no "
+                "channel intro — straight into the story."
+            )
+        if tail:
+            parts.append(
+                f'This section continues directly from: "{tail}" — pick up '
+                "from there without repeating it."
+            )
+        if is_last:
+            parts.append(
+                "This is also the FINAL section of the recap: land the "
+                "story's last beat, then close with the channel's ending "
+                "formula — the final sentence should end along the lines of "
+                "\"... and that's how the movie comes to an end.\" If the "
+                "beats include a post-credits scene, narrate it just before "
+                "that closing line (\"But there's still a post-credit "
+                "scene.\"). Do NOT ask viewers to like or subscribe — the "
+                "outro is added separately."
+            )
+        continuity = "\n".join(parts) if parts else (
+            "Continue the story in order."
         )
 
         user = PROMPT_SEGMENT_JSON.format(
@@ -755,7 +798,69 @@ def generate_segmented_script(
         if progress:
             progress(pos + 1, len(usable), count_words(" ".join(sents)), budget)
 
+    _append_sign_off(out, lang_name=lang_name, enabled=sign_off)
+
     return out
+
+
+# The channel outro real recap videos close with, per narration language.
+# Appended deterministically (never left to the model) so every video ends
+# the same way the reference channel's do. Set narration.sign_off: false
+# (or RECAP_SIGN_OFF=0) to skip it.
+SIGN_OFF_LINES: dict[str, str] = {
+    "en": (
+        "If you enjoyed the video, don't forget to leave a like, subscribe, "
+        "and turn on notifications. That's all for today. See you next time."
+    ),
+    "zh": (
+        "如果你喜欢这个视频，别忘了点赞、订阅并打开通知。"
+        "今天就到这里，我们下次再见。"
+    ),
+    "ar": (
+        "إذا استمتعت بالفيديو، لا تنسَ الإعجاب والاشتراك وتفعيل التنبيهات. "
+        "هذا كل شيء لليوم، نراكم في المرة القادمة."
+    ),
+    "es": (
+        "Si te gustó el video, no olvides darle like, suscribirte y activar "
+        "las notificaciones. Eso es todo por hoy. Nos vemos la próxima vez."
+    ),
+}
+
+_SIGN_OFF_TELLS = (
+    "subscribe", "see you next time", "see you in the next",
+    "like and subscribe", "leave a like", "next time",
+)
+
+
+def _append_sign_off(segments: list[dict], *, lang_name: str, enabled: bool) -> None:
+    """Close the recap with the channel outro, like the reference videos.
+
+    The outro reuses the last beat's film window (the closing moments of the
+    film stay on screen under it). Skipped when the writer already produced
+    something outro-like, so we never double up.
+    """
+    if not enabled or not segments:
+        return
+    from . import languages as _langs
+
+    code = "en"
+    key = (lang_name or "").strip().lower()
+    for c in _langs.SUPPORTED:
+        if key == _langs.NAMES.get(c, "").lower() or key.startswith(c):
+            code = c
+            break
+    line = SIGN_OFF_LINES.get(code, SIGN_OFF_LINES["en"])
+    recent = " ".join(s["sentence"] for s in segments[-3:]).lower()
+    if any(tell in recent for tell in _SIGN_OFF_TELLS):
+        return  # the writer already closed with an outro
+    last = segments[-1]
+    segments.append(
+        {
+            "sentence": line,
+            "film_start": last.get("film_start", 0.0),
+            "film_end": last.get("film_end", 0.0),
+        }
+    )
 
 
 def render_prompt(notes: str, target: int, mn: int, mx: int) -> str:
@@ -763,30 +868,38 @@ def render_prompt(notes: str, target: int, mn: int, mx: int) -> str:
     return f"{instructions}\n\n=== PLOT NOTES / SUMMARY TO RECAP ===\n\n{notes}\n\n=== END PLOT NOTES ===\n"
 
 
-DIALOGUE_PRESET = """You are the narrator of a fast-paced YouTube "movie recap" channel.
-Your job is to NARRATE the movie — tell the story as it happens, quickly — the way
-recap channels talk over a montage of clips. You are NOT reviewing, explaining, or
-describing the film.
+DIALOGUE_PRESET = """You are the narrator of a fast-paced, full-length YouTube movie recap \
+channel. Your job is to NARRATE the movie — tell the story as it happens, over a \
+montage of the film's own clips — the way recap channels talk over footage. You \
+are NOT reviewing, explaining, or describing the film.
 
-Below is the TIMESTAMPED DIALOGUE / TRANSCRIPT of a film (what the characters say,
-with timecodes). Use it, plus any plot summary, to write a single English narration
-that retells the ENTIRE story from opening scene to ending, as one continuous,
-fast-moving, present-tense tale.
+Below is the TIMESTAMPED DIALOGUE / TRANSCRIPT of a film (what the characters \
+say, with timecodes). Use it, plus any plot summary, to write a single English \
+narration that retells the ENTIRE story from opening scene to ending, as one \
+continuous, present-tense tale.
 
-Rules:
-- NARRATE events, don't describe them. Every line is something that HAPPENS:
-  "Woody shoves Buzz off the bed." "The van speeds toward the airport."
-- Move fast. Chain actions back to back so the story races forward. No filler,
-  no scene-setting paragraphs, no lingering.
-- Present tense throughout ("Andy's room comes alive...").
-- Strict chronological order, covering the whole plot including the ending.
-- NEVER say "the movie", "the film", "the show", "we see", "the scene shows",
-  and never analyze themes or comment on the story. Just tell it.
-- Retell the dialogue as action; do not quote it verbatim.
-- One complete sentence per line (roughly 8 to 20 words). Short, punchy beats.
-- Use consistent character names.
+How the narration must sound (the recap-channel register):
+- SENTENCE RHYTHM: chain several moments into flowing 12-40 word sentences, \
+and between them drop short dramatic beats of 2-8 words ("Woody disagrees."). \
+Never write many sentences of the same length in a row.
+- Vary every opener with real narrator connectors: "Meanwhile,", "At the same \
+time,", "Just then,", "Suddenly,", "Not long after,", "A little later,", \
+"Before long,", "The next morning,", "That night,", "Back at ...", "Little by \
+little,", "Thanks to that,", "As it turns out,", "The moment X ..., Y ...", \
+"Determined to ..., X ...", "Without anyone noticing, X ...".
+- Introduce new characters/objects with a short appositive ("a mare named \
+Almond", "a tablet called Lilypad").
+- Report conversations as indirect narration ("She explains that...", "He \
+admits that..."); never quote dialogue verbatim.
+- Use contractions (it's, she's, doesn't, can't) the way a person talking does.
+- Move fast, keep a visible cause-to-effect thread, no filler.
+- Present tense throughout, strictly chronological, covering the whole plot \
+including the ending. Use consistent character names.
+- Never say "the movie", "the film", "the scene shows", "the camera"; "we see" \
+is fine occasionally. No analysis, no themes, no review talk. No em-dashes, no \
+semicolons, no rhetorical questions to the viewer.
 - Total roughly {target} words (between {mn} and {mx}).
-- No heading, title, or trailing notes. Only the narration lines.
+- One sentence per line. No heading, title, or trailing notes.
 """
 
 

@@ -289,6 +289,60 @@ is ElevenLabs or a local narrator; no free TTS matches a paid neural voice.
 | `RECAP_ALIGN` | `1` | align each English line to the beat it narrates |
 | `RECAP_ANCHOR_LEAD` | `0.8` | seconds of footage before a line's beat (raise to 1.5–2 if cuts feel too abrupt) |
 | `RECAP_ANCHOR_TAIL` | `6.0` | max follow-through footage per line |
+| `RECAP_WHISPER_ALIGN` | `1` | whisper-measure the narration audio; see below |
+| `RECAP_SIGN_OFF` | `1` | end with the channel outro line |
+
+### 🎙️ The reference-channel register (script style)
+
+The narration prompts were rewritten against the *actual* transcript style of
+the reference video (Fantastic Recaps): **flowing sentences that chain several
+moments (12–40 words), punctuated by short dramatic beats of 2–8 words**
+("Woody disagrees."), the narrator's real connectors ("Meanwhile,", "Just
+then,", "Thanks to that,", "As it turns out,", "Not long after,", "A little
+later,"), appositive introductions for new characters/objects ("a mare named
+Almond", "a tablet called Lilypad"), conversations reported as indirect
+speech ("She explains that..."), and contractions. Two original voice
+exemplars in that exact rhythm sit inside the writer and polish prompts so the
+model copies the *energy*, never the words. Explicitly banned (the tells of
+machine narration): uniform sentence length, "Name does X. Name does Y."
+listing, em-dashes, semicolons, "little did they know", rhetorical questions,
+and meta commentary.
+
+Structural touches that match how those videos open and close:
+
+* the first section starts *inside the film's first scene* ("It all begins
+  ..."), never with a title or a channel hook;
+* the final section lands the ending formula ("... and that's how the movie
+  comes to an end."), narrating a post-credits scene just before it;
+* a deterministic **channel outro** ("If you enjoyed the video, don't forget
+  to leave a like, subscribe, and turn on notifications. That's all for
+  today. See you next time.") is appended in every language — never left to
+  the model, never duplicated. Turn it off with `narration.sign_off: false`
+  or `RECAP_SIGN_OFF=0`.
+
+### 🔄 Narration ↔ visual sync (whisper alignment + word-locked cuts)
+
+Two mechanisms keep the picture glued to the voice, exactly like the reference
+edits:
+
+**1. `narration.whisper_align` (default on).** After TTS, the *generated*
+narration audio is transcribed once more with faster-whisper and every
+sentence cue (and every word) is re-anchored to what is actually spoken.
+edge-tts already reports word boundaries; this makes cue times exact for **any**
+provider — OpenAI and ElevenLabs return a bare mp3, and the old fallback
+*guessed* their cue times proportionally (seconds of drift). The pass is
+cached per audio content hash (`_work/<lang>.whisper.json`), so re-renders are
+free. Set `narration.whisper_align_model` (e.g. `"base"`) for a faster pass,
+or disable with `RECAP_WHISPER_ALIGN=0`.
+
+**2. `timeline.cut_on_words` (default on).** When word timings exist, the
+micro-shots inside one sentence are no longer evenly spaced: cut points are
+placed **on measured word boundaries** — after commas, before "and / but /
+while / meanwhile" — so the picture switches at the exact moment the narrator
+moves to the next clause, the way a human editor cuts to the beat of the
+voice. Shot lengths still respect `min_cut_seconds`, durations still sum to
+the audio span exactly, and without word timings it silently falls back to the
+even split.
 
 * Subtitles burned on the clip use `subtitles.lang_font.ar` (default `Arial`,
   shaped Arabic) — swap to any installed Arabic font you prefer.
@@ -520,6 +574,7 @@ model weights cache in `./cache` (Whisper / static-ffmpeg).
 python tests/test_timeline_sync.py       # length lock + chronology regressions
 python tests/test_semantic_engine.py     # chunking, JSON parsing (legacy matcher)
 python tests/test_engine_integration.py  # full Steps A-F orchestration
+python tests/test_narration_sync.py      # whisper alignment, word-locked cuts, outro
 ```
 
 ## 🎛️ Tuning the timeline (Step D)
@@ -533,5 +588,8 @@ After a run, inspect `output/_work/beats_<lang>.json`: every beat carries its
 * `max_cuts_per_beat` — how many micro-shots one long sentence may split into.
 * `min_cut_seconds` — never flash a shot shorter than this.
 * `pre_roll` — start each shot slightly before its narration moment.
+* `cut_on_words` — switch shots on measured word boundaries inside a sentence
+  (needs `narration.whisper_align`, or edge-tts word boundaries); `false`
+  gives the old even split.
 * `semantic.clip.mode` — `reencode` (frame-exact, default) vs `copy` (fast
   preview; snaps to keyframes and reintroduces drift).
