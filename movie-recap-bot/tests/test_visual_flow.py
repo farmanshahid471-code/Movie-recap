@@ -490,6 +490,121 @@ def test_overdelivered_section_still_plays_at_1x() -> None:
           f"(untrimmed: {stats.get('slowed_groups')} slowed groups)")
 
 
+def test_condense_section_tightens_story() -> None:
+    """Over-delivered sections are CONDENSED (same story, tighter wording),
+    not sentence-dropped -- dropping middles is only the backstop."""
+    import json
+    from recap import script as script_mod
+
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    over = [s] * 20  # 240 words
+    condensed = ["The pilot wakes in pain in a forest.",
+                 "His crashed plane burns behind him.",
+                 "An armed stranger finds the wreck.",
+                 "The pilot grabs his gun and passes out."]  # 33 words
+    calls = []
+
+    def fake_complete(provider, model, system, user, **kw):
+        calls.append(user)
+        return json.dumps({"sentences": condensed})
+
+    orig = script_mod.llm.complete
+    script_mod.llm.complete = fake_complete
+    try:
+        out = script_mod._condense_section(
+            {"provider": "deepseek", "model": "x"}, over, 150, ["Troy"])
+    finally:
+        script_mod.llm.complete = orig
+    assert out == condensed, "in-budget rewrite accepted verbatim"
+    assert "AT MOST 150 words" in calls[0]
+    assert "SAME order" in calls[0], "must demand the causal chain be kept"
+    assert "Troy" in calls[0], "names must be required in the rewrite"
+
+    # rewrite that still overshoots -> None (caller falls back to the trim)
+    script_mod.llm.complete = lambda *a, **k: json.dumps({"sentences": over})
+    try:
+        assert script_mod._condense_section(
+            {"provider": "deepseek", "model": "x"}, over, 150, []) is None
+    finally:
+        script_mod.llm.complete = orig
+
+    # provider blow-up -> None, never an exception into the pipeline
+    def boom(*a, **k):
+        raise RuntimeError("api down")
+    script_mod.llm.complete = boom
+    try:
+        assert script_mod._condense_section(
+            {"provider": "deepseek", "model": "x"}, over, 150, []) is None
+    finally:
+        script_mod.llm.complete = orig
+    print("ok: condense pass accepts in-budget rewrites, rejects "
+          "overshoots, survives api failures")
+
+
+def test_overdelivery_is_condensed_not_dropped() -> None:
+    """Full loop: the writer returns 240 words for a 150-word footage
+    budget; the pipeline makes ONE condense call (not a mechanical drop),
+    and the condensed section -- story kept -- is what reaches the
+    timeline, windows attached."""
+    import json
+    from recap import script as script_mod
+
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    over = [s] * 20                                     # 240 words
+    condensed = [                                       # 120 words, ordered
+        "The pilot wakes up hurt in a dark forest near his burning plane.",
+        "A stranger with a gun inspects the wreck and finds him.",
+        "The pilot grabs the barrel and both men fall hard.",
+        "He drags himself away and hides in the trees.",
+        "By morning the whole army is tracking his trail.",
+        "He crosses a frozen river to throw the dogs off.",
+        "A village family hides him inside their barn.",
+        "The soldiers search the village house by house.",
+        "He slips out at night and steals a truck.",
+        "The chase ends at the border bridge at dawn.",
+    ]
+    assert count_words(" ".join(condensed)) == 96
+    calls = []
+
+    def fake_complete(provider, model, system, user, **kw):
+        calls.append(user)
+        if len(calls) == 1:
+            return json.dumps({"sentences": over})
+        return json.dumps({"sentences": condensed})
+
+    chunk = {
+        "index": 0, "start": 1000.0, "end": 1150.0,
+        "summary": "A pilot is shot down and hunted through the woods.",
+        "beats": [{"t": 1000.0 + i * 2.4, "text": f"beat {i}"}
+                  for i in range(63)],
+    }
+    orig = script_mod.llm.complete
+    script_mod.llm.complete = fake_complete
+    try:
+        out = script_mod.generate_segmented_script(
+            [chunk], {"provider": "deepseek", "model": "x"}, 200,
+            words_per_minute=150, lang_name="Spanish",
+            sign_off=False, visual_match=True,
+        )
+    finally:
+        script_mod.llm.complete = orig
+
+    assert len(calls) == 2, ("one write + one condense, no retries: "
+                             f"got {len(calls)} calls")
+    assert "AT MOST 150 words" in calls[1], "second call is the condense"
+    assert [o["sentence"] for o in out] == condensed, \
+        "the condensed story (not the dropped-middles version) is the script"
+    assert all("film_start" in o and "film_end" in o for o in out)
+    assert all(o["film_end"] > o["film_start"] for o in out)
+    prev = -1.0
+    for o in out:
+        assert o["film_start"] >= prev - 1e-9, "windows stay forward"
+        prev = o["film_start"]
+    print(f"ok: 240-word over-delivery -> one condense call -> "
+          f"{count_words(' '.join(condensed))}-word ordered story with "
+          "windows attached")
+
+
 if __name__ == "__main__":
     test_no_replay_same_window()
     test_no_replay_overlapping_windows()
@@ -507,4 +622,6 @@ if __name__ == "__main__":
     test_matched_script_plays_at_1x()
     test_fit_section_to_footage()
     test_overdelivered_section_still_plays_at_1x()
+    test_condense_section_tightens_story()
+    test_overdelivery_is_condensed_not_dropped()
     print("\nALL VISUAL-FLOW TESTS PASSED")

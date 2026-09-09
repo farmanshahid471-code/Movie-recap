@@ -400,10 +400,14 @@ normal speed from the first cut to the last — the narration and the picture
 advance in lockstep, and neither slow motion nor a held frame is ever *needed*
 to keep them together. And the budget is **enforced, not requested**: if the
 writer over-delivers (LLMs routinely return 1.5–2× their word budget, and the
-polish pass can add ~30% more), the section is trimmed back to what its
-footage can show — first/last sentences and name-bearing lines are kept, and
-the trim is logged (`writer returned 260 words for a 150-word footage
-budget — trimmed …`). This is what keeps the narration from running ahead of
+polish pass can add ~30% more), the section is first sent back for one
+**condense pass** — rewrite the same story beats, same order, tighter wording,
+the way an editor shortens a paragraph (no jumps in the causal chain) — and
+only if that fails is it mechanically trimmed to fit (least-essential middle
+sentences; continuity ends and name-bearing lines kept). Every adjustment is
+logged (`writer returned 260 words for a 150-word footage budget — condensed
+to 148 words (story kept)`). This is what keeps the narration from running
+ahead of
 the picture on dialogue-dense sections. (For a typical movie this is far from
 binding — a 17-minute recap of a 2-hour film uses ~15% of the film time — it
 matters for dense films or long targets, where the budget now trims the

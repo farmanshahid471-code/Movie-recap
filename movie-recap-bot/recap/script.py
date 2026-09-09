@@ -330,7 +330,7 @@ PROMPT_SEGMENT_JSON = """You are writing ONE SECTION of a full movie recap narra
 
 This section covers {t0} to {t1} of the film. The ACTION BEATS below are the complete factual record of what happens in that stretch. Narrate FROM the beats; never invent events.
 
-Length: about {budget} words of narration (roughly {nsent} sentences). The audio timing depends on it.
+Length: about {budget} words of narration (roughly {nsent} sentences). This is a HARD CEILING, not an estimate — the section's footage only has room for {budget} words at normal playback speed, and a longer section visibly breaks sync with the picture. Never exceed it; if beats don't fit, tighten the wording instead.
 
 HOW THIS NARRATOR SOUNDS (follow it exactly):
 - SENTENCE RHYTHM: chain several moments into flowing 12-40 word sentences ("She explains that technology has made its way into Bonnie's life too, and that a tablet is taking up all of her attention."), and BETWEEN the long sentences drop short dramatic beats of 2-8 words ("Woody disagrees." / "Now they need to escape." / "The reason is simple."). Never write many sentences of the same length in a row.
@@ -919,6 +919,63 @@ def _fit_section_to_footage(
     return keep
 
 
+def _condense_section(
+    cfg_llm: dict,
+    sents: list[str],
+    cap: int,
+    names: list[str],
+) -> list[str] | None:
+    """Rewrite an over-delivered section to fit its footage budget WITHOUT
+    losing the story -- the storytelling-safe form of the visual-match trim.
+
+    Dropping whole middle sentences (the backstop in
+    :func:`_fit_section_to_footage`) can leave jumps in the causal chain.
+    This instead asks the writer to TIGHTEN the same section: same beats,
+    same order, merged sentences, shorter phrasing. Returns ``None`` when
+    the call fails or the rewrite still overshoots, so the caller can fall
+    back to the mechanical trim.
+    """
+    if not sents:
+        return None
+    names_line = (
+        "Keep every one of these names: " + ", ".join(names) + "."
+        if names else ""
+    )
+    user = (
+        "You wrote this section of recap narration:\n\n"
+        + "\n".join(f"- {s}" for s in sents)
+        + f"\n\nBut the film footage behind this section only has room for "
+        f"about {cap} words at normal playback speed. Rewrite the section "
+        f"as AT MOST {cap} words:\n"
+        "- SAME story beats, SAME order, SAME cause-and-effect -- the "
+        "viewer must be able to follow the chain with no jumps\n"
+        "- MERGE and TIGHTEN sentences (that is how an editor shortens a "
+        "paragraph), do not simply delete story beats\n"
+        "- keep the section's opening and ending meaning (the surrounding "
+        "sections hand off to them)\n"
+        + names_line
+        + '\n\nRespond with ONLY a JSON object: {"sentences": ["...", ...]}'
+    )
+    try:
+        raw = llm.complete(
+            cfg_llm.get("provider", ""),
+            cfg_llm.get("model", ""),
+            SYSTEM_RECAP_BEATS,
+            user,
+            base_url=cfg_llm.get("base_url"),
+            json_mode=True,
+            max_tokens=_out_tokens_for_words(cap),
+        )
+        new = _parse_segment(raw)
+    except Exception:
+        return None
+    if not new or len(new) < 2:
+        return None
+    if count_words(" ".join(new)) > cap:
+        return None
+    return new
+
+
 def generate_segmented_script(
     chunk_summaries: list[dict],
     cfg_llm: dict,
@@ -1131,19 +1188,32 @@ def generate_segmented_script(
         # suggestion. Writers routinely over-deliver and the polish pass may
         # add ~30% more words on top -- an over-length section is exactly
         # what makes every window shorter than its sentence, forcing slow
-        # motion: the narration then runs ahead of the picture. Trim the
-        # section to what its footage can show at 1x.
+        # motion: the narration then runs ahead of the picture. First ask
+        # the writer to CONDENSE the section (same story, tighter wording --
+        # no jumps in the causal chain); only if that fails, mechanically
+        # trim the least-essential middle sentences as a backstop.
         if visual_match and sents:
             _cap = max(int(cap_words[pos]), 40)
-            _fitted = _fit_section_to_footage(sents, _cap, names)
-            if len(_fitted) != len(sents):
-                print(f"    ... section {pos + 1}/{len(usable)}: writer "
-                      f"returned {count_words(' '.join(sents))} words for a "
-                      f"{_cap}-word footage budget -- trimmed to "
-                      f"{len(_fitted)} sentences "
-                      f"({count_words(' '.join(_fitted))} words) so it "
-                      "plays at 1x")
-                sents = _fitted
+            if count_words(" ".join(sents)) > _cap:
+                _got = count_words(" ".join(sents))
+                _fitted = _condense_section(cfg_llm, sents, _cap, names)
+                if _fitted is not None:
+                    print(f"    ... section {pos + 1}/{len(usable)}: writer "
+                          f"returned {_got} words for a {_cap}-word footage "
+                          f"budget -- condensed to "
+                          f"{count_words(' '.join(_fitted))} words (story "
+                          "kept) so it plays at 1x")
+                    sents = _fitted
+                else:
+                    _fitted = _fit_section_to_footage(sents, _cap, names)
+                    if len(_fitted) != len(sents):
+                        print(f"    ... section {pos + 1}/{len(usable)}: "
+                              f"writer returned {_got} words for a "
+                              f"{_cap}-word footage budget -- trimmed to "
+                              f"{len(_fitted)} sentences "
+                              f"({count_words(' '.join(_fitted))} words) "
+                              "so it plays at 1x")
+                        sents = _fitted
 
         # Anchor each sentence to the film moment(s) it narrates (beat
         # timecodes) instead of giving the whole chunk to every sentence.

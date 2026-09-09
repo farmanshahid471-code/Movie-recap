@@ -48,9 +48,10 @@ _DEFAULTS: dict[str, Any] = {
         # VISUAL MATCH: size each section's narration to the film time it
         # covers (instead of by beat density), cap dense sections at what
         # their footage can show at 1x, pace sentence anchors so every
-        # sentence's window is at least as long as the sentence, and
-        # hard-trim sections the writer over-delivers (the budget is a
-        # ceiling, not a suggestion). This is what lets the whole recap
+        # sentence's window is at least as long as the sentence, and fit
+        # sections the writer over-delivers (the budget is a ceiling, not
+        # a suggestion): one condense rewrite that keeps the story, then a
+        # mechanical trim only as the backstop. This is what lets the recap
         # play at normal speed -- no slow motion, no frozen frames (those
         # remain only as a safety net).
         "visual_match": True,
