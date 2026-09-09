@@ -14,6 +14,7 @@ Run from the movie-recap-bot folder:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -28,6 +29,20 @@ from recap.tts import TimedCue  # noqa: E402
 
 
 class _FakeTTS:
+    """Narration with realistic silent gaps between sentences.
+
+    12 sentences x 1.0s speech + 0.2s gaps = 13.2s of speech but a 14.2s file
+    (there is a 1.0s tail of silence). The old pipeline sized the video from
+    the 13.2s and let `-shortest` cut the rest; the whole point of the fix is
+    that the render must cover the full span.
+    """
+
+    speech = 1.0
+    gap = 0.2
+    n_lines = 12
+    # last cue ends at (n-1)*1.2 + 1.0, plus a 1.0s tail of silence
+    audio_span = (n_lines - 1) * (speech + gap) + speech + 1.0
+
     def __init__(self):
         self.n = 0
 
@@ -37,8 +52,8 @@ class _FakeTTS:
         cues = []
         t = 0.0
         for s in sentences:
-            cues.append(TimedCue(s, t, t + 1.0))
-            t += 1.2
+            cues.append(TimedCue(s, t, t + self.speech))
+            t += self.speech + self.gap
         return cues
 
 
@@ -70,27 +85,14 @@ def _install_stubs():
     _save(pipeline.dialogue, "extract_dialogue")
     _save(pipeline.summarize, "summarize_chunks")
     _save(pipeline.script, "generate_script_json")
-    _save(pipeline.match, "map_beats")
-    _save(pipeline.match, "Embedder")
+    _save(pipeline.script, "generate_segmented_script")
     _save(pipeline.llm, "verify_model")
     _save(pipeline.tts, "make_provider")
 
-    pipeline.llm.verify_model = lambda cfg_llm: None  # no real Ollama in tests
+    pipeline.llm.verify_model = lambda cfg_llm: None  # no real API call in tests
 
-    class _DummyEmbedder:
-        dim = 384
-
-        def __init__(self, model_name="", device="cpu"):
-            pass
-
-        def encode(self, texts):
-            import numpy as np
-
-            return np.zeros((max(len(texts), 1), self.dim), dtype=np.float32)
-
-    pipeline.match.Embedder = _DummyEmbedder
-    _save(pipeline.clip, "build_visual_from_windows")
-    _save(pipeline.video, "burn_and_mux")
+    _save(pipeline.clip, "build_locked_visual")
+    _save(pipeline.video, "burn_and_mux_locked")
     _save(pipeline, "probe_duration")
 
     pipeline.dialogue.extract_dialogue = lambda *a, **k: [
@@ -103,34 +105,57 @@ def _install_stubs():
     ]
     pipeline.script.generate_script_json = lambda summary, cfg, target, mn, mx: list(SENTENCES)
 
-    def _map_beats(sentences, cues, embedder, store, **k):
-        return [
-            {"index": i, "sentence": s, "cue_idx": i, "start": 10.0 + i * 60.0,
-             "end": 10.0 + i * 60.0 + 6.0, "score": 0.8,
-             "source_text": cues[i]["text"], "fallback": False}
-            for i, s in enumerate(sentences)
-        ]
+    def _segmented(chunk_summaries, cfg_llm, target, **k):
+        """Spread the fixture sentences over the film chunks, in order."""
+        n = max(len(chunk_summaries), 1)
+        out = []
+        for i, s in enumerate(SENTENCES):
+            c = chunk_summaries[min(i * n // len(SENTENCES), n - 1)]
+            out.append({"sentence": s, "film_start": float(c["start"]),
+                        "film_end": float(c["end"])})
+        return out
 
-    pipeline.match.map_beats = _map_beats
+    pipeline.script.generate_segmented_script = _segmented
     pipeline.tts.make_provider = lambda *a, **k: _FakeTTS()
 
-    def _visual(movie, windows, workdir, cfg_video, mode="copy"):
+    # Record what the timeline asked for so the test can assert the A/V lock.
+    RECORDED = {}
+
+    def _visual(movie, cuts, workdir, cfg_video, audio_span, mode="reencode"):
         workdir = Path(workdir)
         workdir.mkdir(parents=True, exist_ok=True)
+        RECORDED["cuts"] = list(cuts)
+        RECORDED["audio_span"] = audio_span
         out = workdir / "visual.mp4"
         out.write_bytes(b"fakebasevideo")
         return out
 
-    pipeline.clip.build_visual_from_windows = _visual
+    pipeline.clip.build_locked_visual = _visual
 
-    def _burn(base, narration, ass, out_mp4, cfg_video):
+    def _burn(base, narration, ass, out_mp4, cfg_video, duration=None):
+        RECORDED["mux_duration"] = duration
         out_mp4 = Path(out_mp4)
         out_mp4.parent.mkdir(parents=True, exist_ok=True)
         out_mp4.write_bytes(Path(base).read_bytes() + b"muxed")
         return out_mp4
 
-    pipeline.video.burn_and_mux = _burn
-    pipeline.probe_duration = lambda p: 600.0  # movie + outputs
+    pipeline.video.burn_and_mux_locked = _burn
+    def _probe(p):
+        """Realistic per-file durations.
+
+        The mp3 must report the FULL narration span (speech + the silent gaps
+        between sentences), because that is precisely the number the old
+        pipeline ignored when it sized the visual track.
+        """
+        name = Path(p).name
+        if name.endswith(".mp3"):
+            return _FakeTTS.audio_span
+        if name.endswith(".mp4") and "e2e_" in name:
+            return _FakeTTS.audio_span  # rendered output == narration
+        return 600.0  # the source film
+
+    pipeline.probe_duration = _probe
+    _install_stubs.recorded = RECORDED
 
     def _restore():
         for (mod, name), fn in saved.items():
@@ -144,7 +169,10 @@ def test_full_semantic_flow() -> None:
     movie = tmp / "film.mp4"
     movie.write_bytes(b"\x00\x00\x00\x18ftypmp42")  # exists for Path checks
 
+    os.environ.setdefault("DEEPSEEK_API_KEY", "test-key-not-used")
     cfg = load_config()
+    cfg["llm"] = {"provider": "deepseek", "model": "deepseek-chat",
+                  "base_url": "https://api.deepseek.com/v1"}
     out = tmp / "out"
     out.mkdir(parents=True, exist_ok=True)
     cfg["project"]["_out"] = out
@@ -167,20 +195,46 @@ def test_full_semantic_flow() -> None:
     assert (wd / "transcript.json").exists()
     assert (wd / "script" / "script_en.json").exists()
     assert (wd / "script" / "script_en.txt").exists()
-    assert (wd / "beats.json").exists()
+    assert (wd / "beats_en.json").exists()
     assert (wd / "en.mp3").exists()
     assert (wd / "en.srt").exists() and (wd / "en.ass").exists()
     assert (wd / "en.timing.json").exists()
-    # semantic beat mapping wired the real code path
-    beats = json.loads((wd / "beats.json").read_text(encoding="utf-8"))
-    assert beats and not beats[0]["fallback"]
+    # --- the chronological timeline ran for real (only I/O was stubbed) ---
+    beats = json.loads((wd / "beats_en.json").read_text(encoding="utf-8"))
+    assert beats, "timeline produced no beats"
+    starts = [b["film_start"] for b in beats]
+    assert starts == sorted(starts), f"beats must be chronological, got {starts}"
+
+    rec = _install_stubs.recorded
+    span = rec["audio_span"]
+    cut_total = sum(d for _, d in rec["cuts"])
+    assert abs(cut_total - span) < 0.5, (
+        f"BUG 1: visual {cut_total:.2f}s must equal narration {span:.2f}s"
+    )
+    assert abs(rec["mux_duration"] - span) < 1e-6, (
+        "mux must be given an explicit duration, never -shortest"
+    )
+    assert len(rec["cuts"]) >= len(beats), "expected micro-cuts per beat"
+
+    # The lock must cover the gaps AND the trailing silence, not just speech.
+    spoken = _FakeTTS.n_lines * _FakeTTS.speech
+    assert span > spoken, (
+        f"narration span {span} should exceed pure speech {spoken}"
+    )
+    assert cut_total > spoken, (
+        f"BUG 1: video {cut_total:.2f}s only covers the spoken {spoken:.2f}s — "
+        "the silent gaps were dropped again and -shortest would truncate."
+    )
     sentences = json.loads((wd / "script" / "script_en.json").read_text(encoding="utf-8"))
     assert len(sentences) == len(SENTENCES)
     # .txt sidecar is line-aligned
     txt_lines = [l for l in (wd / "script" / "script_en.txt").read_text(encoding="utf-8").splitlines() if l.strip()]
     assert len(txt_lines) == len(sentences)
     print("  outputs written:", [p.name for p in Path(out).glob('*.mp4')])
-    print("  intermediates: script_en.json, beats.json, en.mp3, en.srt, en.ass, en.timing.json OK")
+    print(f"  A/V lock: {len(rec['cuts'])} cuts = {cut_total:.2f}s "
+          f"== narration {span:.2f}s")
+    print("  intermediates: script_en.json, beats_en.json, en.mp3, en.srt, "
+          "en.ass, en.timing.json OK")
 
 
 if __name__ == "__main__":

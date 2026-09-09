@@ -16,7 +16,8 @@ Two ways to find the cuts:
      shot, and is what runs out of the box.
 
 Either way the narration stays the master clock: the montage is cut to be at
-least as long as the narration and `-shortest` trims it exactly.
+least as long as the narration, then muxed with an explicit duration (never
+`-shortest`), so the narration always fits.
 """
 from __future__ import annotations
 

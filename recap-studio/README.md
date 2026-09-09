@@ -1,11 +1,19 @@
-# 🎬 Recap Studio 🇬🇧/🇨🇳 — Control Panel
+# 🎬 Recap Studio 🇬🇧/🇨🇳/🇸🇦/🇲🇽 — Control Panel
 
-A self-contained web control panel that produces **two recap clips per movie**:
+A self-contained web control panel that produces **recap clips per movie in the
+languages you tick** (English, 中文, العربية, Español):
 
-| Clip | Dubbing | Burned-in subtitles |
-|------|---------|---------------------|
-| `recap_en.mp4` | English | English |
-| `recap_zh.mp4` | Mandarin 普通话 | Simplified Chinese 简体中文 |
+| Clip | Dubbing | Burned-in subtitles | Written… |
+|------|---------|---------------------|----------|
+| `recap_en.mp4` | English | English | from the movie's own dialogue |
+| `recap_zh.mp4` | Mandarin 普通话 | Simplified Chinese 简体中文 | natively from a `movie.zh.srt`, else translated from the EN recap |
+| `recap_ar.mp4` | Arabic (MSA) | العربية | natively from a `movie.ar.srt` you provide, else translated from the EN recap |
+| `recap_es.mp4` | Spanish (LatAm) | Español | natively from a `movie.es.srt` you provide, else translated from the EN recap |
+
+Tick the languages in the **“Clips for this movie”** bar and press
+**Generate selected clips** (or a tab's per-clip button). Arabic/Spanish
+default narrators: `ar-SA-HamedNeural`, `es-MX-JorgeNeural` (Settings →
+Clip voices; any edge-tts voice works).
 
 It drives the `../movie-recap-bot/recap` pipeline (edge-tts narration + word-synced
 burned-in subtitles + ffmpeg assembly). Written in **pure Python stdlib** for the server
@@ -26,7 +34,11 @@ Dashboard-style panel:
 
 ---
 
-## Install / run
+## Install / run (local Python — no Docker required)
+
+Recap Studio is a normal local Python app: install the deps once, run it, and
+it talks to DeepSeek over the internet. Containers are an optional extra (see
+`../docker-compose.yml`); you do not need them.
 
 ### Windows — one click
 
@@ -48,7 +60,9 @@ python recap-studio/app.py                      # listens on 0.0.0.0:8080
 python recap-studio/app.py --port 9000 --open-browser
 ```
 
-Open <http://localhost:8080>.
+Open <http://localhost:8080>, then paste your DeepSeek key under
+**Settings → LLM** (it is saved in `config.json`; alternatively set
+`DEEPSEEK_API_KEY` in `../movie-recap-bot/.env` and it is picked up too).
 
 > The server itself is stdlib-only, so nothing to install for the UI. `ffmpeg` is
 > resolved automatically through `static-ffmpeg` (it downloads its binaries on
@@ -63,12 +77,13 @@ The panel can drive either pipeline engine:
 
 | Engine | Flow | Needs |
 |--------|------|-------|
-| `semantic` (default) | **Step A–F**: extract the film's dialogue (faster-whisper or a `.srt`) → 5-min overlapping chunks → per-chunk action summaries → LLM writes a JSON-array recap → TTS narration with timestamps → each narration line is embedded and **semantically matched to the film moment** (pgvector/Supabase or the local fallback) → ffmpeg clips + concat + burn subtitles + mux narration | a real movie file, the LLM, dialogue (auto-installs faster-whisper), embeddings (auto-installs sentence-transformers on first run — large download) |
+| `semantic` (default) | **Step A–F**: extract the film's dialogue (faster-whisper or a `.srt`) → 5-min overlapping chunks → per-chunk action summaries → DeepSeek writes the recap section by section (each line tagged with the film window it describes) → TTS narration with timestamps → **chronological, audio-locked beat timeline** → frame-exact ffmpeg clips + concat + burn subtitles + mux narration | a real movie file, a configured LLM (DeepSeek by default), dialogue (auto-installs faster-whisper) |
 | `recap` (legacy) | the original 5-step montage engine over your scripts/clips | script file or LLM; movie optional (placeholder scenes) |
 
-On first run the panel auto-installs anything missing (like it already did for
-Whisper): **faster-whisper** when no `.srt` exists and **sentence-transformers**
-for the semantic matching. The Settings → Environment pills and the readiness
+On first run the panel auto-installs anything missing: **faster-whisper** when
+no `.srt` exists (only install that is ever needed — the timeline engine does
+**not** use the old embedding stack, so no multi-GB sentence-transformers
+download happens any more). The Settings → Environment pills and the readiness
 box under Movie show exactly what is installed/blocking before you press Run.
 
 ## API
@@ -110,13 +125,15 @@ curl -X POST localhost:8080/api/stop          # shut the panel down
 
 Tick **Auto-recap** in Settings and set a movie. On Run the tool:
 1. Extracts dialogue — from the movie's `.srt` if present, else via Whisper ASR,
-2. Asks the LLM (Ollama + Qwen) to write the English recap from the transcript,
+2. Asks the LLM (**DeepSeek** by default) to write the English recap from the
+   transcript, section by section with a per-section word budget,
 3. Translates it to Simplified Chinese,
 4. Narrates + burns subtitles + assembles both clips.
 
-> Needs a movie file **and** a running Ollama + `qwen2.5`. If no LLM is available it
-> falls back to the bundled sample script, so the clip still renders. (Verified
-> end-to-end in the sandbox via an OpenAI-compatible endpoint.)
+> Needs a movie file **and** a configured LLM (DeepSeek: paste the key in
+> Settings → LLM). The semantic engine refuses to render with no LLM rather
+> than quietly narrating the sample script over your footage — the legacy
+> engine still falls back to the bundled sample when Auto-recap is off.
 
 ---
 
@@ -136,8 +153,10 @@ it the film is sliced into evenly spaced beats of `scene_len` seconds, which
 needs no extra dependency and already reads as a montage rather than one long
 shot. The list is cached in `<output>/_work/scenes.json`.
 
-Either way the narration stays the master clock: the montage is cut to at least
-the narration length and `-shortest` trims it exactly, so subtitles never drift.
+Either way the narration stays the master clock: the visual track is built to
+cover the whole narration span (including the pauses between sentences) and is
+muxed with an explicit duration — never `-shortest` — so subtitles never drift
+and the render can never be truncated early.
 
 ---
 
@@ -151,21 +170,49 @@ Stored in `config.json` (next to the code). Key fields:
 | `movie_path` | path to an owned movie **file**. The semantic engine **requires** one; the legacy engine uses placeholder scenes when empty. A folder is rejected with a message naming the videos inside it |
 | `output_dir` | folder for the rendered clips + the `_work` intermediates (default `D:\recap`; created on demand, falls back to `recap-studio/output` with a warning if it can't be written) |
 | `storyboard` | legacy engine only: use placeholder scenes when no movie is set |
-| `duration` | target recap length in seconds (~2.5 spoken words/sec → `840` ≈ 14 min full-length) |
+| `duration` | target recap length in seconds → word count is derived from it (default `900` ≈ 15 min full-length, adjusted for the pace below) |
+| `rate` | narration pace (edge-tts): `-12%` … `+0%`. Default `-8%` = calm storyteller read. The word target auto-scales so the video still lands on `duration` |
 | `auto` | legacy engine only: write the narration from the movie's dialogue |
 | `auto_subtitle` | optional explicit `.srt`/`.ass`/`.vtt`; blank = look next to the movie, else Whisper (both engines) |
 | `whisper_model` / `whisper_device` | Whisper model size + device used when no subtitle exists (default `small` / `auto`) |
-| `voice_en` / `voice_zh` | narrator voices (edge-tts) |
-| `subtitle_lang_en` / `subtitle_lang_zh` | subtitle languages (default `en` / `zh`) |
-| `llm_provider` / `llm_base_url` / `llm_api_key` / `llm_model` | LLM used for auto scripting (default Ollama + Qwen, no key) |
+| `voice_en` / `voice_zh` | narrator voices (edge-tts; default warm deep male `en-US-ChristopherNeural`) |
+| `subtitle_lang_en` / `_zh` / `_ar` / `_es` | subtitle languages per clip |
+| `subtitle_ar` / `subtitle_es` / `subtitle_zh` | optional per-language dialogue `.srt` (native recap) |
+| `llm_provider` / `llm_base_url` / `llm_api_key` / `llm_model` | LLM used for auto scripting (default **DeepSeek** / `deepseek-chat`; paste the key in Settings) |
 
-Semantic-matching knobs (Step D) live in `../movie-recap-bot/config.yaml` under
-`semantic:` (`min_score`, `pre_roll`, `clip_pad`, `clip.mode`, `store: auto |
-local | supabase`). Inspect `<output>/_work/beats.json` after a run to tune them.
+Timeline knobs (Step D) live in `../movie-recap-bot/config.yaml` under
+`timeline:` (`micro_cut_seconds`, `max_cuts_per_beat`, `min_cut_seconds`,
+`pre_roll`) and `semantic.clip.mode` (`reencode` = frame-exact default, `copy`
+= fast preview). Inspect `<output>/_work/beats_<lang>.json` after a run to tune
+them.
+
+**Narration precision & detail** — the script is only ever as precise as the
+story beats it is written from. The Step A summary pass keeps ~60% of each
+dialogue block as ordered, **timestamped** beats (maximum detail: names,
+objects, scene changes, every beat preserved and tagged with its film time),
+and each narration sentence is then anchored to the exact film moment of the
+beats it narrates (the timeline shows that moment ± a few seconds instead of
+spreading footage across a 5-minute chunk). Chunks are 3 minutes
+(`chunking.window_seconds` in `movie-recap-bot/config.yaml`). Trade detail vs
+DeepSeek tokens with the `RECAP_SUMMARY_RATIO` env var (default `0.6`; `0.35`
+= lighter/cheaper) in `../movie-recap-bot/.env`.
+
+**Vision pass (see the movie, not just the dialogue)** — DeepSeek is
+text-only, so pure-visual scenes (montages, chases, sight gags) were invisible
+to the narrator. With a free **Google Gemini** key (`aistudio.google.com` →
+Get API key → put `GEMINI_API_KEY=...` in `../movie-recap-bot/.env`) the
+pipeline captions frames of the actual film (real shot changes + every ~20 s)
+and merges those on-screen notes into the beat list — silent scenes get
+narrated too. No key = skipped with a warning, text-only as before. Tunables
+under `vision:` in `../movie-recap-bot/config.yaml`; disable with
+`VISION_ENABLED=0`. It never bills DeepSeek: image tokens are free on the
+Gemini free tier (rate-limited), and ~75 API calls cover a 100-min film
+(frames are cached per movie).
 
 Everything in this table is applied to the pipeline by `runner.recap_cfg()` —
 including the LLM fields, which are pushed into both the recap config and the
-environment (`OLLAMA_BASE_URL`, `OPENAI_API_KEY`, …) that `recap/llm.py` reads.
+environment (`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, …) that `recap/llm.py`
+reads.
 
 
 ---
@@ -174,9 +221,9 @@ environment (`OLLAMA_BASE_URL`, `OPENAI_API_KEY`, …) that `recap/llm.py` reads
 
 > Below describes the **legacy engine** flow (one `lang` per run). With the
 > default **semantic** engine a single run covers all requested languages:
-> whisper extraction, chunking, the JSON-array recap and the semantic
-> line→film-moment matching all happen **once**, then each language is
-> narrated, subtitled and assembled from those shared beats.
+> whisper extraction, chunking, the section-by-section recap and the
+> chronological line→film-window timeline all happen **once**, then each
+> language is narrated, subtitled and assembled from those shared beats.
 
 The legacy engine generates the English story script, then (for the ZH clip) the Chinese
 translation, narrates each with its own voice, burns subtitles in the same language as the
@@ -195,16 +242,29 @@ OpenAI-compatible code path in `recap/llm.py`.
 
 | Provider | Cost | Key | Base URL | Default model |
 |----------|------|-----|----------|---------------|
-| `ollama` (default) | free, local | no | `http://localhost:11434/v1` | `qwen2.5` |
-| `deepseek` | ~cents per movie | yes | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| `deepseek` (**default**) | ~cents per movie | yes | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| `ollama` | free, local | no | `http://localhost:11434/v1` | `qwen2.5` |
 | `openai` | paid | yes | `https://api.openai.com/v1` | `gpt-4o-mini` |
 | `anthropic` | paid | yes | (fixed by the SDK) | `claude-3-5-sonnet-latest` |
-| `none` | — | no | — | uses the Script editor / bundled scripts |
+| `none` | — | no | — | uses the Script editor / bundled scripts (legacy engine) |
 
 Switching provider in the dropdown also fills in that provider's endpoint and
 model, then **Save settings** — nothing else to edit. The key you paste is
 exported as the matching env var (`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`,
 `ANTHROPIC_API_KEY`) that `recap/llm.py` reads.
+
+### DeepSeek (default — cheap, strong Chinese)
+
+```bash
+# get a key at platform.deepseek.com, then in Settings:
+#   provider = deepseek, model = deepseek-chat, key = sk-...
+```
+
+Best when: you are publishing and want the strongest 简体中文 translation for
+the price — the translation prompt is written in Chinese and DeepSeek handles
+that natively. Trade-off: it needs internet + a key, and your transcript goes
+to their API. Every LLM call is capped to the tokens the step actually needs
+(per-section word budgets etc.), so a model rambling cannot run up the bill.
 
 ### Ollama (free, local, no key)
 
@@ -216,24 +276,13 @@ ollama pull qwen2.5
 
 Best when: you want $0 cost, offline operation, and your transcript never
 leaving your machine. Watch two things — the model has to be big enough to hold
-the "one sentence per line, line-aligned translation" contract over ~1400 words
-(a 7B model will drift), and Ollama's default context window truncates a
-full-length movie transcript, so raise `num_ctx` or pass an `.srt`.
+the "one sentence per line" contract (a 7B model will drift), and small local
+models under-write the requested recap length. DeepSeek is the safer default
+when length matters.
 
-### DeepSeek (cheap, strong Chinese)
-
-```bash
-# get a key at platform.deepseek.com, then in Settings:
-#   provider = deepseek, model = deepseek-chat, key = sk-...
-```
-
-Best when: you are publishing and want the strongest 简体中文 translation for
-the price — the translation prompt is written in Chinese and DeepSeek handles
-that natively. Trade-off: it needs internet + a key, and your transcript goes
-to their API.
-
-> The pipeline falls back to the bundled sample scripts if the LLM is
-> unreachable, so a clip still renders either way.
+> With the semantic engine, no configured/working LLM = the run refuses with a
+> clear error (it will not narrate a sample script over your footage). The
+> legacy engine is the one that falls back to bundled sample scripts.
 
 ---
 
@@ -241,7 +290,9 @@ to their API.
 
 - This is a **review-first** tool. For maximum quality, install the **PySceneDetect**
   video-splitting and **WhisperX** alignment extras and edit the narration before publishing.
-- If the Ollama server isn't running, the pipeline falls back to the bundled sample
-  scripts (`../movie-recap-bot/inputs/text/`) so the clip still renders.
+- Semantic engine with no LLM key/credit refuses with a clear error instead of rendering
+  the wrong (sample) narration. Only the **legacy** engine falls back to the bundled
+  sample scripts (`../movie-recap-bot/inputs/text/`).
 - Use only footage you own / are licensed to use. Edge-TTS is for personal/non-commercial
-  testing; for a monetized channel switch TTS backend (see `movie-narrator` docs).
+  testing; for a monetized channel, check edge-tts' usage terms or switch `TTS_PROVIDER`
+  to a commercial backend (`openai` / `elevenlabs`) in Settings.

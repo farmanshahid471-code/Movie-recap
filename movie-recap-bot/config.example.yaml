@@ -1,51 +1,106 @@
-# Movie Recap Bot — configuration template (copy to config.yaml and adjust).
-# Values here match the shipped defaults and are documented inline.
-
+# Movie Recap Bot — configuration template (copy to config.yaml and adjust;
+# values match the shipped defaults in recap/config.py).
 project:
-  name: "recap-project"     # used to name output files: <name>_<lang>.mp4
-  # Final videos + _work intermediates. Absolute paths are fine and recommended
-  # to keep everything off the C: drive, e.g. "D:\\recap\\output"
-  # (relative resolves against this bot folder). Env override: OUTPUT_DIR
+  name: "recap"            # used to name output files: <name>_<lang>.mp4
+  # Where final videos + _work intermediates go. Absolute paths are fine and
+  # recommended so nothing is written to the C: drive, e.g. "D:\\recap\\output"
+  # (a relative path resolves against this bot folder). Env override: OUTPUT_DIR
   output_dir: "output"
-  # Model weights / ffmpeg binaries / scratch. Leave "" and the cache sits next
-  # to output_dir, so all data follows the same drive. Env override: CACHE_DIR
+  # Where model weights / ffmpeg binaries / scratch go. Leave "" (default) and
+  # the cache lives next to output_dir (same drive). Env override: CACHE_DIR
   cache_dir: ""
 
 language:
-  # en = English (master). zh = Simplified Chinese (line-aligned translation).
-  # Add more languages by wiring them in recap/pipeline.py::_resolve_narration_lines.
+  # Clips to render for each movie. Codes: en (English), zh (Simplified
+  # Chinese), ar (Arabic), es (Spanish).
+  #
+  # How each language gets its narration:
+  #   en  -> written from the movie's own dialogue (its .srt or Whisper).
+  #   ar/es/zh -> written NATIVELY in that language when a subtitle for it is
+  #               provided; otherwise line-aligned-translated from the English
+  #               recap (zh's classic behaviour).
+  # Subtitle discovery: a file tagged next to the movie, e.g. "Toy Story 5.ar.srt"
+  # (also .es / .zh), OR an explicit path per language in `sources:` below.
   target_languages: ["en"]
   zh_variant: "zh-CN"
+  # Optional explicit dialogue subtitles per language (paths; discovery above
+  # also works). Keys match the language codes:
+  # sources:
+  #   ar: "D:\\subs\\Toy Story 5.ar.srt"
+  #   es: "D:\\subs\\Toy Story 5.es.srt"
+  sources: {}
 
 narration:
   # Full-length recap style (~10-16 min of speech at ~150 wpm).
-  words_target: 2000
+  words_target: 2250       # 900s at 150 wpm; --seconds/--minutes overrides it
   words_min: 600
-  words_max: 4200
+  words_max: 6000
+  words_per_minute: 150    # speech rate used for every length calculation
   lang_voice:
-    en: "en-US-ChristopherNeural"
-    zh: "zh-CN-YunxiNeural"
-  tts_provider: "edge"      # edge | elevenlabs | openai
-  rate: "+0%"
+    en: "en-US-ChristopherNeural"   # warm, deep male — "storytelling" narrator
+    zh: "zh-CN-YunjianNeural"         # Mandarin Chinese (male)
+    ar: "ar-SA-HamedNeural"         # Arabic (Modern Standard, Saudi) — male
+    es: "es-MX-JorgeNeural"         # Spanish (Mexico / Latin America) — male
+  tts_provider: "edge"     # edge | elevenlabs | openai
+  # Slightly slower than natural for a calm storyteller read. Range +0%..-20%;
+  # edge-tts "+X%" speeds up, "-X%" slows down. ElevenLabs/OpenAI ignore this.
+  rate: "-8%"
+  # edge-tts pitch shift in Hz: "-8Hz" adds depth/gravitas, "+6Hz" brightens.
+  # Keep "-0Hz" (off) unless a voice sounds thin. ElevenLabs/OpenAI ignore.
+  pitch: "-0Hz"
+  # English naturalness knobs (set in .env): RECAP_POLISH=1 spoken-style
+  # rewrite per section; RECAP_ALIGN=1 sentence->beat footage alignment;
+  # RECAP_ANCHOR_LEAD=0.8 / RECAP_ANCHOR_TAIL=6.0 film window per line.
 
 # Step A1-A2 — Whisper ASR tuning (used when no .srt sits next to the movie).
 dialogue:
-  whisper_model: "small"    # tiny/base/small/medium/large-v3
-  whisper_device: "auto"    # auto | cpu | cuda
-  whisper_language: null    # e.g. "en"; null = auto-detect
-  word_timestamps: true     # per-word times in transcript.json
+  whisper_model: "small"   # tiny/base/small/medium/large-v3
+  whisper_device: "auto"   # auto | cpu | cuda
+  whisper_language: null   # e.g. "en"; null = auto-detect
+  word_timestamps: true    # per-word times in transcript.json
   max_chars: null
 
 # Step A3 — contextual chunking (LLM context windows never overflow).
 chunking:
-  window_seconds: 300       # 5-minute logical blocks
-  overlap_seconds: 30       # 30s of carry between blocks
-  parallel: false           # true parallelizes chunk summaries (remote LLMs)
+  window_seconds: 180      # 3-minute blocks (maximum-precision mode: each
+                           # narration section covers ~3 min of film, so beat
+                           # anchors and visuals stay tight)
+  overlap_seconds: 30      # 30s of carry between blocks
+  parallel: false          # true parallelizes chunk summaries (remote LLMs)
   # Optional: a smaller/faster model for the chunk-summary pass (the slowest
   # LLM step on CPU-only PCs). e.g. "qwen2.5:3b" ~4x faster than qwen2.5 7B.
   model: null
 
-# Step D — semantic timestamp mapping (recap line -> film moment).
+# Step A (pass 1.5) — optional VISUAL pass (the "see the movie" tier).
+# DeepSeek's chat API is text-only, so it cannot see silent set-pieces. When a
+# vision-provider key is configured this pass captions frames of the actual
+# film and merges them into the beat list, so montages / chases / sight gags
+# get narrated too. Provider default = Google Gemini (free tier, multimodal):
+#   - get a free key at aistudio.google.com -> Get API key
+#   - put GEMINI_API_KEY=<key> in movie-recap-bot/.env
+# Without a key the pass is skipped with a warning and the pipeline runs
+# text-only, exactly as before.
+vision:
+  enabled: true             # set false (or VISION_ENABLED=0) to disable
+  provider: "gemini"        # gemini (free) | openai | groq (OpenAI-compatible)
+  model: "gemini-3.6-flash" # Gemini Flash models are multimodal; any works
+  base_url: null            # null = provider default (Gemini OpenAI-compat)
+  cadence_seconds: 20       # caption a frame roughly every 20s of film
+  scene_threshold: 0.35     # also caption real shot changes above this delta
+  max_frames: 400           # hard cap per movie (API-quota friendly)
+  width: 512                # JPEG width sent to the model (smaller = cheaper)
+  frames_per_request: 4     # frames per API call (free-tier request economy)
+
+# Step D — chronological timeline (recap line -> film moment, in order).
+# Beats advance monotonically through the film and each beat's visual length is
+# locked to its narration cue, so the video can never drift or be truncated.
+timeline:
+  micro_cut_seconds: 2.4   # aim for a new shot roughly every ~2.4s (recap pace)
+  max_cuts_per_beat: 4     # one sentence becomes up to 4 micro-shots
+  min_cut_seconds: 1.2     # never flash a shot shorter than this
+  pre_roll: 0.4            # start each shot slightly before its moment
+
+# (legacy) semantic vector matching — no longer used for beat selection.
 semantic:
   enabled: true
   embedding_model: "all-MiniLM-L6-v2"   # local, 384-dim
@@ -55,24 +110,30 @@ semantic:
   #   supabase  -> hosted Postgres + pgvector (apply migrations/001_pgvector.sql
   #                once in the Supabase SQL editor).
   store: "auto"
-  top_k: 3                  # candidates considered per line (de-duplicated)
-  min_score: 0.10           # below this the line falls back to even spacing
-  pre_roll: 0.5             # seconds of footage shown before the matched cue
-  clip_pad: 0.15            # extra footage after each narration line
-  min_clip: 0.8             # never cut a beat shorter than this
-  max_clip: 10.0            # nor longer than this
+  top_k: 3                 # candidates considered per line (de-duplicated)
+  min_score: 0.10          # below this the line falls back to even spacing
+  pre_roll: 0.5            # seconds of footage shown before the matched cue
+  clip_pad: 0.15           # extra footage after each narration line
+  min_clip: 0.8            # never cut a beat shorter than this
+  max_clip: 10.0           # nor longer than this
   clip:
-    mode: "copy"            # copy = fast stream copy | reencode = frame-exact
+    # reencode is now the default: stream copy snaps each cut to the nearest
+    # keyframe and those errors accumulate into seconds of audio/video drift.
+    mode: "reencode"
 
 subtitles:
-  font: "Noto Serif CJK SC" # covers Latin + CJK glyphs
+  font: "Noto Serif CJK SC"
+  # Per-language burned-subtitle fonts (Arabic needs a shaped Arabic typeface;
+  # "Arial" ships with Windows). Missing codes fall back to `font`.
+  lang_font:
+    ar: "Arial"
   fontsize: 56
   margin_v: 96
   margin_x: 40
   outline: 3
   shadow: 1
   max_combo_duration: 6.0
-  line_width_units: 30      # ~30 CJK (or ~60 Latin) glyphs per line
+  line_width_units: 30
   display_lang: "en"
 
 video:
@@ -80,7 +141,7 @@ video:
   width: 1920
   height: 1080
   concat_mode: "fit"
-  montage: "scenes"         # legacy engine only; semantic engine cuts real beats
+  montage: "scenes"        # legacy engine only; semantic engine cuts real beats
   scene_len: 6.0
   scene_min_len: 2.0
   scene_max_len: 20.0
@@ -91,7 +152,9 @@ video:
   bgm_volume: 0.12
 
 llm:
-  provider: ollama          # free, local, no key. Start `ollama serve`
-  model: qwen2.5            # `ollama pull qwen2.5`
-  base_url: "http://localhost:11434/v1"
-  # Keys are read from environment (see .env.example)
+  # DeepSeek: strong, cheap, reliable JSON mode, and fast enough that the
+  # section-by-section script pass finishes in a couple of minutes.
+  # Set DEEPSEEK_API_KEY in .env (get one at platform.deepseek.com).
+  provider: deepseek
+  model: deepseek-chat     # or deepseek-reasoner for harder plots
+  base_url: "https://api.deepseek.com/v1"
