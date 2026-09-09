@@ -219,19 +219,23 @@ def test_prompts_are_language_aware() -> None:
     )
     assert "in Arabic" not in calls[-1]
 
+    n0 = len(calls)
     script.generate_segmented_script(
         [{"index": 0, "start": 0.0, "end": 30.0, "summary": "s",
           "beats": [{"t": 1.0, "text": "beat"}]}],
         {"provider": "x", "model": "y"}, 400, lang_name="Arabic",
     )
-    assert "entirely in Arabic" in calls[-1], calls[-1]
+    assert "entirely in Arabic" in calls[n0], calls[n0]   # section writer
+    assert "in Arabic" in calls[-1], calls[-1]            # humanizer pass
 
+    n1 = len(calls)
     script.generate_segmented_script(
         [{"index": 0, "start": 0.0, "end": 30.0, "summary": "s",
           "beats": [{"t": 1.0, "text": "beat"}]}],
         {"provider": "x", "model": "y"}, 400, lang_name="Spanish",
     )
-    assert "entirely in Spanish" in calls[-1]
+    assert "entirely in Spanish" in calls[n1]
+    assert "in Spanish" in calls[-1]
     print("  language-aware summarize + script prompts OK")
 
 

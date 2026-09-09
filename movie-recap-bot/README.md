@@ -241,6 +241,28 @@ The recap is plain text before it is voiced, so you can still hand-edit any
 line: `_work/script/script_en.txt` (and `_zh/_ar/_es`) holds one sentence per
 line — edit, re-run, and only voice + render repeat.
 
+**1b. Humanizer pass — the final de-AI-ing sweep (`narration.humanize`,
+default on; `RECAP_HUMANIZE=0` disables).** After the whole script is written,
+polished and fitted to its footage, one last pass rewrites the lines that
+still *sound* machine-made. It is adapted from
+[blader/humanizer](https://github.com/blader/humanizer) (MIT) — the pattern
+pack behind the popular Claude skill — condensed to what applies to spoken
+recap narration, strongest first: "not just X, it's Y" contrasts, one-line
+closers that only restate the previous sentence, sayings that sound deep,
+staged run-ups ("Here's what you need to know"), forced triads, repeated
+openers, inflated significance ("a moment that changes everything"),
+interpretive -ing riders (", symbolizing his freedom"), sales language, and
+the stock AI vocabulary (delve, showcase, testament, pivotal, tapestry,
+vibrant, underscore, …). The recap register is protected with explicit
+guards: short dramatic beats that *add* a fact ("Woody disagrees.") and
+time/scene connectors ("Meanwhile,", "That night,") are the narrator's style
+and stay; character names always survive. And the timing locks hold: the
+pass must return the exact same sentence count (every sentence owns a film
+window) and every accepted line stays within +10% +2 words of its original,
+so a rewrite can never outrun its footage. Works for every narration
+language (structural patterns are universal; the word list is
+English-only). One extra LLM call per movie, cached with the script.
+
 **2. Footage that shows the moment each line talks about.** Every narration
 sentence is anchored to a beat with its own film timecode. For English the
 script now *aligns* each sentence to the beat it actually narrates — local
@@ -536,6 +558,7 @@ Edit `config.yaml` (template: `config.example.yaml`). Key knobs:
 | `narration.lang_voice.es` | Spanish narrator (default `es-MX-JorgeNeural`) |
 | `narration.rate` | speaking rate, e.g. `+5%` |
 | `narration.visual_match` | size each section's script to the film time it covers, and pace sentence anchors so the recap plays at 1x end to end (default `true`; `false` = old beat-count budgets) |
+| `narration.humanize` | final pass that removes AI-writing tells from the finished script (adapted from blader/humanizer, MIT) while keeping every sentence inside its film window (default `true`) |
 | `narration.words_target` | desired narration length |
 | `subtitles.font` | must include CJK glyphs for 中文 (default `Noto Serif CJK SC`) |
 | `subtitles.lang_font.ar` | Arabic subtitle font (default `Arial`, shaped) |

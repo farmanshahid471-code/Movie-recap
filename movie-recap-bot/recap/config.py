@@ -55,6 +55,14 @@ _DEFAULTS: dict[str, Any] = {
         # play at normal speed -- no slow motion, no frozen frames (those
         # remain only as a safety net).
         "visual_match": True,
+        # Final pass over the finished script: remove the tells of
+        # AI-generated writing (not-X-but-Y, one-line closers, staged
+        # run-ups, forced triads, stock AI words, ...) so the narration
+        # reads like a person wrote it. Adapted from blader/humanizer
+        # (MIT). Guarded by the timing locks: the sentence count stays
+        # exact and each line within +10% +2 words, so a rewrite can
+        # never outrun its footage. RECAP_HUMANIZE=0 disables.
+        "humanize": True,
     },
     # Step D — chronological timeline (replaces semantic vector matching).
     # Beats advance monotonically through the film and every beat's visual is
@@ -262,6 +270,10 @@ def load_config(path: str | Path | None = None) -> dict:
     if "RECAP_SIGN_OFF" in os.environ:
         cfg["narration"]["sign_off"] = os.environ[
             "RECAP_SIGN_OFF"
+        ].strip().lower() not in ("0", "false", "no", "off")
+    if "RECAP_HUMANIZE" in os.environ:
+        cfg["narration"]["humanize"] = os.environ[
+            "RECAP_HUMANIZE"
         ].strip().lower() not in ("0", "false", "no", "off")
     # Vision pass toggles (see recap/vision.py). Keys come from the provider's
     # env var (gemini -> GEMINI_API_KEY), which _load_dotenv already imported.

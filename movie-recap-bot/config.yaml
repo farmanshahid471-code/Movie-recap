@@ -69,7 +69,13 @@ narration:
   # recap then plays at
   # normal speed end to end — no slow motion, no frozen frames (kept only as
   # a safety net). Set false for the old beat-count budgeting.
-  visual_match: true
+  # HUMANIZER: one final pass over the finished script removes the tells of
+  # AI-generated writing (not-X-but-Y, one-line closers, staged run-ups,
+  # forced triads, stock AI words, ...) so the narration reads like a person
+  # wrote it. Adapted from blader/humanizer (MIT). The timing locks hold:
+  # sentence count exact, each line within +10% of its original length.
+  # RECAP_HUMANIZE=0 (or false here) disables it.
+  humanize: true
   # --- Naturalness / scene-sync knobs (English recap; env-tunable) ---
   #   RECAP_POLISH=1         spoken-style "punch-up" rewrite of each English
   #                          section (one extra DeepSeek call per section; the

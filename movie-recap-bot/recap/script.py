@@ -161,6 +161,20 @@ SYSTEM_POLISH = NARRATOR_PERSONA + (
     "split one."
 )
 
+# Final-pass editing persona for the humanizer (adapted from
+# blader/humanizer, MIT — https://github.com/blader/humanizer).
+SYSTEM_HUMANIZER = NARRATOR_PERSONA + (
+    "\n\nYour current job: the finished script has one last problem — it "
+    "still SOUNDS machine-written in places. You remove the tells of "
+    "AI-generated writing so the narration reads like a person wrote it, "
+    "without changing what it says. You invent nothing: every name, number "
+    "and story fact must come from the script you are given. The video's "
+    "timing lock depends on the sentence count staying EXACTLY the same "
+    "and each sentence staying near its original length, so never merge "
+    "two lines, never split one, and never let a line grow."
+)
+
+
 POLISH_PROMPT = """Below is a DRAFT section of a movie recap, one sentence per array element, in strict story order.
 
 Rewrite it so it reads like a human recap narrator TALKING over footage, not generated text.
@@ -794,6 +808,95 @@ def _global_polish(
     return sentences
 
 
+# Adapted from blader/humanizer (MIT, https://github.com/blader/humanizer):
+# the 25 patterns condensed to what applies to spoken recap narration,
+# strongest first, with this register's false-positive guards.
+HUMANIZER_PROMPT = """Final pass: rewrite this FINISHED recap narration so it sounds like a human narrator wrote it, without changing what it says.
+
+WHY AI TEXT SOUNDS AI: a model picks the phrasing that fits the widest range of readers; a person writes for one listener. Every tell below is that default choice showing through. Act on a single sighting of tells 1-6; the rest count when several cluster in the same passage.
+
+THE PATTERNS (strongest first):
+1. NOT X BUT Y: "it's not just X, it's Y", "This isn't X. It's Y.", "X rather than Y". State the point directly. Keep a contrast only when both halves carry real story information.
+2. ONE-LINE CLOSERS AND FRAGMENT ROWS: a short line that only restates or underlines the previous sentence ("And that changes everything.", "No way out. No backup. No time."). Cut it or merge it into a specific claim. GUARD: a short beat that ADDS a new story fact ("Woody disagrees.") is this narrator's style — keep those.
+3. SAYINGS THAT SOUND DEEP: "at its core", "the real question is", "what really matters is", "X is the language of Y". Replace with the specific story fact.
+4. STAGED RUN-UP: "Let's dive in", "Here's what you need to know", "Honestly?", "Here's the thing". Delete the announcement, make the point. GUARD: time and scene connectors ("Meanwhile,", "That night,", "By morning,") are this narrator's style — keep those.
+5. ARGUING WITH NO ONE: "This isn't about...", "Some might say...", "To be clear, ...". Remove the unraised objection; keep any real claim it held.
+6. FORCED TRIADS: lists of three by default ("cold, dark, and endless"). Use the number of items the moment actually needs.
+7. REPEATED OPENINGS: several sentences in a row starting with the same subject. Merge them or change the subject. GUARD: character NAMES must still be used constantly — vary the sentence, never drop the name.
+8. DASHES: no em dashes and no " -- " anywhere. Periods, commas, colons, parentheses.
+9. STACKED QUALIFIERS: "could potentially", "it seems possible that". Say the story fact plainly.
+10. MISSING ACTOR: name who acts ("The door is opened" -> "Troy opens the door").
+11. INFLATED SIGNIFICANCE: "marking a pivotal moment", "a moment that changes everything". State what happens; end on the concrete fact.
+12. VAGUE CONNECTIONS: "is tied to", "in connection with". State the actual relationship shown on screen.
+13. SHALLOW -ING RIDERS: ", symbolizing his freedom", ", showcasing her strength". Keep only what the film actually shows; cut the interpretive rider.
+14. SALES LANGUAGE: "breathtaking", "stunning", "unforgettable", "nestled in". State what the thing is.
+15. AVOIDED COPULAS: "serves as", "features", "boasts". Plain "is" or "has".
+16. OVERUSED AI WORDS (English text only): actually, additionally, delve, showcase, testament, pivotal, crucial, key, landscape, tapestry, vibrant, intricate, meticulous, underscore, bolster, foster, garner, enhance, emphasizing, highlighting, enduring, interplay, robust, valuable, deep dive. Use plain words.
+17. HEDGES AND GUESSES: "it appears that", "details are unclear". Say what the film shows or cut the sentence.
+
+HARD CONSTRAINTS — the video's timing depends on them:
+- Return EXACTLY {n} sentences: sentence i of your output is the rewrite of sentence i of the input, same order, one for one. Never merge lines, never split one, never add or drop a line.
+- Each rewritten sentence must be about the SAME LENGTH as its input and NEVER more than 10% longer: every sentence is timed to a span of film, and a longer sentence outruns its footage.
+- Keep every character name, place, number and story fact exactly as the input states it. Add NOTHING that is not in the input.
+- Keep the register: present tense, no questions to the viewer, no meta commentary ("the movie", "the scene shows", "we see"), no "little did they know".
+- The narration is in {lang}. Apply the structural patterns to that language; the word list in 16 is for English text only.
+
+HOW TO WORK: read all {n} sentences first and mark the tells, strongest first. Rewrite each marked sentence the way a narrator would SAY it — never just patch the flagged phrase. Then re-scan your rewrite for the tells that most often survive: the not-X-but-Y contrast, the one-line closer, the dash, the triad, the inflated ending.
+
+Respond with ONLY a JSON object in this exact shape, no markdown fences:
+{{"sentences": ["First sentence.", "Second sentence."]}} — exactly {n} items.
+
+=== FINISHED SCRIPT, ONE SENTENCE PER LINE ===
+{draft}
+=== END ===
+"""
+
+
+def _humanize_script(
+    cfg_llm: dict,
+    sentences: list[str],
+    lang_name: str = "English",
+) -> list[str] | None:
+    """One final pass over the FINISHED script: remove the tells of
+    AI-generated writing (adapted from blader/humanizer, MIT) without
+    changing what it says.
+
+    Runs after every other pass, before the sign-off. Same safety rules as
+    the polish passes: the sentence count must stay EXACT (every sentence
+    owns a film window) and each line within +10% +2 words of its original
+    (the window was sized for the original, with a 1.15x TTS margin). A
+    rewrite that violates either is discarded per-sentence, falling back to
+    the original line. Returns ``None`` when the call fails, so the caller
+    keeps the pre-humanizer script.
+    """
+    import json
+
+    if not sentences:
+        return None
+    total_words = count_words(" ".join(sentences))
+    user = HUMANIZER_PROMPT.format(
+        n=len(sentences),
+        lang=lang_name or "English",
+        draft="\n".join(f"{i + 1}. {s}" for i, s in enumerate(sentences)),
+    )
+    try:
+        raw = llm.complete(
+            cfg_llm.get("provider", ""),
+            cfg_llm.get("model", ""),
+            SYSTEM_HUMANIZER,
+            user,
+            base_url=cfg_llm.get("base_url"),
+            json_mode=True,
+            max_tokens=_out_tokens_for_words(int(total_words * 1.15)),
+        )
+        new = _parse_segment(raw)
+    except Exception:
+        return None
+    if not new or len(new) != len(sentences):
+        return None
+    return new
+
+
 def _visual_matched_budgets(
     target_words: int,
     film_secs: list[float],
@@ -986,6 +1089,7 @@ def generate_segmented_script(
     lang_name: str = "English",
     sign_off: bool = True,
     visual_match: bool = True,
+    humanize: bool = True,
 ) -> list[dict]:
     """Write the recap chunk-by-chunk, in film order, hitting the word target.
 
@@ -1287,6 +1391,29 @@ def generate_segmented_script(
                 # the picture would fall behind the narration.
                 if count_words(new_s) <= max(count_words(old_s), 1) * 1.1 + 2:
                     o["sentence"] = new_s
+
+    # HUMANIZER pass — the very last rewrite before the outro: strip the
+    # structural tells of AI-generated writing (not-X-but-Y, one-line
+    # closers, staged run-ups, forced triads, inflated significance, stock
+    # AI words, ...) from the finished script. Adapted from
+    # blader/humanizer (MIT). Guardrails: the sentence count stays EXACT
+    # (every sentence owns a film window) and each accepted line is within
+    # +10% +2 words of the original, so a rewrite can never outrun the
+    # footage the way the pre-visual-match scripts did.
+    if humanize and out:
+        _before = [o["sentence"] for o in out]
+        _humanized = _humanize_script(cfg_llm, _before, lang_name)
+        if _humanized is not None:
+            _kept = 0
+            for o, _old, _new in zip(out, _before, _humanized):
+                if (_new != _old and _new.strip()
+                        and count_words(_new)
+                        <= max(count_words(_old), 1) * 1.1 + 2):
+                    o["sentence"] = _new
+                    _kept += 1
+            print(f"  * humanizer pass: {_kept}/{len(out)} sentences "
+                  "rewritten to sound human (AI tells removed; every "
+                  "sentence keeps its film window)")
 
     _append_sign_off(out, lang_name=lang_name, enabled=sign_off)
 

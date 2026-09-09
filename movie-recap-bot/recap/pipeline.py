@@ -716,7 +716,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         b_marker = tdir / f"script_{code}.marker.json"
         b_sig = _sig(merged, cfg["llm"].get("provider"),
                      cfg["llm"].get("model"), target,
-                     bool(nar.get("sign_off", True)), "segmented-v10")
+                     bool(nar.get("sign_off", True)), "segmented-v11")
         seg_path = tdir / f"script_{code}.segments.json"
         segments = None
         if _marker_ok(b_marker, b_sig) and seg_path.exists():
@@ -743,6 +743,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                 words_per_minute=wpm, progress=_prog, lang_name=lang_name,
                 sign_off=bool(nar.get("sign_off", True)),
                 visual_match=bool(nar.get("visual_match", True)),
+                humanize=bool(nar.get("humanize", True)),
             )
             if len(segments) < 10:
                 raise DialogueError(

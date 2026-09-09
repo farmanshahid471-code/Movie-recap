@@ -584,7 +584,7 @@ def test_overdelivery_is_condensed_not_dropped() -> None:
         out = script_mod.generate_segmented_script(
             [chunk], {"provider": "deepseek", "model": "x"}, 200,
             words_per_minute=150, lang_name="Spanish",
-            sign_off=False, visual_match=True,
+            sign_off=False, visual_match=True, humanize=False,
         )
     finally:
         script_mod.llm.complete = orig
@@ -603,6 +603,126 @@ def test_overdelivery_is_condensed_not_dropped() -> None:
     print(f"ok: 240-word over-delivery -> one condense call -> "
           f"{count_words(' '.join(condensed))}-word ordered story with "
           "windows attached")
+
+
+def test_humanize_script_pass() -> None:
+    """The humanizer pass (adapted from blader/humanizer, MIT): one call,
+    exact sentence count, AI-tell patterns in the prompt, graceful
+    failure."""
+    import json
+    from recap import script as script_mod
+
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    sents = [s] * 8
+    ok = ["The pilot comes to in a dark forest, every breath hurting."] * 8
+    calls = []
+
+    def fake_complete(provider, model, system, user, **kw):
+        calls.append((system, user))
+        return json.dumps({"sentences": ok})
+
+    orig = script_mod.llm.complete
+    script_mod.llm.complete = fake_complete
+    try:
+        out = script_mod._humanize_script(
+            {"provider": "deepseek", "model": "x"}, sents, "English")
+    finally:
+        script_mod.llm.complete = orig
+    assert out == ok
+    system, user = calls[0]
+    assert system is script_mod.SYSTEM_HUMANIZER
+    # the pattern pack + timing constraints are all in the prompt
+    for needle in ("not just X, it's Y", "showcase", "EXACTLY 8",
+                   "10% longer", "English", "FINISHED SCRIPT"):
+        assert needle in user, needle
+    assert "1. The pilot wakes up" in user, "sentences are numbered 1:1"
+
+    # wrong sentence count -> None (caller keeps the original script)
+    script_mod.llm.complete = lambda *a, **k: json.dumps({"sentences": ok[:5]})
+    try:
+        assert script_mod._humanize_script(
+            {"provider": "deepseek", "model": "x"}, sents, "English") is None
+    finally:
+        script_mod.llm.complete = orig
+
+    # api blow-up -> None, never an exception into the pipeline
+    def boom(*a, **k):
+        raise RuntimeError("api down")
+    script_mod.llm.complete = boom
+    try:
+        assert script_mod._humanize_script(
+            {"provider": "deepseek", "model": "x"}, sents, "English") is None
+    finally:
+        script_mod.llm.complete = orig
+    print("ok: humanizer call carries the pattern pack + timing locks; "
+          "bad counts and api failures fall back to the original")
+
+
+def test_humanizer_full_loop_keeps_timing() -> None:
+    """Full loop with humanize=True: the final pass rewrites AI-telling
+    lines, but a rewrite that would outrun its film window (over +10% +2
+    words) is rejected per-sentence and the original line kept."""
+    import json
+    from recap import script as script_mod
+
+    written = [
+        "It is not just a crash site, it is the start of a manhunt.",
+        "The pilot wakes up in a forest full of tall dark trees.",
+        "An armed stranger inspects the wreck and finds him.",
+        "The pilot grabs the barrel and both men fall down hard.",
+        "He drags himself away and hides deep inside the trees.",
+        "By morning the whole army is tracking his trail.",
+        "He crosses a frozen river to throw the dogs off.",
+        "The chase finally ends at the border bridge.",
+    ]
+    bloated = ("What happens next is that the pilot, who is injured and "
+               "exhausted and lying in thick snow, slowly and painfully "
+               "begins to crawl toward the wreck while the armed stranger "
+               "watches him very closely indeed.")
+    humanized = [
+        "The crash site becomes the start of a manhunt.",   # shorter: ok
+        "The pilot comes to in a dark forest, hurting.",    # shorter: ok
+        bloated,                                            # way over: reject
+        written[3],                                         # identical: keep
+        "He drags himself into the trees to hide.",         # shorter: ok
+        "By morning the army is tracking his trail.",       # shorter: ok
+        "He crosses a frozen river to lose the dogs.",      # shorter: ok
+        "The chase ends at the border bridge.",             # shorter: ok
+    ]
+
+    def fake_complete(provider, model, system, user, **kw):
+        if "FINISHED SCRIPT" in user:
+            return json.dumps({"sentences": humanized})
+        return json.dumps({"sentences": written})
+
+    chunk = {
+        "index": 0, "start": 1000.0, "end": 1150.0,
+        "summary": "A pilot is shot down and hunted through the woods.",
+        "beats": [{"t": 1000.0 + i * 2.4, "text": f"beat {i}"}
+                  for i in range(63)],
+    }
+    orig = script_mod.llm.complete
+    script_mod.llm.complete = fake_complete
+    try:
+        out = script_mod.generate_segmented_script(
+            [chunk], {"provider": "deepseek", "model": "x"}, 200,
+            words_per_minute=150, lang_name="Spanish",
+            sign_off=False, visual_match=True, humanize=True,
+        )
+    finally:
+        script_mod.llm.complete = orig
+
+    assert len(out) == len(written), "sentence count is the timing lock"
+    assert out[0]["sentence"] == humanized[0], "fitting rewrite accepted"
+    assert out[1]["sentence"] == humanized[1]
+    assert out[2]["sentence"] == written[2], \
+        "over-length rewrite rejected, original kept"
+    assert out[3]["sentence"] == written[3], "identical line untouched"
+    assert out[7]["sentence"] == humanized[7]
+    assert all(o["film_end"] > o["film_start"] for o in out), \
+        "every sentence keeps its film window"
+    print("ok: humanizer rewrites flow through; a rewrite that would "
+          "outrun its footage is rejected and the original kept")
 
 
 if __name__ == "__main__":
@@ -624,4 +744,6 @@ if __name__ == "__main__":
     test_overdelivered_section_still_plays_at_1x()
     test_condense_section_tightens_story()
     test_overdelivery_is_condensed_not_dropped()
+    test_humanize_script_pass()
+    test_humanizer_full_loop_keeps_timing()
     print("\nALL VISUAL-FLOW TESTS PASSED")
