@@ -459,6 +459,26 @@ continue the current footage seamlessly instead of a stuttering micro-jump;
 keyframe snapping or timing jitter. Like the reference channel, transitions
 are hard cuts — clean and instant, never crossfades.
 
+**Frame-exact render lock — the picture cannot slide off the voice.** The
+schedule says beat *i* occupies exactly `[cue_i.start, cue_i+1.start)` of the
+output; the render must obey it to the frame. But ffmpeg quantizes every
+written clip to whole frames (output `-t` + fixed fps), and that rounding is
+one-sided — each clip comes out a frame or part-frame **long, never short**.
+Over ~1000 clips that used to accumulate **10–20 seconds of stretch**: the
+audio kept its own clock, the picture schedule slid later and later, and by
+the second half of the video the narrator was describing the next scene
+while an older one was still on screen — even in slow-motion sections,
+because the drift is in the render, not the pacing. (The final trim to the
+audio span hid the *total*, which is why every end-to-end duration check
+kept passing while the interior was out of sync.) The fix is
+**drift-compensated cutting**: after each clip is rendered, ffprobe measures
+its real duration and the accumulated error is subtracted from the *next*
+clip's requested duration — the cumulative schedule never leaves a ~1-frame
+corridor for the whole video (the run log prints
+`drift-compensated cuts: A/V schedule held within 33 ms …`). Applies to both
+`reencode` (frame-exact) and `copy` (fast preview) modes; the cut-plan cache
+is versioned so clips rendered by the old code are re-cut once.
+
 **4. `timeline.snap_to_scenes` (default on).** The film's real shot-change
 times are detected once per movie (PySceneDetect, cached in
 `_work/shot_boundaries.json`) and every cut's film position is snapped to the

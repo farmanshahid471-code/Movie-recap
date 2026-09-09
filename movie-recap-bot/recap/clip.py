@@ -192,6 +192,10 @@ def _visual_plan_id(movie: Path, cuts: list[tuple[float, float]],
             "mode": mode,
             "fps": int(cfg_video.get("fps", 30)),
             "codec": cfg_video.get("codec", "libx264"),
+            # v2: drift-compensated cutting. Clips cut by the v1 code carry
+            # the uncompensated frame-rounding stretch; bumping this forces
+            # one re-cut so no stale, drifting segment is ever reused.
+            "cut_engine": 2,
         },
         sort_keys=True,
     )
@@ -268,10 +272,42 @@ def build_locked_visual(
                     pass
             if removed:
                 print(f"  * [{mode}] cleared {removed} stale clip segment(s)", flush=True)
+        # DRIFT-COMPENSATED CUTTING (the fix for "the narration runs ahead
+        # of the visuals"): ffmpeg writes every clip quantized to whole
+        # frames (output -t + fps), and the rounding is one-sided -- each
+        # clip comes out a frame or part-frame LONG, never short. Over
+        # ~1000 cuts that accumulates 10-20 SECONDS of stretch: the audio
+        # keeps its own clock, the picture schedule slides late, and by the
+        # second half the narrator is describing the next scene while an
+        # older one is still on screen. (The final trim to the audio span
+        # hides the total, so the drift is invisible in every duration
+        # check.) The fix: measure each rendered clip with ffprobe and
+        # subtract the accumulated error from the NEXT clip's requested
+        # duration -- the cumulative schedule then never leaves a ~1-frame
+        # corridor, for the whole video.
+        drift = 0.0          # rendered - planned, cumulative
+        max_drift = 0.0
+        probed = 0
         for i, (start, dur, freeze, speed) in enumerate(norm_cuts):
-            cut_segment(movie, segments[i], start, dur, cfg_video,
+            want = max(dur - drift, 0.05)
+            cut_segment(movie, segments[i], start, want, cfg_video,
                         mode=mode, exact=True, freeze=freeze, speed=speed)
+            got = probe_duration(segments[i])
+            if got > 0.0:
+                probed += 1
+                drift += got - dur
+                max_drift = max(max_drift, abs(drift))
         stamp.write_text(plan, encoding="utf-8")
+        if probed:
+            # honest estimate of what uncompensated rounding would have cost:
+            # on average half a frame per clip
+            print(f"  * drift-compensated cuts: A/V schedule held within "
+                  f"{max_drift * 1000:.0f} ms across {probed} clips "
+                  f"(uncompensated frame rounding would have stretched it "
+                  f"by ~{probed / 2.0 / 30.0:.1f}s)", flush=True)
+        else:
+            print("  ! could not measure the rendered clips (no ffprobe?) "
+                  "-- cut lengths are unverified", flush=True)
 
     raw = Path(workdir) / "visual_raw.mp4"
     raw_stamp = Path(workdir) / ".raw.json"
