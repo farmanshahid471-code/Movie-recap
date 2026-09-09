@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from recap import timeline  # noqa: E402
+from recap.script import count_words  # noqa: E402
 from recap.tts import TimedCue  # noqa: E402
 
 CFG = {"micro_cut_seconds": 2.4, "max_cuts_per_beat": 4, "min_cut_seconds": 1.2}
@@ -398,6 +399,97 @@ def test_matched_script_plays_at_1x() -> None:
           f"{total:.1f}s locked, no slow-mo, no freeze")
 
 
+def test_fit_section_to_footage() -> None:
+    """The per-section budget is a CEILING: over-delivered sections are
+    trimmed to what their footage can show at 1x."""
+    from recap import script as script_mod
+
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    assert count_words(s) == 12
+    sents = [s] * 20  # 240 words for a 150-word section
+    out = script_mod._fit_section_to_footage(sents, 150, [])
+    assert len(out) < 20 and count_words(" ".join(out)) <= 150
+    assert len(out) >= 3
+    assert out[0] == sents[0] and out[-1] == sents[-1], "hand-off ends kept"
+
+    # name-bearing middle sentences survive the trim
+    named = [s] * 20
+    named[7] = "Troy grabs his gun and aims it at the armed stranger."
+    out2 = script_mod._fit_section_to_footage(named, 150, ["Troy"])
+    assert any("Troy" in x for x in out2), "name-bearing sentence kept"
+
+    # within budget -> untouched; tiny section -> floor of 3 kept
+    assert script_mod._fit_section_to_footage([s] * 5, 150, []) == [s] * 5
+    out3 = script_mod._fit_section_to_footage([s] * 3, 10, [])
+    assert len(out3) == 3, "never trim below 3 sentences"
+    print("ok: over-delivered sections trimmed to their footage; "
+          "names + hand-off ends kept")
+
+
+def test_overdelivered_section_still_plays_at_1x() -> None:
+    """THE USER'S BUG, reproduced and fixed: the writer over-delivers (240
+    words for a 150-word section). Untrimmed, the section cannot pace its
+    anchors 1x-safe, falls back to an even spread, every window is shorter
+    than its sentence -> the timeline slow-moes the whole section and the
+    narration runs AHEAD of the picture. After the hard fit, the same
+    over-delivery plays every cut at exactly 1x."""
+    from recap import script as script_mod
+
+    beats = [{"t": 1000.0 + i * 2.4, "text": f"beat {i}"} for i in range(63)]
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    over = [s] * 20                      # 240 words; writer ignored the budget
+    cap = 150                            # 150s of film x 1 word/s (150 wpm, 0.4)
+
+    # --- before the fix: over-budget section drifts into slow motion ------
+    raw = [b["t"] for b in beats[:20]]   # clustered anchors on busy beats
+    paced = script_mod._paced_anchors(raw, over, 1000.0, 1150.0, 150)
+    wins = script_mod._anchor_windows(
+        1000.0, 1150.0, beats, len(over),
+        anchor_values=paced, lead=0.8, tail=6.0,
+    )
+    segs = [{"sentence": x, "film_start": lo, "film_end": hi}
+            for x, (lo, hi) in zip(over, wins)]
+    cues = [TimedCue(x, i * 5.2, i * 5.2 + 4.8) for i, x in enumerate(over)]
+    stats: dict = {}
+    timeline.build_timeline(segs, timeline.lock_durations(cues, 20 * 5.2),
+                            6000.0, dict(CFG), stats=stats)
+    assert stats.get("slowed_groups", 0) > 0, \
+        "over-budget section must be the slow-mo case (bug reproduction)"
+
+    # --- after the fix: trimmed to the footage -> all 1x, nothing frozen --
+    fitted = script_mod._fit_section_to_footage(over, cap, [])
+    assert count_words(" ".join(fitted)) <= cap
+    n = len(fitted)
+    paced2 = script_mod._paced_anchors(
+        [b["t"] for b in beats[:n]], fitted, 1000.0, 1150.0, 150)
+    wins2 = script_mod._anchor_windows(
+        1000.0, 1150.0, beats, n,
+        anchor_values=paced2, lead=0.8, tail=6.0,
+    )
+    segs2 = [{"sentence": x, "film_start": lo, "film_end": hi}
+             for x, (lo, hi) in zip(fitted, wins2)]
+    span = (n - 1) * 5.2 + 4.8
+    cues2 = [TimedCue(x, i * 5.2, i * 5.2 + 4.8) for i, x in enumerate(fitted)]
+    durs = timeline.lock_durations(cues2, span)
+    stats2: dict = {}
+    btl = timeline.build_timeline(segs2, durs, 6000.0, dict(CFG), stats=stats2)
+
+    assert stats2.get("slowed_groups", 0) == 0, "no slow motion after the fit"
+    assert stats2.get("held_shots", 0) == 0, "no frozen frames after the fit"
+    speeds = [sp for _, _d, _f, sp in _cuts_in_order(btl)]
+    assert speeds and all(abs(sp - 1.0) < 1e-9 for sp in speeds), \
+        f"expected all 1x, got {sorted(set(round(x, 3) for x in speeds))}"
+    total = sum(d for _, d, _f, _v in _cuts_in_order(btl))
+    assert abs(total - span) < 1e-6, "A/V lock exact"
+    prev_end = -1.0
+    for st, d, f, sp in _cuts_in_order(btl):
+        assert st >= prev_end - 1e-6, "no replay"
+        prev_end = max(prev_end, st + (d - f) * sp)
+    print(f"ok: 240-word over-delivery -> {count_words(' '.join(fitted))} "
+          f"words/{n} sentences -> all 1x, {total:.1f}s exact lock "
+          f"(untrimmed: {stats.get('slowed_groups')} slowed groups)")
+
+
 if __name__ == "__main__":
     test_no_replay_same_window()
     test_no_replay_overlapping_windows()
@@ -413,4 +505,6 @@ if __name__ == "__main__":
     test_visual_matched_budgets()
     test_paced_anchors_spread_clusters()
     test_matched_script_plays_at_1x()
+    test_fit_section_to_footage()
+    test_overdelivered_section_still_plays_at_1x()
     print("\nALL VISUAL-FLOW TESTS PASSED")

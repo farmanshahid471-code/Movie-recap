@@ -884,6 +884,41 @@ def _paced_anchors(
     return out
 
 
+def _fit_section_to_footage(
+    sents: list[str],
+    cap: int,
+    names: list[str],
+) -> list[str]:
+    """Trim a section whose writer over-delivered down to what its footage
+    can show at 1x -- the enforcement half of visual match.
+
+    The word budget handed to the writer is a ceiling, not a suggestion,
+    but LLMs routinely overshoot it (and the polish pass may add ~30% more
+    words on top). An over-length section is exactly what forces the
+    timeline into slow motion -- every sentence's window is shorter than
+    the sentence, the footage crawls, and the narration runs ahead of the
+    picture. This drops the most droppable middle sentences until the
+    section fits. The first sentence (the continuity hand-off), the last
+    (the next section picks up from it) and name-bearing sentences are
+    kept whenever possible; a section never goes below 3 sentences.
+    """
+    total = count_words(" ".join(sents))
+    if total <= cap or len(sents) <= 3:
+        return sents
+    keep = list(sents)
+    while len(keep) > 3 and count_words(" ".join(keep)) > cap:
+        mids = list(range(1, len(keep) - 1))
+        named = {i for i in mids if any(n in keep[i] for n in names)}
+        pool = [i for i in mids if i not in named] or mids
+        # drop the middle-most candidate (keeps the section's arc: start,
+        # middle, end); tie-break toward the longer sentence (bigger saving)
+        center = (len(keep) - 1) / 2.0
+        drop = min(pool, key=lambda i: (abs(i - center),
+                                        -count_words(keep[i])))
+        keep.pop(drop)
+    return keep
+
+
 def generate_segmented_script(
     chunk_summaries: list[dict],
     cfg_llm: dict,
@@ -1092,6 +1127,24 @@ def generate_segmented_script(
         if sents and is_en:
             sents = _polish_section(cfg_llm, sents, exemplar_block, names)
 
+        # VISUAL MATCH hard fit: the footage budget is a ceiling, not a
+        # suggestion. Writers routinely over-deliver and the polish pass may
+        # add ~30% more words on top -- an over-length section is exactly
+        # what makes every window shorter than its sentence, forcing slow
+        # motion: the narration then runs ahead of the picture. Trim the
+        # section to what its footage can show at 1x.
+        if visual_match and sents:
+            _cap = max(int(cap_words[pos]), 40)
+            _fitted = _fit_section_to_footage(sents, _cap, names)
+            if len(_fitted) != len(sents):
+                print(f"    ... section {pos + 1}/{len(usable)}: writer "
+                      f"returned {count_words(' '.join(sents))} words for a "
+                      f"{_cap}-word footage budget -- trimmed to "
+                      f"{len(_fitted)} sentences "
+                      f"({count_words(' '.join(_fitted))} words) so it "
+                      "plays at 1x")
+                sents = _fitted
+
         # Anchor each sentence to the film moment(s) it narrates (beat
         # timecodes) instead of giving the whole chunk to every sentence.
         # English aligns each sentence to the beat it actually describes
@@ -1156,8 +1209,14 @@ def generate_segmented_script(
         before = [o["sentence"] for o in out]
         polished = _global_polish(cfg_llm, before, all_names)
         if polished != before and len(polished) == len(out):
-            for o, s in zip(out, polished):
-                o["sentence"] = s
+            for o, old_s, new_s in zip(out, before, polished):
+                # Keep the polished line only if it still fits its footage
+                # window: the windows were sized for the pre-polish sentence
+                # (with a 1.15x TTS margin), so up to 10% growth is safe --
+                # beyond that the sentence would outlast its own film and
+                # the picture would fall behind the narration.
+                if count_words(new_s) <= max(count_words(old_s), 1) * 1.1 + 2:
+                    o["sentence"] = new_s
 
     _append_sign_off(out, lang_name=lang_name, enabled=sign_off)
 

@@ -398,11 +398,17 @@ window (the film between its moment and the next sentence's moment) is at
 least as long as the sentence takes to say. The result: the recap plays at
 normal speed from the first cut to the last — the narration and the picture
 advance in lockstep, and neither slow motion nor a held frame is ever *needed*
-to keep them together. (For a typical movie this is far from binding — a
-17-minute recap of a 2-hour film uses ~15% of the film time — it matters for
-dense films or long targets, where the budget now trims the script to what
-the footage can carry at 1x.) Set `narration.visual_match: false` to go back
-to the old beat-count budgeting.
+to keep them together. And the budget is **enforced, not requested**: if the
+writer over-delivers (LLMs routinely return 1.5–2× their word budget, and the
+polish pass can add ~30% more), the section is trimmed back to what its
+footage can show — first/last sentences and name-bearing lines are kept, and
+the trim is logged (`writer returned 260 words for a 150-word footage
+budget — trimmed …`). This is what keeps the narration from running ahead of
+the picture on dialogue-dense sections. (For a typical movie this is far from
+binding — a 17-minute recap of a 2-hour film uses ~15% of the film time — it
+matters for dense films or long targets, where the budget now trims the
+script to what the footage can carry at 1x.) Set `narration.visual_match:
+false` to go back to the old beat-count budgeting.
 
 **Motion guarantee — the picture never stops.** When a section's narration is
 longer than the film behind it (a dialogue-dense stretch), the timeline paces

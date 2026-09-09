@@ -64,9 +64,10 @@ narration:
   # VISUAL MATCH: size each section's narration to the film time it covers,
   # cap dialogue-dense sections at what their footage can show at 1x, and
   # pace the sentence anchors so every sentence's window is at least as long
-  # as the sentence itself. The recap then plays at normal speed end to end
-  # — no slow motion, no frozen frames (kept only as a safety net). Set
-  # false for the old beat-count budgeting.
+  # as the sentence itself, and HARD-TRIM any section the writer over-writes
+  # (the budget is a ceiling, not a suggestion). The recap then plays at
+  # normal speed end to end — no slow motion, no frozen frames (kept only as
+  # a safety net). Set false for the old beat-count budgeting.
   visual_match: true
   # English naturalness knobs (set in .env): RECAP_POLISH=1 spoken-style
   # rewrite per section; RECAP_ALIGN=1 sentence->beat footage alignment;
