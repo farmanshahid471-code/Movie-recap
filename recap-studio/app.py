@@ -196,13 +196,13 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/run":
             body = self._read_body()
-            langs = [l for l in body.get("langs", ["en", "zh"]) if l in ("en", "zh")]
+            langs = [l for l in body.get("langs", ["en", "zh"]) if l in runner.LANG_CODES]
             ok = runner.start_run(langs or ["en", "zh"], runner.load_config())
             return self._json(200 if ok else 409, {"ok": ok, "running": ok, "error": "" if ok else "a run is already in progress"})
 
         if path == "/api/generate":
             body = self._read_body()
-            langs = [l for l in body.get("langs", ["en", "zh"]) if l in ("en", "zh")]
+            langs = [l for l in body.get("langs", ["en", "zh"]) if l in runner.LANG_CODES]
             ok = runner.start_run(langs or ["en", "zh"], runner.load_config())
             return self._json(200 if ok else 409, {"ok": ok, "running": ok})
 
@@ -221,7 +221,7 @@ class Handler(BaseHTTPRequestHandler):
             written = runner.write_scripts(body.get("en_script", ""), body.get("zh_script", ""))
             if not written:
                 return self._json(400, {"ok": False, "error": "nothing to render: both scripts are empty"})
-            langs = [l for l in body.get("langs", ["en", "zh"]) if l in ("en", "zh")]
+            langs = [l for l in body.get("langs", ["en", "zh"]) if l in runner.LANG_CODES]
             cfg = runner.load_config()
             cfg["auto"] = False  # render the edited scripts; never re-ask the LLM
             ok = runner.start_run(langs or ["en", "zh"], cfg)

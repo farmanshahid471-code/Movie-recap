@@ -16,7 +16,8 @@ Two ways to find the cuts:
      shot, and is what runs out of the box.
 
 Either way the narration stays the master clock: the montage is cut to be at
-least as long as the narration and `-shortest` trims it exactly.
+least as long as the narration, then muxed with an explicit duration (never
+`-shortest`), so the narration always fits.
 """
 from __future__ import annotations
 
@@ -113,6 +114,67 @@ def detect_scenes(
         encoding="utf-8",
     )
     return scenes, method
+
+
+def scene_boundaries(
+    video: Path,
+    cfg_video: dict,
+    workdir: Path,
+) -> tuple[list[float], str]:
+    """Real shot-change times of the film (the start of every camera shot).
+
+    Used by the Step A-F timeline to snap each visual cut onto an actual shot
+    change of the film — the way recap channels edit, where every new visual
+    begins on a real cut instead of drifting in mid-shot. Runs PySceneDetect
+    once per movie (cached in ``<workdir>/shot_boundaries.json`` against the
+    movie's fingerprint), so per-language runs and re-renders reuse it.
+
+    Returns ``([boundary_times...], method)`` where method is
+    ``"scenedetect"`` / ``"cache"`` when real boundaries exist and ``"none"``
+    when PySceneDetect is not installed or failed (the timeline then simply
+    skips snapping — everything else still works).
+    """
+    video = Path(video)
+    workdir = Path(workdir)
+    cache = workdir / "shot_boundaries.json"
+    try:
+        st = video.stat()
+        sig = {
+            "path": str(video.resolve()), "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns,
+            "threshold": float(cfg_video.get("scene_threshold", 27.0)),
+        }
+    except OSError:
+        return [], "none"
+
+    if cache.exists():
+        try:
+            data = json.loads(cache.read_text(encoding="utf-8"))
+            if data.get("sig") == sig:
+                bounds = [float(x) for x in data.get("bounds", [])]
+                if bounds:
+                    return bounds, data.get("method", "cache")
+                return [], "none"
+        except Exception:
+            pass
+
+    print("  * detecting the film's shot boundaries (one-time pass; on CPU a "
+          "long movie can take several minutes) ...", flush=True)
+    pairs = _scenedetect(video, float(cfg_video.get("scene_threshold", 27.0)))
+    if not pairs:
+        # No negative cache: if the user installs scenedetect later, the next
+        # run detects for real instead of replaying "unavailable".
+        return [], "none"
+    bounds = [round(float(a), 3) for a, _b in pairs]
+    try:
+        workdir.mkdir(parents=True, exist_ok=True)
+        cache.write_text(
+            json.dumps({"sig": sig, "method": "scenedetect", "bounds": bounds}),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    return bounds, "scenedetect"
 
 
 def _cut(

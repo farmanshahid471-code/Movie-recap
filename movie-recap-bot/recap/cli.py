@@ -20,8 +20,9 @@ from pathlib import Path
 
 import yaml
 
-from . import llm, pipeline, script, translate
-from .config import BASE_DIR, load_config, out_dir, work_dir
+from . import languages, llm, pipeline, script, translate
+from .config import BASE_DIR, load_config, work_dir
+from .util import rate_speed_factor
 
 
 def _load_raw_yaml(path: str | None) -> dict:
@@ -55,6 +56,8 @@ def cmd_run(args: argparse.Namespace) -> None:
                 tag = cfg["language"].get("zh_variant", "zh-CN")
             langs.append({"code": lang, "tag": tag})
         cfg["language"]["_resolved"] = langs
+    _reject_unknown(cfg, "run")
+    _reject_legacy_codes(cfg)
     if args.script_file:
         sfile = Path(args.script_file)
         wd = work_dir(cfg)
@@ -74,7 +77,8 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 def cmd_auto(args: argparse.Namespace) -> None:
     """Auto-recap a movie with the Step A-F engine (whisper -> chunks ->
-    summaries -> JSON script -> TTS -> semantic match -> clips)."""
+    summaries -> section-by-section JSON script -> TTS -> chronological
+    beat timeline -> clips)."""
     cfg = load_config(args.config)
     cfg["project"]["name"] = args.name or cfg["project"]["name"]
     if args.langs:
@@ -87,23 +91,57 @@ def cmd_auto(args: argparse.Namespace) -> None:
             langs.append({"code": lang, "tag": tag})
         cfg["language"]["_resolved"] = langs
 
-    # Optional explicit subtitle path for dialogue extraction.
+    _reject_unknown(cfg, "auto")
+    # Optional explicit subtitle path for dialogue extraction. The bare
+    # --subtitle feeds the English/master source; the --subtitle-<lang> flags
+    # feed that language's native recap (e.g. --subtitle-ar movie.ar.srt makes
+    # the Arabic clip written straight from the Arabic subtitles).
     if args.subtitle:
         cfg.setdefault("dialogue", {})["srt_path"] = args.subtitle
+    lang_sources = {}
+    for _flag in ("subtitle_ar", "subtitle_es", "subtitle_zh"):
+        _code = _flag.split("_", 1)[1]
+        _path = getattr(args, _flag, None)
+        if _path:
+            lang_sources[_code] = _path
+    if lang_sources:
+        cfg.setdefault("language", {}).setdefault("sources", {}).update(lang_sources)
     # Whisper tuning via CLI.
     if args.whisper_model:
         cfg.setdefault("dialogue", {})["whisper_model"] = args.whisper_model
     if args.whisper_device:
         cfg.setdefault("dialogue", {})["whisper_device"] = args.whisper_device
     # Target narration length (full-length ~10-16 min by default).
-    if args.minutes:
-        mins = max(1, int(args.minutes))
+    if args.minutes or args.seconds:
         nar = cfg.setdefault("narration", {})
-        words = int(mins * 150)
-        words = max(words, int(nar.get("words_min", 600)))
-        words = min(words, int(nar.get("words_max", 4200)))
+        wpm = int(nar.get("words_per_minute", 150))
+        secs = int(args.seconds) if args.seconds else int(args.minutes) * 60
+        secs = max(30, secs)
+        # A slower TTS pace (rate "-8%") reads fewer words per minute, so scale
+        # the word target by the pace factor to land on the requested length.
+        pace = nar.get("rate", "+0%")
+        factor = rate_speed_factor(pace)
+        # SELF-CALIBRATING: if a previous run measured this voice's real
+        # rate (spoken words / final audio span, cached in _work/
+        # narration_rate.json), convert minutes->words with reality
+        # instead of the config guess.
+        voice = pipeline.narration_voice(nar, "en")
+        measured = pipeline.measured_wpm_for(
+            work_dir(cfg), nar.get("tts_provider", "edge"), voice, pace)
+        if measured:
+            eff = float(measured)
+            src = f"measured {eff:.0f} wpm for this voice (cached)"
+        else:
+            eff = wpm * factor
+            src = f"{wpm} wpm x pace {pace} = ~{eff:.0f} wpm (config guess)"
+        words = int(round(secs / 60 * eff))
+        # Raise the ceiling to whatever was asked for: silently clamping the
+        # target to words_max is how a 900s request became a short video.
         nar["words_target"] = words
-        print(f"  * Target narration: ~{mins} min -> {words} words")
+        nar["words_min"] = min(int(nar.get("words_min", 600)), words)
+        nar["words_max"] = max(int(nar.get("words_max", 4200)), int(words * 1.6))
+        print(f"  * Target narration: {secs}s (~{secs / 60:.1f} min) "
+              f"-> {words} words ({src})")
 
     movie = Path(args.movie)
     if not movie.exists():
@@ -165,10 +203,41 @@ def cmd_translate(args: argparse.Namespace) -> None:
     print(f"Chinese translation written to {out}")
 
 
+def _reject_unknown(cfg: dict, cmd: str) -> None:
+    """Exit early when a requested language code is not in the catalog."""
+    bad = languages.validate(list(cfg["language"]["target_languages"]))
+    if bad:
+        raise SystemExit(
+            f"Unsupported language(s) for `{cmd}`: {bad}. Supported: "
+            f"{', '.join(languages.SUPPORTED)}."
+        )
+
+
+def _reject_legacy_codes(cfg: dict) -> None:
+    """The classic 5-step `run` engine narrates en + zh only.
+
+    Arabic/Spanish clips are authored by the semantic engine (`auto`), which
+    writes the recap natively from that language's subtitles.
+    """
+    extra = [c for c in cfg["language"]["target_languages"]
+             if c not in ("en", "zh")]
+    if extra:
+        raise SystemExit(
+            f"The classic `run` engine supports en + zh clips only "
+            f"(requested: {extra}). For Arabic/Spanish use:\n"
+            f"    python -m recap.cli auto --movie movie.mp4 "
+            f"--langs {','.join(sorted(extra))} "
+            f"--subtitle-{sorted(extra)[0]} movie.{sorted(extra)[0]}.srt\n"
+            "The semantic engine writes the recap natively in that language "
+            "from its subtitle (or --subtitle-<lang> / <movie>.<lang>.srt)."
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="recap",
-        description="Movie-Recaps-style recap bot (EN + Simplified Chinese)",
+        description="Movie-Recaps-style recap bot "
+                    "(languages: en, zh, ar, es)",
     )
     ap.add_argument("--config", default=None, help="path to an alternate config.yaml")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -176,7 +245,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="run the full pipeline")
     p_run.add_argument("--movie", action="append", help="source clips (comma-separated)")
     p_run.add_argument("--storyboard", action="store_true", help="placeholder scenes if no clips")
-    p_run.add_argument("--langs", default=None, help="comma list, e.g. en,zh")
+    p_run.add_argument("--langs", default=None, help="comma list, e.g. en,zh "
+                              "(run engine: en/zh only)")
     p_run.add_argument("--name", default=None, help="output name")
     p_run.add_argument("--script-file", default=None, help="pre-written EN script")
     p_run.add_argument("--zh-file", default=None, help="pre-written ZH translation")
@@ -187,13 +257,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="auto-recap a movie: extract dialogue -> LLM writes recap -> clips",
     )
     p_auto.add_argument("--movie", required=True, help="movie file path")
-    p_auto.add_argument("--subtitle", default=None, help="explicit dialogue subtitle (.srt)")
+    p_auto.add_argument("--subtitle", default=None, help="explicit dialogue subtitle (.srt) "
+                              "for the English/master source")
+    for _code in ("ar", "es", "zh"):
+        p_auto.add_argument(
+            f"--subtitle-{_code}", default=None,
+            help=f"{_code.upper()} dialogue subtitle (.srt) — the {_code} clip is "
+                 f"written natively from it (or name it <movie>.{_code}.srt).",
+        )
     p_auto.add_argument("--whisper-model", default=None, help="whisper model size")
     p_auto.add_argument("--whisper-device", default=None,
                         help="whisper device: auto | cpu | cuda | cuda:0")
     p_auto.add_argument("--minutes", default=None, type=int,
                         help="target narration length in minutes (~150 wpm)")
-    p_auto.add_argument("--langs", default=None, help="comma list, e.g. en,zh")
+    p_auto.add_argument("--seconds", default=None, type=int,
+                        help="target narration length in seconds (overrides --minutes)")
+    p_auto.add_argument("--langs", default=None,
+                        help="comma list, e.g. en,zh,ar,es "
+                             "(language of the clips to render)")
     p_auto.add_argument("--name", default=None, help="output name")
     p_auto.set_defaults(func=cmd_auto)
 

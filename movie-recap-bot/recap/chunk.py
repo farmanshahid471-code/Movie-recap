@@ -16,7 +16,7 @@ sentence of dialogue is ever split or dropped.
 """
 from __future__ import annotations
 
-from .dialogue import _fmt, to_transcript_text
+from .dialogue import to_transcript_text
 
 
 def chunk_cues(
@@ -46,6 +46,13 @@ def chunk_cues(
 
     first = min(c["start"] for c in norm)
     last = max(c["end"] for c in norm)
+
+    # The first window ALWAYS starts at the film's start (0:00), not at the
+    # first spoken cue. Movies routinely open with a dialogue-free scene
+    # (cold open, logos, establishing shots); if the first chunk began at the
+    # first cue, that opening footage would never be shown while the
+    # narration talks over the film's real first minutes.
+    first = 0.0
 
     chunks: list[dict] = []
     lo = first

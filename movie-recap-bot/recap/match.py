@@ -393,7 +393,6 @@ def map_beats(
     used: set[int] = set()
     beats: list[dict] = []
     fallback_count = 0
-    n = len(cues)
     total_dur = float(movie_duration or (max((c.get("end", 0) for c in cues), default=0.0)))
     for i, sentence in enumerate(sentences):
         order = [int(x) for x in np.argsort(-sims[i])]

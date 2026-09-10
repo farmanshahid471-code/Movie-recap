@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -14,14 +13,86 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 _DEFAULTS: dict[str, Any] = {
     "project": {"name": "recap-project", "output_dir": "output", "cache_dir": ""},
-    "language": {"target_languages": ["en"], "zh_variant": "zh-CN"},
+    # Languages whose clips to render. "en" is authored from the movie's own
+    # audio/dialogue; "zh"/"ar"/"es" are authored natively when a subtitle in
+    # that language is provided (language.sources or <movie>.<code>.srt next to
+    # the film), otherwise they fall back to a line-aligned translation of the
+    # English recap.
+    "language": {"target_languages": ["en"], "zh_variant": "zh-CN",
+                 "sources": {}},
     "narration": {
         "words_target": 2000,      # ~13-14 min at ~150 wpm (full-length recap)
         "words_min": 600,
         "words_max": 4200,
-        "lang_voice": {"en": "en-US-ChristopherNeural", "zh": "zh-CN-YunxiNeural"},
+        "words_per_minute": 150,   # speech rate used for all length maths
+        # Default edge-tts narrators per language (all warm, deep male).
+        "lang_voice": {"en": "en-US-ChristopherNeural",
+                       "zh": "zh-CN-YunjianNeural",
+                       "ar": "ar-SA-HamedNeural",    # Modern Standard Arabic
+                       "es": "es-MX-JorgeNeural"},   # Latin American Spanish
         "rate": "+0%",
+        # edge-tts pitch shift in Hz ("-6Hz" deeper, "+6Hz" brighter; "-0Hz" = off)
+        "pitch": "-0Hz",
         "tts_provider": "edge",
+        # Re-run the GENERATED narration audio through faster-whisper and lock
+        # every cue (and word) to what is actually spoken. Works with ANY TTS
+        # provider — for openai/elevenlabs this replaces guessed cue times
+        # with measured ones. Cached per audio content; set false to skip.
+        "whisper_align": True,
+        # Optional smaller/faster model just for the narration alignment
+        # (defaults to dialogue.whisper_model, i.e. "small").
+        "whisper_align_model": None,
+        # Close every video with the channel outro ("If you enjoyed the
+        # video, don't forget to leave a like...") like real recap channels.
+        "sign_off": True,
+        # VISUAL MATCH: size each section's narration to the film time it
+        # covers (instead of by beat density), cap dense sections at what
+        # their footage can show at 1x, pace sentence anchors so every
+        # sentence's window is at least as long as the sentence, and fit
+        # sections the writer over-delivers (the budget is a ceiling, not
+        # a suggestion): one condense rewrite that keeps the story, then a
+        # mechanical trim only as the backstop. This is what lets the recap
+        # play at normal speed -- no slow motion, no frozen frames (those
+        # remain only as a safety net).
+        "visual_match": True,
+        # Final pass over the finished script: remove the tells of
+        # AI-generated writing (not-X-but-Y, one-line closers, staged
+        # run-ups, forced triads, stock AI words, ...) so the narration
+        # reads like a person wrote it. Adapted from blader/humanizer
+        # (MIT). Guarded by the timing locks: the sentence count stays
+        # exact and each line within +10% +2 words, so a rewrite can
+        # never outrun its footage. RECAP_HUMANIZE=0 disables.
+        "humanize": True,
+    },
+    # Step D — chronological timeline (replaces semantic vector matching).
+    # Beats advance monotonically through the film and every beat's visual is
+    # locked to its narration cue, so video length == audio length exactly.
+    "timeline": {
+        "micro_cut_seconds": 3.0,  # aim for a new shot roughly every 3s
+        "max_cuts_per_beat": 3,    # a long sentence becomes up to 3 micro-shots
+        "min_cut_seconds": 1.2,    # never flash a shot shorter than this
+        "pre_roll": 0.4,           # start each shot slightly before its moment
+        # Place the micro-cut points inside a sentence ON MEASURED WORD
+        # boundaries (clause breaks: after commas, before and/but/while),
+        # so the picture switches exactly when the narrator changes subject.
+        "cut_on_words": True,
+        # Snap every cut's film position onto the film's REAL shot changes
+        # (one cached PySceneDetect pass per movie; `pip install
+        # scenedetect[opencv]`), so each visual begins on an actual camera
+        # cut the way a human edit does. No scenedetect -> un-snapped.
+        "snap_to_scenes": True,
+        "snap_tolerance": 0.8,   # max seconds to move a cut onto a boundary
+        # How far the visuals may run AHEAD of the moment being narrated
+        # (safety valve; group pacing keeps the typical lead near zero).
+        "max_lead_seconds": 3.0,
+        # MOTION GUARANTEE: in dialogue-dense sections the narration can be
+        # longer than the footage behind it. Instead of freezing the picture
+        # or running ahead, the footage plays in slow motion down to this
+        # speed (0.35x still looks smooth at 30fps). 1.0 disables slow-mo.
+        "min_speed": 0.35,
+        # A cut must show at least this much NEW film, otherwise it continues
+        # the current footage seamlessly (micro-jumps read as stutters).
+        "min_new_footage": 0.8,
     },
     # Whisper ASR tuning (auto-recap from the movie's own audio).
     "dialogue": {
@@ -36,27 +107,49 @@ _DEFAULTS: dict[str, Any] = {
     # windows never overflow. Windows of `window_seconds` sliding by
     # `window_seconds - overlap_seconds`, each carrying 30s of context.
     "chunking": {
-        "window_seconds": 300.0,   # 5-minute logical blocks
+        "window_seconds": 180.0,   # 3-minute blocks (maximum-precision mode)
         "overlap_seconds": 30.0,   # overlap between adjacent blocks
         "parallel": False,         # Ollama is single-user; keep serial by default
         "model": None,             # optional smaller/faster model for the
                                    # chunk-summary pass, e.g. "qwen2.5:3b"
     },
-    # Step D — semantic timestamp mapping (recap sentence -> movie moment).
+    # Step A (pass 1.5) — optional VISUAL pass. DeepSeek's chat API is
+    # text-only, so narration is blind to silent set-pieces. When a key for a
+    # vision-capable provider exists (default: GEMINI_API_KEY, free tier), the
+    # film's frames are captioned and the notes merged into each chunk's beat
+    # list. Skipped gracefully (text-only) when no key is present.
+    "vision": {
+        "enabled": True,
+        "provider": "gemini",      # gemini (free, multimodal) | openai | groq
+        "model": "gemini-3.6-flash",  # Gemini Flash models are multimodal
+        "base_url": None,          # None = provider default (Gemini OpenAI-compat)
+        "cadence_seconds": 20.0,   # sample ~every 20s of film
+        "scene_threshold": 0.35,   # also caption real shot changes above this
+        "max_frames": 400,         # hard cap per movie (API-quota friendly)
+        "width": 512,              # JPEG width sent to the vision model
+        "frames_per_request": 4,   # frames per API call (free-tier economy)
+    },
+    # LEGACY semantic vector matcher (retired from beat selection — the
+    # chronological timeline in recap/timeline.py maps narration lines to film
+    # windows now). Only semantic.clip.mode is still read by the pipeline.
     "semantic": {
-        "enabled": True,           # auto-recap maps each line to a film moment
-        "embedding_model": "all-MiniLM-L6-v2",  # 384-dim, runs locally
-        "store": "auto",           # auto | local | supabase (auto: supabase when creds exist)
-        "top_k": 3,                # candidates considered per recap line
-        "min_score": 0.10,         # below this -> even-beat fallback for that line
-        "pre_roll": 0.5,           # seconds of footage before the matched cue
-        "clip_pad": 0.15,          # extra footage after the narration of a line
-        "min_clip": 0.8,           # never cut a beat shorter than this
-        "max_clip": 10.0,          # nor longer than this
-        "clip": {"mode": "copy"},  # copy (fast, keyframe) | reencode (frame-exact)
+        "enabled": True,
+        "embedding_model": "all-MiniLM-L6-v2",  # 384-dim, runs locally (legacy)
+        "store": "auto",           # auto | local | supabase (legacy)
+        "top_k": 3,                # candidates considered per recap line (legacy)
+        "min_score": 0.10,         # below this -> even-beat fallback (legacy)
+        "pre_roll": 0.5,           # seconds of footage before the matched cue (legacy)
+        "clip_pad": 0.15,          # extra footage after the narration of a line (legacy)
+        "min_clip": 0.8,           # never cut a beat shorter than this (legacy)
+        "max_clip": 10.0,          # nor longer than this (legacy)
+        "clip": {"mode": "reencode"},  # reencode = frame-exact (required for A/V lock)
     },
     "subtitles": {
         "font": "Noto Serif CJK SC",
+        # Per-language burned-subtitle fonts; missing codes fall back to font.
+        # Arabic needs a shaped Arabic typeface (default "Arial" ships with
+        # Windows); others reuse the CJK font's Latin glyphs.
+        "lang_font": {"ar": "Arial"},
         "fontsize": 56,
         "margin_v": 96,
         "margin_x": 40,
@@ -83,7 +176,8 @@ _DEFAULTS: dict[str, Any] = {
         "bgm": "",
         "bgm_volume": 0.12,
     },
-    "llm": {"provider": "ollama", "model": "qwen2.5", "base_url": "http://localhost:11434/v1"},
+    "llm": {"provider": "deepseek", "model": "deepseek-chat",
+            "base_url": "https://api.deepseek.com/v1"},
 }
 
 
@@ -144,16 +238,55 @@ def load_config(path: str | Path | None = None) -> dict:
     cfg["llm"]["provider"] = os.environ.get(
         "LLM_PROVIDER", cfg["llm"].get("provider", "")
     )
-    cfg["llm"]["model"] = os.environ.get("MODEL_NAME", cfg["llm"].get("model", "qwen2.5"))
-    # Ollama base URL (OpenAI-compatible).
-    cfg["llm"]["base_url"] = os.environ.get(
-        "OLLAMA_BASE_URL", cfg["llm"].get("base_url", "http://localhost:11434/v1")
+    cfg["llm"]["model"] = os.environ.get(
+        "MODEL_NAME", cfg["llm"].get("model", "deepseek-chat")
     )
-    if cfg["llm"]["provider"] == "ollama":
+    # Base URL is per-provider. Previously OLLAMA_BASE_URL was applied to every
+    # provider, so a stale env var silently pointed DeepSeek at localhost:11434.
+    _prov = (cfg["llm"].get("provider") or "").strip().lower()
+    _PROVIDER_BASE_ENV = {
+        "ollama": ("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+        "deepseek": ("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+        "openai": ("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        "groq": ("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+        "gemini": ("GEMINI_BASE_URL",
+                   "https://generativelanguage.googleapis.com/v1beta/openai/"),
+    }
+    _env_key, _fallback = _PROVIDER_BASE_ENV.get(_prov, ("", ""))
+    if _env_key and os.environ.get(_env_key):
+        cfg["llm"]["base_url"] = os.environ[_env_key]
+    elif not cfg["llm"].get("base_url") and _fallback:
+        cfg["llm"]["base_url"] = _fallback
+    if _prov == "ollama" and cfg["llm"].get("base_url"):
         os.environ.setdefault("OLLAMA_BASE_URL", cfg["llm"]["base_url"])
     cfg["narration"]["tts_provider"] = os.environ.get(
         "TTS_PROVIDER", cfg["narration"].get("tts_provider", "edge")
     )
+    # Narration sync/style toggles (see recap/align.py + recap/script.py).
+    if "RECAP_WHISPER_ALIGN" in os.environ:
+        cfg["narration"]["whisper_align"] = os.environ[
+            "RECAP_WHISPER_ALIGN"
+        ].strip().lower() not in ("0", "false", "no", "off")
+    if "RECAP_SIGN_OFF" in os.environ:
+        cfg["narration"]["sign_off"] = os.environ[
+            "RECAP_SIGN_OFF"
+        ].strip().lower() not in ("0", "false", "no", "off")
+    if "RECAP_HUMANIZE" in os.environ:
+        cfg["narration"]["humanize"] = os.environ[
+            "RECAP_HUMANIZE"
+        ].strip().lower() not in ("0", "false", "no", "off")
+    # Vision pass toggles (see recap/vision.py). Keys come from the provider's
+    # env var (gemini -> GEMINI_API_KEY), which _load_dotenv already imported.
+    if "VISION_ENABLED" in os.environ:
+        cfg["vision"]["enabled"] = os.environ["VISION_ENABLED"].strip().lower() not in (
+            "0", "false", "no", "off"
+        )
+    if os.environ.get("VISION_PROVIDER"):
+        cfg["vision"]["provider"] = os.environ["VISION_PROVIDER"].strip().lower()
+    if os.environ.get("VISION_MODEL"):
+        cfg["vision"]["model"] = os.environ["VISION_MODEL"].strip()
+    if os.environ.get("VISION_BASE_URL"):
+        cfg["vision"]["base_url"] = os.environ["VISION_BASE_URL"].strip()
 
     # Language tags: zh -> configured zh_variant
     langs = []
