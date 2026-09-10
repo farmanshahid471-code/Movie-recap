@@ -1366,7 +1366,17 @@ def generate_segmented_script(
         else:
             wins = []
         for s, (lo, hi) in zip(sents, wins):
-            out.append({"sentence": s, "film_start": lo, "film_end": hi})
+            out.append({
+                "sentence": s, "film_start": lo, "film_end": hi,
+                # The section's own film territory (see _visual_matched_
+                # budgets): the zone this section's narration must walk.
+                # timeline.rewindow_to_speech() re-sizes each sentence's
+                # window from its MEASURED speech duration after TTS, so
+                # the timeline can play everything at 1x no matter how
+                # fast or slow the voice actually speaks.
+                "zone_lo": t0,
+                "zone_hi": min(t1, zone_hi[pos]),
+            })
         if sents:
             tail = " ".join(sents[-2:])   # two sentences of carry-over context
 

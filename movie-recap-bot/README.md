@@ -420,7 +420,14 @@ window (the film between its moment and the next sentence's moment) is at
 least as long as the sentence takes to say. The result: the recap plays at
 normal speed from the first cut to the last — the narration and the picture
 advance in lockstep, and neither slow motion nor a held frame is ever *needed*
-to keep them together. And the budget is **enforced, not requested**: if the
+to keep them together. And because estimates can be wrong, the lock is
+**measured, not guessed**: after the voice is synthesized, every sentence's
+window is re-sized from its *measured* duration (`rewindow_to_speech`), so a
+slower voice, a longer pause or a different language can never make a window
+smaller than its sentence — the picture walks each section's film in step
+with the real narration (a slice per sentence, the reference-channel edit
+shape), and the run log prints the voice's true words-per-minute against the
+configured one. And the budget is **enforced, not requested**: if the
 writer over-delivers (LLMs routinely return 1.5–2× their word budget, and the
 polish pass can add ~30% more), the section is first sent back for one
 **condense pass** — rewrite the same story beats, same order, tighter wording,

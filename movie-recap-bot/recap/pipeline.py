@@ -716,7 +716,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         b_marker = tdir / f"script_{code}.marker.json"
         b_sig = _sig(merged, cfg["llm"].get("provider"),
                      cfg["llm"].get("model"), target,
-                     bool(nar.get("sign_off", True)), "segmented-v11")
+                     bool(nar.get("sign_off", True)), "segmented-v12")
         seg_path = tdir / f"script_{code}.segments.json"
         segments = None
         if _marker_ok(b_marker, b_sig) and seg_path.exists():
@@ -899,9 +899,23 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
             seg_for_lang = [
                 {"sentence": c.text,
                  "film_start": ms[min(i, len(ms) - 1)]["film_start"],
-                 "film_end": ms[min(i, len(ms) - 1)]["film_end"]}
+                 "film_end": ms[min(i, len(ms) - 1)]["film_end"],
+                 "zone_lo": ms[min(i, len(ms) - 1)].get("zone_lo"),
+                 "zone_hi": ms[min(i, len(ms) - 1)].get("zone_hi")}
                 for i, c in enumerate(cues_t)
             ]
+        # VISUAL MATCH, measured: the script sized every sentence's window
+        # from an ESTIMATE of its speech (words / words_per_minute), before
+        # any audio existed. The voice speaks at its own real rate
+        # (rate "-8%", the voice itself, the language), so when the real
+        # narration is slower than the estimate every window comes out
+        # smaller than its sentence -- the timeline then slow-moes
+        # essentially every section and the narration runs ahead of the
+        # picture from the first scene. The REAL durations are now
+        # measured; re-size each section's windows to them so every
+        # section that fits its footage plays at exactly 1x.
+        seg_for_lang = timeline.rewindow_to_speech(
+            seg_for_lang, durations, movie_dur)
         beats = timeline.build_timeline(
             seg_for_lang, durations, movie_dur, tl_cfg,
             word_times=[c.words for c in cues_t],
@@ -916,6 +930,29 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
             tl_stats.get("slowed_seconds", 0.0),
         )
         print(f"  * [{code}] timeline: {_report}")
+        # Honest sync prognosis: if sections still had to slow down after
+        # the measured re-windowing, say WHY -- the section's narration is
+        # genuinely longer than the film behind it (over-budget section or
+        # a far slower voice than words_per_minute assumes).
+        _slowed = tl_stats.get("slowed_groups", 0)
+        if _slowed:
+            print(f"  ! [{code}] {_slowed} section(s) still play below 1x: "
+                  "their measured narration is longer than the film zone "
+                  "behind them. If this is most of the video, lower "
+                  "narration.words_target (or raise words_per_minute to "
+                  "match the voice's real rate).")
+        # Measured narration rate vs configured -- grounds future wpm
+        # tuning in reality instead of guesses.
+        try:
+            _spoken = count_words(" ".join(c.text for c in cues_t))
+            if audio_span > 0 and _spoken > 0:
+                _real = _spoken / audio_span * 60
+                print(f"  * [{code}] measured narration rate: "
+                      f"{_real:.0f} wpm (configured words_per_minute: "
+                      f"{wpm}; window sizing no longer depends on this "
+                      "guess)")
+        except Exception:
+            pass
 
         # Resume: if the final render already exists for these exact inputs
         # (narration + beats + movie + subtitle/assembly settings), skip the

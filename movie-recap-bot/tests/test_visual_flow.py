@@ -725,6 +725,95 @@ def test_humanizer_full_loop_keeps_timing() -> None:
           "outrun its footage is rejected and the original kept")
 
 
+def test_rewindow_to_speech_guarantees_1x() -> None:
+    """THE REPORTED BUG: 'the narration gets ahead from the start, the
+    visuals move slowly.' The script sized every window from an ESTIMATE
+    (words / words_per_minute); the real voice speaks ~35% slower than
+    that, so every window is smaller than its sentence and the timeline
+    slow-moes the whole video. rewindow_to_speech() re-sizes the windows
+    from the MEASURED durations -> everything plays at 1x."""
+    # 3 sections x 270s zones; 5 sentences each, est-sized windows (~6.5s,
+    # what the 150-wpm estimate produces for a 12-word sentence)
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    segs: list[dict] = []
+    for sec in range(3):
+        zl, zh = sec * 270.0, sec * 270.0 + 270.0
+        for k in range(5):
+            a = zl + 20.0 + k * 16.0
+            segs.append({"sentence": s, "film_start": a - 2.6,
+                         "film_end": a + 3.9,
+                         "zone_lo": zl, "zone_hi": zh})
+    # the REAL audio: the voice speaks 35% slower than the estimate ->
+    # every cue spans 9.0s, not 6.5s
+    n = len(segs)
+    cues = [TimedCue(s, i * 9.0, i * 9.0 + 8.4) for i in range(n)]
+    span = (n - 1) * 9.0 + 8.4
+    durs = timeline.lock_durations(cues, span)
+
+    # --- before the fix: every section slow-moes --------------------------
+    stats_bug: dict = {}
+    timeline.build_timeline(segs, durs, 6000.0, dict(CFG), stats=stats_bug)
+    assert stats_bug.get("slowed_groups", 0) >= 3, \
+        "estimate-sized windows + slower voice must slow-mo (bug repro)"
+
+    # --- after the fix: windows re-sized to the measured speech -----------
+    rewin = timeline.rewindow_to_speech(segs, durs, 6000.0)
+    for i, o in enumerate(rewin):
+        zl, zh = segs[i]["zone_lo"], segs[i]["zone_hi"]
+        assert zl - 1e-6 <= o["film_start"] < o["film_end"] <= zh + 1e-6, \
+            "window stays inside its section's zone"
+        assert o["film_end"] - o["film_start"] >= durs[i] - 1e-6, \
+            "window is at least the sentence's real duration -> 1x fits"
+        if i and segs[i]["zone_lo"] == segs[i - 1]["zone_lo"]:
+            assert abs(o["film_start"] - rewin[i - 1]["film_end"]) <= 0.01, \
+                "windows walk the zone contiguously"
+    stats: dict = {}
+    btl = timeline.build_timeline(rewin, durs, 6000.0, dict(CFG), stats=stats)
+    assert stats.get("slowed_groups", 0) == 0, "no slow motion anywhere"
+    assert stats.get("held_shots", 0) == 0, "no frozen frames"
+    for _s0, _d0, f0, sp0 in _cuts_in_order(btl):
+        assert abs(sp0 - 1.0) < 1e-9, f"expected 1x, got {sp0}x"
+        assert f0 == 0.0
+    total = sum(d for _, d, _f, _v in _cuts_in_order(btl))
+    assert abs(total - span) < 1e-6, "A/V lock exact"
+    prev_end = -1.0
+    for st0, d0, f0, sp0 in _cuts_in_order(btl):
+        assert st0 >= prev_end - 1e-6, "no replay"
+        prev_end = max(prev_end, st0 + (d0 - f0) * sp0)
+    # the picture stays WITH the narration's zone (no look-ahead)
+    for b, o in zip(btl, rewin):
+        assert o["zone_lo"] - 1e-6 <= b["film_start"] <= o["zone_hi"] + 1e-6
+    print(f"ok: 35%-slower voice -> windows re-sized from measured speech "
+          f"-> all 1x, {total:.0f}s exact lock (before: "
+          f"{stats_bug.get('slowed_groups')} slowed sections)")
+
+
+def test_rewindow_overbudget_walks_contiguously() -> None:
+    """A section whose measured narration genuinely exceeds its film zone
+    keeps a contiguous, monotone walk (the slow-mo net then handles it --
+    rare and honest)."""
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    segs = [{"sentence": s, "film_start": 10.0 + i, "film_end": 10.5 + i,
+             "zone_lo": 0.0, "zone_hi": 100.0} for i in range(15)]
+    durs = [9.0] * 15                      # 135s of speech, 100s of film
+    rewin = timeline.rewindow_to_speech(segs, durs, 6000.0)
+    prev_hi = 0.0
+    for i, o in enumerate(rewin):
+        assert o["film_start"] >= prev_hi - 0.01, "contiguous, monotone"
+        assert o["film_end"] <= 100.0 + 1e-6, "never leaves the zone"
+        prev_hi = o["film_end"]
+    assert abs(prev_hi - 100.0) <= 0.01, "the walk fills the zone exactly"
+
+
+def test_rewindow_preserves_unzoned_sentences() -> None:
+    """Sentences without zone info (the sign-off outro, old cached
+    segments) keep their windows untouched."""
+    segs = [{"sentence": "Thanks for watching.", "film_start": 400.0,
+             "film_end": 406.0}]
+    out = timeline.rewindow_to_speech(segs, [8.0], 6000.0)
+    assert out[0]["film_start"] == 400.0 and out[0]["film_end"] == 406.0
+
+
 if __name__ == "__main__":
     test_no_replay_same_window()
     test_no_replay_overlapping_windows()
@@ -746,4 +835,7 @@ if __name__ == "__main__":
     test_overdelivery_is_condensed_not_dropped()
     test_humanize_script_pass()
     test_humanizer_full_loop_keeps_timing()
+    test_rewindow_to_speech_guarantees_1x()
+    test_rewindow_overbudget_walks_contiguously()
+    test_rewindow_preserves_unzoned_sentences()
     print("\nALL VISUAL-FLOW TESTS PASSED")

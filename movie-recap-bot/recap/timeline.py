@@ -457,6 +457,88 @@ def build_timeline(
     return beats
 
 
+def rewindow_to_speech(
+    segments: list[dict],
+    durations: list[float],
+    movie_dur: float = 0.0,
+) -> list[dict]:
+    """Re-size every sentence's film window from its MEASURED speech
+    duration -- the structural fix for "the narration runs ahead of the
+    visuals / the visuals move slowly".
+
+    Why this exists: the script sizes each sentence's window from an
+    ESTIMATE of its speech length (``words / words_per_minute``), computed
+    before any audio exists. If the real voice speaks slower than the
+    configured wpm (voice choice, ``rate: "-8%"``, longer pauses, another
+    language), every window comes out smaller than its sentence's real
+    duration -- and the timeline then paces essentially every section
+    below 1x: permanent slow motion, the picture falling behind the
+    narration from the first scene. No script-side fix can cure that,
+    because the script only ever sees the estimate.
+
+    After TTS (+ whisper alignment) the pipeline knows the REAL duration of
+    every sentence. This pass re-walks each section's film zone (the
+    ``zone_lo``/``zone_hi`` the script attached) allocating each sentence a
+    window proportional to its measured duration, contiguously and in
+    order. Because the section budgets capped the narration at ~40% of the
+    zone's film time, every window comes out at least ~2x the sentence's
+    real duration: the timeline can then play EVERY cut at 1x, while the
+    picture walks the film in step with the narration (a slice per
+    sentence, exactly the reference-channel edit shape). Sections that
+    genuinely over-run their zone (real narration longer than the film
+    behind it) keep a contiguous walk and the timeline's slow-motion
+    safety net -- that is now rare and honest instead of everywhere.
+
+    Sentences without zone information (the sign-off outro, old cached
+    segments) keep their existing windows untouched.
+    """
+    n = min(len(segments), len(durations))
+    if n <= 0:
+        return segments
+    out = [dict(s) for s in segments[:n]]
+    i = 0
+    resized = 0
+    while i < n:
+        zl = segments[i].get("zone_lo")
+        zh = segments[i].get("zone_hi")
+        if zl is None or zh is None or float(zh) <= float(zl) + 1e-6:
+            i += 1
+            continue
+        j = i
+        while (j < n and segments[j].get("zone_lo") == zl
+               and segments[j].get("zone_hi") == zh):
+            j += 1
+        # sentences i..j-1 share this film zone
+        durs = [max(float(durations[k]), 0.05) for k in range(i, j)]
+        total = sum(durs)
+        lo0 = max(float(zl), 0.0)
+        hi0 = float(zh)
+        if movie_dur > 0:
+            hi0 = min(hi0, movie_dur)
+        zone = max(hi0 - lo0, 0.0)
+        if zone <= 0 or total <= 0:
+            i = j
+            continue
+        scale = zone / total  # >= 1 whenever the section fits its footage
+        walk = 0.0
+        for rel in range(i, j):
+            lo = lo0 + walk
+            walk += durs[rel - i] * scale
+            hi = min(lo0 + walk, hi0)
+            if hi < lo:
+                hi = lo
+            out[rel]["film_start"] = round(lo, 3)
+            out[rel]["film_end"] = round(max(hi, lo + 0.8), 3)
+            resized += 1
+        i = j
+    if resized:
+        print(f"  * visual match: {resized} sentence windows re-sized to "
+              "the MEASURED narration (the voice's real rate no longer has "
+              "to be guessed) -- every section can now play at 1x",
+              flush=True)
+    return out
+
+
 def flatten_cuts(beats: list[dict]) -> list[tuple[float, float, float]]:
     """All micro-cuts of every beat, in play order.
 
