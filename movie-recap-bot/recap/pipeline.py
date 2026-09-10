@@ -56,6 +56,15 @@ def _rate_key(provider: str, voice: str, rate: str) -> str:
                      str(rate or "").strip()))
 
 
+def narration_voice(nar_cfg: dict, code: str) -> str:
+    """The voice that will actually narrate ``code`` (config override or the
+    language default). ONE resolution shared by the synthesis call, the
+    script-budget loop and the CLI -- so the measured-rate cache is always
+    keyed by the voice that really spoke, never by an empty default."""
+    return ((nar_cfg.get("lang_voice") or {}).get(code)
+            or languages.voice_default(code))
+
+
 def measured_wpm_for(workdir: Path, provider: str, voice: str,
                      rate: str) -> float | None:
     """This voice's measured words-per-minute from a previous run, or None."""
@@ -750,11 +759,9 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         # _work/narration_rate.json), budget with reality instead of the
         # config guess. The guess being wrong in EITHER direction used to
         # distort every downstream length calculation.
-        _voice = next((l.get("voice", "") for l in resolved
-                       if l.get("code") == code), "")
         _measured = measured_wpm_for(
-            wd, nar.get("tts_provider", "edge"), _voice,
-            nar.get("rate", "+0%"))
+            wd, nar.get("tts_provider", "edge"),
+            narration_voice(nar, code), nar.get("rate", "+0%"))
         if _measured:
             print(f"  * using the MEASURED rate for this voice "
                   f"({_measured:.0f} wpm, cached from a previous run) "
@@ -1029,11 +1036,10 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
             _spoken = count_words(" ".join(c.text for c in cues_t))
             if audio_span > 0 and _spoken > 0:
                 _real = _spoken / audio_span * 60
-                _voice = next((l.get("voice", "") for l in resolved
-                               if l.get("code") == code), "")
                 save_measured_wpm(
                     wd, cfg["narration"].get("tts_provider", "edge"),
-                    _voice, cfg["narration"].get("rate", "+0%"),
+                    narration_voice(cfg["narration"], code),
+                    cfg["narration"].get("rate", "+0%"),
                     _real, audio_span, _spoken)
                 print(f"  * [{code}] measured narration rate: "
                       f"{_real:.0f} wpm -- cached for this voice; the next "

@@ -914,6 +914,33 @@ def test_measured_wpm_cache_roundtrip() -> None:
           "the roundtrip")
 
 
+def test_narration_voice_one_resolution() -> None:
+    """The measured-rate cache keys on the voice that ACTUALLY speaks:
+    one resolver (config override or language default) shared by the
+    synthesis call, the budget loop and the CLI."""
+    from recap import pipeline as pipe
+
+    # config override wins
+    assert pipe.narration_voice(
+        {"lang_voice": {"en": "en-US-AndrewNeural"}}, "en") \
+        == "en-US-AndrewNeural"
+    # missing override -> the language default (never an empty key)
+    v = pipe.narration_voice({"lang_voice": {}}, "en")
+    assert v and v == pipe.languages.voice_default("en")
+    v2 = pipe.narration_voice({}, "ar")
+    assert v2 and v2 == pipe.languages.voice_default("ar")
+    # and the cache round-trips under exactly that resolution
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        wd = Path(td)
+        pipe.save_measured_wpm(wd, "edge", v, "+0%", 160.0, 900.0, 2400)
+        assert pipe.measured_wpm_for(wd, "edge", v, "+0%") is not None
+        assert pipe.measured_wpm_for(wd, "edge", "", "+0%") is None, \
+            "an empty voice key must never match the real voice's rate"
+    print("ok: one voice resolution everywhere; rate cache keys on the "
+          "voice that actually speaks")
+
+
 def test_floor_warning_when_trim_cannot_fit() -> None:
     """A section of 3 very long sentences (the trim floor) that is still
     over budget must be reported LOUDLY, never shipped silently -- silent
@@ -992,5 +1019,6 @@ if __name__ == "__main__":
     test_rewindow_preserves_unzoned_sentences()
     test_enforcement_uses_section_budget_not_ceiling()
     test_measured_wpm_cache_roundtrip()
+    test_narration_voice_one_resolution()
     test_floor_warning_when_trim_cannot_fit()
     print("\nALL VISUAL-FLOW TESTS PASSED")

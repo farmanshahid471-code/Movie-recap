@@ -125,7 +125,7 @@ def cmd_auto(args: argparse.Namespace) -> None:
         # rate (spoken words / final audio span, cached in _work/
         # narration_rate.json), convert minutes->words with reality
         # instead of the config guess.
-        voice = (nar.get("lang_voice") or {}).get("en", "")
+        voice = pipeline.narration_voice(nar, "en")
         measured = pipeline.measured_wpm_for(
             work_dir(cfg), nar.get("tts_provider", "edge"), voice, pace)
         if measured:
