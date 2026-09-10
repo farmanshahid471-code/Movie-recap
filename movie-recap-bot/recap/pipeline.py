@@ -40,6 +40,59 @@ def _sig(*parts: object) -> str:
     return h.hexdigest()[:20]
 
 
+# --------------------------------------------------------------- voice rate
+# The configured words_per_minute is a GUESS about the TTS voice. The run
+# measures the real thing (spoken words / final audio span -- pauses and
+# trailing silence included, which is the rate that actually determines the
+# video's length) and caches it per (provider, voice, rate) so every later
+# length calculation uses reality instead of the guess. This is what makes
+# `--minutes 20` land on 20 minutes for the voice you actually use.
+RATE_CACHE_NAME = "narration_rate.json"
+
+
+def _rate_key(provider: str, voice: str, rate: str) -> str:
+    return "|".join((str(provider or "").strip(),
+                     str(voice or "").strip(),
+                     str(rate or "").strip()))
+
+
+def measured_wpm_for(workdir: Path, provider: str, voice: str,
+                     rate: str) -> float | None:
+    """This voice's measured words-per-minute from a previous run, or None."""
+    try:
+        data = json.loads(
+            (Path(workdir) / RATE_CACHE_NAME).read_text(encoding="utf-8"))
+        entry = data.get(_rate_key(provider, voice, rate)) or {}
+        wpm = float(entry.get("wpm", 0.0))
+        if 50.0 <= wpm <= 600.0:
+            return wpm
+    except Exception:
+        pass
+    return None
+
+
+def save_measured_wpm(workdir: Path, provider: str, voice: str, rate: str,
+                      wpm: float, span: float, words: int) -> None:
+    """Persist a measured rate (best-effort; failures are non-fatal)."""
+    if span <= 0 or words <= 0 or not (50.0 <= wpm <= 600.0):
+        return
+    path = Path(workdir) / RATE_CACHE_NAME
+    try:
+        data: dict = {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        data[_rate_key(provider, voice, rate)] = {
+            "wpm": round(float(wpm), 1),
+            "span": round(float(span), 1),
+            "words": int(words),
+        }
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _marker_ok(marker: Path, sig: str) -> bool:
     try:
         return marker.exists() and json.loads(
@@ -692,6 +745,21 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         nar = cfg["narration"]
         target = int(nar.get("words_target", 2000))
         wpm = int(nar.get("words_per_minute", 150))
+        # SELF-CALIBRATING RATE: if a previous run measured this voice's
+        # real words-per-minute (spoken words / final audio span, cached in
+        # _work/narration_rate.json), budget with reality instead of the
+        # config guess. The guess being wrong in EITHER direction used to
+        # distort every downstream length calculation.
+        _voice = next((l.get("voice", "") for l in resolved
+                       if l.get("code") == code), "")
+        _measured = measured_wpm_for(
+            wd, nar.get("tts_provider", "edge"), _voice,
+            nar.get("rate", "+0%"))
+        if _measured:
+            print(f"  * using the MEASURED rate for this voice "
+                  f"({_measured:.0f} wpm, cached from a previous run) "
+                  f"instead of the configured {wpm} wpm")
+            wpm = int(round(_measured))
         # VISUAL MATCH: never ask for more narration than the film can show
         # at 1x. A recap is normally far shorter than its film, so this only
         # fires for extreme targets (e.g. 25 minutes out of a 30-minute
@@ -716,7 +784,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         b_marker = tdir / f"script_{code}.marker.json"
         b_sig = _sig(merged, cfg["llm"].get("provider"),
                      cfg["llm"].get("model"), target,
-                     bool(nar.get("sign_off", True)), "segmented-v13")
+                     bool(nar.get("sign_off", True)), "segmented-v14")
         seg_path = tdir / f"script_{code}.segments.json"
         segments = None
         if _marker_ok(b_marker, b_sig) and seg_path.exists():
@@ -955,16 +1023,23 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                   "behind them. If this is most of the video, lower "
                   "narration.words_target (or raise words_per_minute to "
                   "match the voice's real rate).")
-        # Measured narration rate vs configured -- grounds future wpm
-        # tuning in reality instead of guesses.
+        # Measured narration rate vs configured -- and CACHED per voice so
+        # the next run budgets with reality instead of the guess.
         try:
             _spoken = count_words(" ".join(c.text for c in cues_t))
             if audio_span > 0 and _spoken > 0:
                 _real = _spoken / audio_span * 60
+                _voice = next((l.get("voice", "") for l in resolved
+                               if l.get("code") == code), "")
+                save_measured_wpm(
+                    wd, cfg["narration"].get("tts_provider", "edge"),
+                    _voice, cfg["narration"].get("rate", "+0%"),
+                    _real, audio_span, _spoken)
                 print(f"  * [{code}] measured narration rate: "
-                      f"{_real:.0f} wpm (configured words_per_minute: "
-                      f"{wpm}; window sizing no longer depends on this "
-                      "guess)")
+                      f"{_real:.0f} wpm -- cached for this voice; the next "
+                      "run's length calculations use it instead of the "
+                      f"configured "
+                      f"{cfg['narration'].get('words_per_minute', 150)}")
         except Exception:
             pass
 

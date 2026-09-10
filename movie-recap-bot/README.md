@@ -427,7 +427,13 @@ slower voice, a longer pause or a different language can never make a window
 smaller than its sentence — the picture walks each section's film in step
 with the real narration (a slice per sentence, the reference-channel edit
 shape), and the run log prints the voice's true words-per-minute against the
-configured one. And the budget is **enforced against what the section was
+configured one. That measured rate is also **cached per voice**
+(`_work/narration_rate.json`, keyed by provider + voice + rate), so every
+later run — including the `--minutes`/`--seconds` → word-target conversion —
+budgets with the voice's *measured* speed instead of the `words_per_minute`
+guess; the first run with a new voice calibrates it. A section that is so
+long-sentenced it cannot be trimmed to budget (the 3-sentence continuity
+floor) is reported loudly instead of shipping silently. And the budget is **enforced against what the section was
 actually allotted, not the raw footage ceiling**: if the writer over-delivers
 (LLMs routinely return 1.5–2× their word budget, and the polish pass can add
 ~30% more), the section is first sent back for one **condense pass** —

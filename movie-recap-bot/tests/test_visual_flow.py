@@ -882,6 +882,90 @@ def test_enforcement_uses_section_budget_not_ceiling() -> None:
           f"{total}/{308} words")
 
 
+def test_measured_wpm_cache_roundtrip() -> None:
+    """The voice's measured words-per-minute persists across runs and keys
+    on (provider, voice, rate) -- the self-calibration behind accurate
+    --minutes targets and honest budgets."""
+    import tempfile
+    from recap import pipeline as pipe
+
+    with tempfile.TemporaryDirectory() as td:
+        wd = Path(td)
+        assert pipe.measured_wpm_for(wd, "edge", "en-US-X", "-8%") is None
+        pipe.save_measured_wpm(wd, "edge", "en-US-X", "-8%",
+                               192.0, 2842.5, 9100)
+        got = pipe.measured_wpm_for(wd, "edge", "en-US-X", "-8%")
+        assert got is not None and abs(got - 192.0) < 0.05
+        # a different voice / rate / provider must not see it
+        assert pipe.measured_wpm_for(wd, "edge", "en-US-X", "+0%") is None
+        assert pipe.measured_wpm_for(wd, "edge", "en-US-Y", "-8%") is None
+        assert pipe.measured_wpm_for(wd, "openai", "en-US-X", "-8%") is None
+        # a second voice merges into the same cache file
+        pipe.save_measured_wpm(wd, "edge", "ar-SA-HamedNeural", "+0%",
+                               140.0, 900.0, 2100)
+        assert abs(pipe.measured_wpm_for(
+            wd, "edge", "ar-SA-HamedNeural", "+0%") - 140.0) < 0.05
+        assert abs(pipe.measured_wpm_for(
+            wd, "edge", "en-US-X", "-8%") - 192.0) < 0.05
+        # out-of-range measurements are never trusted/cached
+        pipe.save_measured_wpm(wd, "edge", "bad", "+0%", 9999.0, 1.0, 2)
+        assert pipe.measured_wpm_for(wd, "edge", "bad", "+0%") is None
+    print("ok: measured wpm caches per provider/voice/rate and survives "
+          "the roundtrip")
+
+
+def test_floor_warning_when_trim_cannot_fit() -> None:
+    """A section of 3 very long sentences (the trim floor) that is still
+    over budget must be reported LOUDLY, never shipped silently -- silent
+    over-delivery is exactly how a 2x script once slipped through."""
+    import io
+    import json
+    from contextlib import redirect_stdout
+    from recap import script as script_mod
+
+    fat = ("What happens over the next few minutes is that the pilot, "
+           "badly injured and half frozen, crawls across the entire width "
+           "of the dark forest while the armed stranger searches the "
+           "wreckage above him, and all of this happens before either man "
+           "understands what the crash has actually started.")  # ~50 words
+    over = [fat, fat, fat]          # 3 sentences, ~150 words, budget ~100
+    assert len(over) == 3
+
+    def fake_complete(provider, model, system, user, **kw):
+        # writer AND condense both return the same fat 3 sentences (the
+        # condense cannot fit -> None -> mechanical trim -> floor)
+        return json.dumps({"sentences": over})
+
+    chunk = {
+        "index": 0, "start": 1000.0, "end": 1150.0,
+        "summary": "A pilot is shot down and hunted through the woods.",
+        "beats": [{"t": 1000.0 + i * 6.0, "text": f"beat {i}"}
+                  for i in range(25)],
+    }
+    orig = script_mod.llm.complete
+    script_mod.llm.complete = fake_complete
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            out = script_mod.generate_segmented_script(
+                [chunk], {"provider": "deepseek", "model": "x"}, 100,
+                words_per_minute=150, lang_name="Spanish",
+                sign_off=False, visual_match=True, humanize=False,
+            )
+    finally:
+        script_mod.llm.complete = orig
+
+    assert len(out) == 3, "the 3-sentence floor held (continuity)"
+    got_words = count_words(" ".join(o["sentence"] for o in out))
+    assert got_words > 115, "the section legitimately could not fit"
+    assert "3-sentence floor" in buf.getvalue(), (
+        "an over-budget section that cannot be trimmed must WARN, not pass "
+        "silently")
+    assert all(o["film_end"] > o["film_start"] for o in out)
+    print(f"ok: un-trimmable over-budget section ({got_words} words) "
+          "ships with a loud floor warning, never silently")
+
+
 if __name__ == "__main__":
     test_no_replay_same_window()
     test_no_replay_overlapping_windows()
@@ -907,4 +991,6 @@ if __name__ == "__main__":
     test_rewindow_overbudget_walks_contiguously()
     test_rewindow_preserves_unzoned_sentences()
     test_enforcement_uses_section_budget_not_ceiling()
+    test_measured_wpm_cache_roundtrip()
+    test_floor_warning_when_trim_cannot_fit()
     print("\nALL VISUAL-FLOW TESTS PASSED")

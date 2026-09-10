@@ -121,15 +121,27 @@ def cmd_auto(args: argparse.Namespace) -> None:
         # the word target by the pace factor to land on the requested length.
         pace = nar.get("rate", "+0%")
         factor = rate_speed_factor(pace)
-        words = int(round(secs / 60 * wpm * factor))
+        # SELF-CALIBRATING: if a previous run measured this voice's real
+        # rate (spoken words / final audio span, cached in _work/
+        # narration_rate.json), convert minutes->words with reality
+        # instead of the config guess.
+        voice = (nar.get("lang_voice") or {}).get("en", "")
+        measured = pipeline.measured_wpm_for(
+            work_dir(cfg), nar.get("tts_provider", "edge"), voice, pace)
+        if measured:
+            eff = float(measured)
+            src = f"measured {eff:.0f} wpm for this voice (cached)"
+        else:
+            eff = wpm * factor
+            src = f"{wpm} wpm x pace {pace} = ~{eff:.0f} wpm (config guess)"
+        words = int(round(secs / 60 * eff))
         # Raise the ceiling to whatever was asked for: silently clamping the
         # target to words_max is how a 900s request became a short video.
         nar["words_target"] = words
         nar["words_min"] = min(int(nar.get("words_min", 600)), words)
         nar["words_max"] = max(int(nar.get("words_max", 4200)), int(words * 1.6))
         print(f"  * Target narration: {secs}s (~{secs / 60:.1f} min) "
-              f"-> {words} words at {wpm} wpm "
-              f"(TTS pace {pace}, effective ~{wpm * factor:.0f} wpm)")
+              f"-> {words} words ({src})")
 
     movie = Path(args.movie)
     if not movie.exists():

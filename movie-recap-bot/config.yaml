@@ -34,7 +34,10 @@ narration:
   words_target: 2250       # 900s at 150 wpm; --seconds/--minutes overrides it
   words_min: 600
   words_max: 6000
-  words_per_minute: 150    # speech rate used for every length calculation
+  words_per_minute: 150    # STARTING GUESS only: after the first run
+                           # the voice's real rate is measured and cached
+                           # (_work/narration_rate.json) and every later
+                           # length calculation uses the measured value
   lang_voice:
     en: "en-US-ChristopherNeural"   # warm, deep male — "storytelling" narrator
     zh: "zh-CN-YunjianNeural"         # Mandarin Chinese (male)

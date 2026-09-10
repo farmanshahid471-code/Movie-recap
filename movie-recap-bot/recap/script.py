@@ -1330,6 +1330,17 @@ def generate_segmented_script(
                               f"({count_words(' '.join(_fitted))} words) "
                               "so it plays at 1x")
                         sents = _fitted
+                    if count_words(" ".join(sents)) > _cap:
+                        # The 3-sentence continuity floor stopped the trim
+                        # (a section of a few very long sentences). Say so
+                        # loudly instead of shipping the bloat silently --
+                        # silent over-delivery is exactly how a 2x script
+                        # once slipped through every check.
+                        print(f"    ! section {pos + 1}/{len(usable)}: "
+                              f"still {count_words(' '.join(sents))} words "
+                              f"after condense+trim (3-sentence floor) for "
+                              f"a {_cap}-word budget -- the timeline will "
+                              "slow this one section to stay in sync")
 
         # Anchor each sentence to the film moment(s) it narrates (beat
         # timecodes) instead of giving the whole chunk to every sentence.
