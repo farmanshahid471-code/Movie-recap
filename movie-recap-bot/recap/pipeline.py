@@ -716,7 +716,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         b_marker = tdir / f"script_{code}.marker.json"
         b_sig = _sig(merged, cfg["llm"].get("provider"),
                      cfg["llm"].get("model"), target,
-                     bool(nar.get("sign_off", True)), "segmented-v12")
+                     bool(nar.get("sign_off", True)), "segmented-v13")
         seg_path = tdir / f"script_{code}.segments.json"
         segments = None
         if _marker_ok(b_marker, b_sig) and seg_path.exists():
@@ -775,6 +775,20 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                   f"length, so the video will be ~{est:.0f}s not "
                   f"{target / max(wpm, 1) * 60:.0f}s. A stronger model "
                   f"(deepseek-chat) usually fixes this.")
+        if got_words > target * 1.35:
+            # Over-delivery used to be silent -- and a script at 2x the
+            # target is what forced near-permanent slow motion (the
+            # narration outrunning the footage) before the budget was
+            # enforced. The enforcement should make this unreachable; this
+            # warning is the tripwire that makes it visible if it ever
+            # comes back.
+            print(f"  ! WARNING: the script is "
+                  f"{got_words / max(target, 1) * 100:.0f}% of the requested "
+                  f"length ({got_words} vs {target} words), so the video "
+                  f"will be ~{est:.0f}s, not the "
+                  f"{target / max(wpm, 1) * 60:.0f}s requested. Delete "
+                  "_work/script_*.segments.json + .marker.json and re-run "
+                  "if this is unexpected.")
         authored[code] = {"segments": segments, "sentences": sentences}
 
     # --------------------------------------------- translations (if needed)

@@ -427,15 +427,18 @@ slower voice, a longer pause or a different language can never make a window
 smaller than its sentence — the picture walks each section's film in step
 with the real narration (a slice per sentence, the reference-channel edit
 shape), and the run log prints the voice's true words-per-minute against the
-configured one. And the budget is **enforced, not requested**: if the
-writer over-delivers (LLMs routinely return 1.5–2× their word budget, and the
-polish pass can add ~30% more), the section is first sent back for one
-**condense pass** — rewrite the same story beats, same order, tighter wording,
-the way an editor shortens a paragraph (no jumps in the causal chain) — and
-only if that fails is it mechanically trimmed to fit (least-essential middle
-sentences; continuity ends and name-bearing lines kept). Every adjustment is
-logged (`writer returned 260 words for a 150-word footage budget — condensed
-to 148 words (story kept)`). This is what keeps the narration from running
+configured one. And the budget is **enforced against what the section was
+actually allotted, not the raw footage ceiling**: if the writer over-delivers
+(LLMs routinely return 1.5–2× their word budget, and the polish pass can add
+~30% more), the section is first sent back for one **condense pass** —
+rewrite the same story beats, same order, tighter wording, the way an editor
+shortens a paragraph (no jumps in the causal chain) — and only if that fails
+is it mechanically trimmed to fit (least-essential middle sentences;
+continuity ends and name-bearing lines kept). Every adjustment is
+logged (`writer returned 260 words for a 88-word section budget — condensed
+to 84 words (story kept)`), and a delivered script more than 35% over the
+requested length raises a loud WARNING — that used to be silent, and a 2×
+script is exactly what forced near-permanent slow motion. This is what keeps the narration from running
 ahead of
 the picture on dialogue-dense sections. (For a typical movie this is far from
 binding — a 17-minute recap of a 2-hour film uses ~15% of the film time — it

@@ -1297,13 +1297,25 @@ def generate_segmented_script(
         # no jumps in the causal chain); only if that fails, mechanically
         # trim the least-essential middle sentences as a backstop.
         if visual_match and sents:
-            _cap = max(int(cap_words[pos]), 40)
+            # Enforce against this section's own word BUDGET (what the
+            # recap's target length actually allotted it), not the raw
+            # footage ceiling in cap_words[pos]. The ceiling is only a
+            # sanity bound for _visual_matched_budgets' redistribution and
+            # is normally far larger than what this section was allotted,
+            # so using it here let sections overshoot their budget 2-7x
+            # uncorrected -- the delivered script came out at ~2x the
+            # requested length and the timeline fell into near-permanent
+            # slow motion. min() keeps it safe: never enforce something
+            # tighter than the footage could show; the 15% margin is the
+            # same sentence-length variance allowance the polish passes
+            # use.
+            _cap = max(min(int(cap_words[pos]), int(budget * 1.15)), 40)
             if count_words(" ".join(sents)) > _cap:
                 _got = count_words(" ".join(sents))
                 _fitted = _condense_section(cfg_llm, sents, _cap, names)
                 if _fitted is not None:
                     print(f"    ... section {pos + 1}/{len(usable)}: writer "
-                          f"returned {_got} words for a {_cap}-word footage "
+                          f"returned {_got} words for a {_cap}-word section "
                           f"budget -- condensed to "
                           f"{count_words(' '.join(_fitted))} words (story "
                           "kept) so it plays at 1x")
@@ -1313,7 +1325,7 @@ def generate_segmented_script(
                     if len(_fitted) != len(sents):
                         print(f"    ... section {pos + 1}/{len(usable)}: "
                               f"writer returned {_got} words for a "
-                              f"{_cap}-word footage budget -- trimmed to "
+                              f"{_cap}-word section budget -- trimmed to "
                               f"{len(_fitted)} sentences "
                               f"({count_words(' '.join(_fitted))} words) "
                               "so it plays at 1x")

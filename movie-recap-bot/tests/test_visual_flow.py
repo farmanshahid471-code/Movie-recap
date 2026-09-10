@@ -814,6 +814,74 @@ def test_rewindow_preserves_unzoned_sentences() -> None:
     assert out[0]["film_start"] == 400.0 and out[0]["film_end"] == 406.0
 
 
+def test_enforcement_uses_section_budget_not_ceiling() -> None:
+    """THE USER'S LOG, REGRESSION-LOCKED: 'section 4/36: 319 words
+    (budget 76)' with NO correction -- the enforcement checked the raw
+    footage ceiling (cap_words) instead of the section's allocated
+    budget, so sections sailed 2-7x past their allotment, the delivered
+    script landed at ~2x the requested length, and the timeline fell
+    into near-permanent slow motion (99 of 152 beats). Enforcement now
+    caps at min(ceiling, budget * 1.15)."""
+    import json
+    from recap import script as script_mod
+
+    # 4 sections x 270s of distinct film; target 308 -> ~77 words each;
+    # raw footage ceiling per section = 270 words (270s x 150wpm x 0.4/60)
+    chunks = [
+        {"index": i, "start": i * 270.0, "end": i * 270.0 + 300.0,
+         "summary": f"Section {i} of the story.",
+         "beats": [{"t": i * 270.0 + k * 6.0, "text": f"beat {k}"}
+                   for k in range(45)]}
+        for i in range(4)
+    ]
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    over = [s] * 16      # 192 words: UNDER the old 270-word ceiling (the
+                         # bug let this through untouched) but 2.5x the
+                         # 77-word budget
+    fits = ["The pilot wakes up in pain in a dark forest.",
+            "A stranger with a gun finds the burning wreck.",
+            "The pilot grabs the barrel and both men fall."]  # 27 words
+
+    state = {"n": 0}
+
+    def fake_complete(provider, model, system, user, **kw):
+        state["n"] += 1
+        if state["n"] == 1:          # section 1/4: the writer over-delivers
+            return json.dumps({"sentences": over})
+        if state["n"] == 2:          # the condense call for section 1
+            return json.dumps({"sentences": fits})
+        return json.dumps({"sentences": fits})   # other sections behave
+
+    orig = script_mod.llm.complete
+    script_mod.llm.complete = fake_complete
+    try:
+        out = script_mod.generate_segmented_script(
+            chunks, {"provider": "deepseek", "model": "x"}, 308,
+            words_per_minute=150, lang_name="Spanish",
+            sign_off=False, visual_match=True, humanize=False,
+        )
+    finally:
+        script_mod.llm.complete = orig
+
+    # the enforced cap must be the section's BUDGET (~77 x 1.15 = 88),
+    # not the 270-word footage ceiling: the 192-word over-delivery that
+    # the old code let through is now condensed back to the allotment
+    sec0 = [o for o in out if o["zone_lo"] == 0.0]
+    assert count_words(" ".join(o["sentence"] for o in sec0)) <= 88, \
+        ("section 1 must be held to its budget (88 words), not the "
+         "270-word ceiling")
+    assert [o["sentence"] for o in sec0] == fits, \
+        "the condensed (in-budget) rewrite is what reaches the timeline"
+    # every other section is in budget too -> the script lands near the
+    # requested total instead of 2x
+    total = count_words(" ".join(o["sentence"] for o in out))
+    assert total <= 308 + 40, f"delivered {total} words for a 308 target"
+    assert all(o["film_end"] > o["film_start"] for o in out)
+    print(f"ok: 192-word over-delivery for a 77-word budget is condensed "
+          f"back (old ceiling would have let it through); delivered "
+          f"{total}/{308} words")
+
+
 if __name__ == "__main__":
     test_no_replay_same_window()
     test_no_replay_overlapping_windows()
@@ -838,4 +906,5 @@ if __name__ == "__main__":
     test_rewindow_to_speech_guarantees_1x()
     test_rewindow_overbudget_walks_contiguously()
     test_rewindow_preserves_unzoned_sentences()
+    test_enforcement_uses_section_budget_not_ceiling()
     print("\nALL VISUAL-FLOW TESTS PASSED")
