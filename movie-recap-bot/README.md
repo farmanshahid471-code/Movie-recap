@@ -444,7 +444,13 @@ continuity ends and name-bearing lines kept). Every adjustment is
 logged (`writer returned 260 words for a 88-word section budget — condensed
 to 84 words (story kept)`), and a delivered script more than 35% over the
 requested length raises a loud WARNING — that used to be silent, and a 2×
-script is exactly what forced near-permanent slow motion. This is what keeps the narration from running
+script is exactly what forced near-permanent slow motion. The JSON contract
+is **one sentence per array element, enforced at parse time**: a model that
+answers with paragraph-sized elements (a 9000-word script once shipped as 71
+"sentences" of 127 words each, which made every trim impossible and left the
+camera holding 15–45s static shots while the narration raced through a dozen
+events) gets them split into real sentence units, with guards so
+abbreviations ("Mr."), decimals and quotes are never cut. This is what keeps the narration from running
 ahead of
 the picture on dialogue-dense sections. (For a typical movie this is far from
 binding — a 17-minute recap of a 2-hour film uses ~15% of the film time — it

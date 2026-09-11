@@ -993,6 +993,117 @@ def test_floor_warning_when_trim_cannot_fit() -> None:
           "ships with a loud floor warning, never silently")
 
 
+def test_parse_segment_splits_paragraph_units() -> None:
+    """THE USER'S LOG: deepseek returned PARAGRAPH-sized array elements
+    (71 'sentences' for 9002 words = 127 words/element). _parse_segment
+    now splits any element with real internal sentence boundaries into
+    true sentences, with guards for abbreviations, decimals and quotes."""
+    import json
+    from recap import script as script_mod
+
+    para1 = ("Troy wakes up in a dark forest and his crashed plane is "
+             "still burning behind him. An armed stranger walks around "
+             "the wreck searching for survivors. Troy grabs his gun from "
+             "the snow and aims it at the man. The stranger raises his "
+             "hands and slowly backs away. Mr. Potato Head would have "
+             "fainted at the sight of all that blood. Troy passes out "
+             "before he can ask any questions.")
+    para2 = ("The next morning the whole army is tracking his trail "
+             "through the frozen woods! He crosses an icy river to throw "
+             "the dogs off his scent at 3.5 miles from the crash site. "
+             "A village family hides him inside their barn.")
+    out = script_mod._parse_segment(
+        json.dumps({"sentences": [para1, para2]}))
+    assert len(out) >= 8, f"expected ~9 real sentences, got {len(out)}"
+    assert all(count_words(x) <= 45 for x in out), \
+        "no element may stay paragraph-sized"
+    joined = " ".join(out)
+    assert "Mr. Potato Head" in joined, "abbreviation must never split"
+    assert "3.5 miles" in joined, "decimals must never split"
+    # short single sentences pass through untouched
+    one = script_mod._parse_segment(
+        json.dumps({"sentences": ["Woody disagrees.", "Now they run."]}))
+    assert one == ["Woody disagrees.", "Now they run."]
+    print(f"ok: paragraph elements split into {len(out)} real sentences "
+          "(abbreviations and decimals intact; short ones untouched)")
+
+
+def test_paragraph_writer_output_lands_on_budget() -> None:
+    """THE USER'S RUN, end to end: the writer answers a 100-word section
+    with 2 paragraph elements (~300 words); before the fix the 3-sentence
+    floor made the trim impossible (25 sections shipped 2-5x over budget,
+    2877s video for a 1500s request). With paragraph elements split into
+    real sentences at parse time, the same writer output is held to its
+    budget and every shipped element is a real sentence."""
+    import io
+    import json
+    from contextlib import redirect_stdout
+    from recap import script as script_mod
+
+    para_a = ("Troy wakes up in a dark forest and his crashed plane is "
+              "still burning behind him. An armed stranger walks around "
+              "the wreck searching for survivors. Troy grabs his gun from "
+              "the snow and aims it at the man. The stranger raises his "
+              "hands and slowly backs away. Troy passes out before he can "
+              "ask any questions.")
+    para_b = ("The next morning the whole army is tracking his trail "
+              "through the frozen woods. He crosses an icy river to throw "
+              "the dogs off his scent. A village family hides him inside "
+              "their barn until the soldiers move on. By dawn he is "
+              "already planning his escape across the border.")
+    para_c = ("He steals a coat from the line behind the barn. The "
+              "tracking dogs find his trail again by noon. That night "
+              "he finally reaches the frozen lake road and limps toward "
+              "the border lights. A patrol truck rolls up beside him "
+              "and stops.")
+    over = [para_a, para_b, para_c]   # 3 paragraph elements, ~160 words
+    assert count_words(" ".join(over)) > 140, "must be over the cap"
+
+    calls = []
+
+    def fake_complete(provider, model, system, user, **kw):
+        calls.append(user)
+        if len(calls) == 1:        # the section writer: paragraphs
+            return json.dumps({"sentences": over})
+        return json.dumps({"sentences": over})   # condense also fails
+
+    chunk = {
+        "index": 0, "start": 1000.0, "end": 1150.0,
+        "summary": "A pilot is shot down and hunted through the woods.",
+        "beats": [{"t": 1000.0 + i * 6.0, "text": f"beat {i}"}
+                  for i in range(25)],
+    }
+    orig = script_mod.llm.complete
+    script_mod.llm.complete = fake_complete
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            out = script_mod.generate_segmented_script(
+                [chunk], {"provider": "deepseek", "model": "x"}, 100,
+                words_per_minute=150, lang_name="Spanish",
+                sign_off=False, visual_match=True, humanize=False,
+            )
+    finally:
+        script_mod.llm.complete = orig
+
+    got = count_words(" ".join(o["sentence"] for o in out))
+    assert got <= 115, (f"delivered {got} words for a 115-word cap -- the "
+                        "3-sentence floor bug")
+    assert all(count_words(o["sentence"]) <= 45 for o in out), \
+        "every shipped element must be a real sentence"
+    assert len(out) >= 4, "several real sentences survive the trim"
+    assert "3-sentence floor" not in buf.getvalue(), \
+        "the floor must not bind when real sentences are the units"
+    assert all(o["film_end"] > o["film_start"] for o in out)
+    prev = -1.0
+    for o in out:
+        assert o["film_start"] >= prev - 1e-9
+        prev = o["film_start"]
+    print(f"ok: 2-paragraph (~{count_words(' '.join(over))}-word) answer "
+          f"for a 100-word budget -> {len(out)} sentences, {got} words "
+          "delivered, no floor warning")
+
+
 if __name__ == "__main__":
     test_no_replay_same_window()
     test_no_replay_overlapping_windows()
@@ -1021,4 +1132,6 @@ if __name__ == "__main__":
     test_measured_wpm_cache_roundtrip()
     test_narration_voice_one_resolution()
     test_floor_warning_when_trim_cannot_fit()
+    test_parse_segment_splits_paragraph_units()
+    test_paragraph_writer_output_lands_on_budget()
     print("\nALL VISUAL-FLOW TESTS PASSED")

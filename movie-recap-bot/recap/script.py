@@ -11,6 +11,7 @@ subtitle cue later.
 from __future__ import annotations
 
 import os
+import re
 
 from pathlib import Path
 
@@ -278,6 +279,82 @@ def parse_sentences_json(raw: str) -> list[str]:
     return [s for s in normalize(raw.splitlines()).splitlines() if s.strip()]
 
 
+# Tokens whose trailing period is an abbreviation, not a sentence end.
+# "Mr. Potato Head" must never be split in two.
+_ABBREV_TOKENS = {
+    "mr", "mrs", "ms", "dr", "st", "jr", "sr", "capt", "sgt", "lt", "col",
+    "prof", "gen", "rev", "vs", "no", "vol", "fig", "co", "inc", "ltd",
+    "mt", "ft", "a.m", "p.m", "u.s", "u.k", "e.g", "i.e",
+}
+# a char that may START the next sentence (capital, quote, CJK, Arabic)
+_NEXT_WORD_START = re.compile(r"[A-Z0-9\"'\u201c(\u4e00-\u9fff\u0600-\u06ff]")
+# scripts that write sentences without spaces between them
+_NO_SPACE_SCRIPT = re.compile(r"[\u4e00-\u9fff\u0600-\u06ff]")
+
+
+def _sentence_pieces(text: str) -> list[str]:
+    """Split ONE array element into real sentences.
+
+    Why this exists (the user's log): deepseek-chat routinely returns 2-3
+    PARAGRAPH-sized array elements per section -- 71 "sentences" for 9002
+    words, 127 words per element. Paragraph units break everything
+    downstream: the over-budget trim cannot drop below the 3-sentence
+    continuity floor (25 sections shipped 2-5x over budget -> a 2877s
+    video for a 1500s request), anchors pace paragraphs instead of
+    moments, micro-cuts can only slice a 40s paragraph into a few 15-45s
+    static shots (the narrator races through a dozen events while the
+    camera holds one stretch), and subtitles show walls of text. This
+    splits any element that contains real internal sentence boundaries,
+    with guards so abbreviations ("Mr.", "a.m.", "J."), decimals and
+    quotes are never cut. A genuine single sentence passes through
+    untouched.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    cuts: list[int] = []
+    for m in re.finditer(r"[.!?…。！？]+[\"\u201d')\]]*", text):
+        at = m.end()
+        if at >= len(text):
+            continue  # the element's final terminator
+        nxt = text[at]
+        if nxt.isspace():
+            # the next WORD must start like a sentence
+            rest = text[at:].lstrip()
+            if not rest or not _NEXT_WORD_START.match(rest[0]):
+                continue  # lowercase continuation, "and then ..."
+        elif not _NO_SPACE_SCRIPT.match(nxt):
+            continue  # no space and not CJK/Arabic: decimal, url, quote
+        head = text[: m.start()].rstrip()
+        toks = head.split()
+        bare = (toks[-1] if toks else "").rstrip(".").lower()
+        if bare in _ABBREV_TOKENS or (len(bare) == 1 and bare.isalpha()):
+            continue  # "Mr.", "J.", initials
+        cuts.append(at)
+    if not cuts:
+        return [text]
+    pieces: list[str] = []
+    prev = 0
+    for c in cuts:
+        seg = text[prev:c].strip()
+        if seg:
+            pieces.append(seg)
+        prev = c
+    tail = text[prev:].strip()
+    if tail:
+        pieces.append(tail)
+    return pieces or [text]
+
+
+def _split_paragraph_sentences(sents: list[str]) -> list[str]:
+    """Flatten a list of (possibly paragraph-sized) elements into real
+    sentences. Idempotent on already-sentence lists."""
+    out: list[str] = []
+    for s in sents or []:
+        out.extend(_sentence_pieces(s))
+    return out
+
+
 def _clean_sentences(data: list) -> list[str]:
     out: list[str] = []
     for item in data:
@@ -291,7 +368,10 @@ def _clean_sentences(data: list) -> list[str]:
         # sentence-end punctuation is required for clean subtitle cues
         if not s.endswith((".", "!", "?", "。", "！", "？", "…")):
             s += "."
-        out.append(s)
+        # ONE SENTENCE PER ELEMENT, enforced: a model that answers with
+        # paragraph-sized elements (see _sentence_pieces) gets them split
+        # into the real sentence units every downstream lock expects.
+        out.extend(_sentence_pieces(s))
     return out
 
 
@@ -345,6 +425,8 @@ PROMPT_SEGMENT_JSON = """You are writing ONE SECTION of a full movie recap narra
 This section covers {t0} to {t1} of the film. The ACTION BEATS below are the complete factual record of what happens in that stretch. Narrate FROM the beats; never invent events.
 
 Length: about {budget} words of narration (roughly {nsent} sentences). This is a HARD CEILING, not an estimate — the section's footage only has room for {budget} words at normal playback speed, and a longer section visibly breaks sync with the picture. Never exceed it; if beats don't fit, tighten the wording instead.
+
+SENTENCE SHAPE (the JSON contract): each element of the "sentences" array is EXACTLY ONE sentence of 8 to 40 words. Never put two sentences in one element. Never return a paragraph as one element. The video's timing, cuts and subtitles lock per element, so a paragraph-sized element visibly breaks the edit.
 
 HOW THIS NARRATOR SOUNDS (follow it exactly):
 - SENTENCE RHYTHM: chain several moments into flowing 12-40 word sentences ("She explains that technology has made its way into Bonnie's life too, and that a tablet is taking up all of her attention."), and BETWEEN the long sentences drop short dramatic beats of 2-8 words ("Woody disagrees." / "Now they need to escape." / "The reason is simple."). Never write many sentences of the same length in a row.
@@ -1056,6 +1138,8 @@ def _condense_section(
         "paragraph), do not simply delete story beats\n"
         "- keep the section's opening and ending meaning (the surrounding "
         "sections hand off to them)\n"
+        "- return EXACTLY ONE sentence per array element (8-40 words); "
+        "never paragraphs\n"
         + names_line
         + '\n\nRespond with ONLY a JSON object: {"sentences": ["...", ...]}'
     )

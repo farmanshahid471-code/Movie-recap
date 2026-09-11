@@ -328,8 +328,12 @@ def test_global_polish_count_lock() -> None:
         # bad answer: wrong count -> must be discarded
         if calls["n"] == 1:
             return _json.dumps({"sentences": sentences[:9]})
-        # good answer: same count, reworded
-        return _json.dumps({"sentences": [s + " Reworded." for s in sentences]})
+        # good answer: same count, reworded, ONE sentence per element
+        # (multi-sentence elements are split at parse time, which would
+        # change the count and correctly discard the rewrite)
+        return _json.dumps({"sentences": [
+            f"Reworded sentence number {i} of the recap."
+            for i in range(12)]})
 
     original = script.llm.complete
     script.llm.complete = fake_complete
@@ -339,7 +343,8 @@ def test_global_polish_count_lock() -> None:
         assert out1 == sentences, "wrong-count rewrite must be discarded"
         out2 = script._global_polish({"provider": "x", "model": "y"},
                                      sentences, ["Jessie"])
-        assert len(out2) == 12 and out2[0].endswith("Reworded.")
+        assert len(out2) == 12 \
+            and out2[0] == "Reworded sentence number 0 of the recap."
     finally:
         script.llm.complete = original
     print("ok: global polish keeps the count lock (bad rewrites discarded)")
