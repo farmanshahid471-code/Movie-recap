@@ -995,9 +995,10 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                 print(f"  * {len(snap_bounds)} shot boundaries on file — "
                       "visual cuts will land on the film's real shot changes")
             else:
-                print("  * shot boundaries unavailable (optional: "
-                      "`pip install scenedetect[opencv]` unlocks "
-                      "cut-on-shot-change) — continuing un-snapped")
+                print("  * shot boundaries unavailable (both PySceneDetect "
+                      "and the ffmpeg scene filter found nothing; optional: "
+                      "`pip install scenedetect[opencv]` for content-aware "
+                      "detection) — continuing un-snapped")
         except Exception as exc:
             print(f"  ! shot-boundary detection failed ({exc}); "
                   "continuing without snapping.")

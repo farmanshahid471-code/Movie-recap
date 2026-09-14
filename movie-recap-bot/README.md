@@ -464,6 +464,12 @@ Three render-side hardenings complete the lock:
   the timeline clamped it to 0.35× slow motion right at the climax. The
   outro now gets `[last zone end, film end]` as its own zone and plays at
   1× (credits rolling under "thanks for watching").
+- **Shot boundaries with zero extra dependencies.** When PySceneDetect
+  isn't installed, shot detection falls back to the same pure-ffmpeg scene
+  filter the vision pass uses (`select='gt(scene,T)',showinfo`), so cuts
+  still land on the film's real camera changes — "shot boundaries
+  unavailable" should effectively never happen. (PySceneDetect remains the
+  premium content-aware path: `pip install "scenedetect[opencv]"`.)
 - **The stream-copy join is verified, not assumed.** After the concat the
   joined file is probed against the exact sum of its parts; if the demuxer
   dropped or duplicated frames anywhere, the join is redone with a full

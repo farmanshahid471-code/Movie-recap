@@ -130,9 +130,12 @@ def scene_boundaries(
     movie's fingerprint), so per-language runs and re-renders reuse it.
 
     Returns ``([boundary_times...], method)`` where method is
-    ``"scenedetect"`` / ``"cache"`` when real boundaries exist and ``"none"``
-    when PySceneDetect is not installed or failed (the timeline then simply
-    skips snapping — everything else still works).
+    ``"scenedetect"`` / ``"ffmpeg-scene"`` / ``"cache"`` when real boundaries
+    exist and ``"none"`` only when BOTH detectors failed (the timeline then
+    simply skips snapping — everything else still works). PySceneDetect is
+    the premium path; the ffmpeg scene filter is the always-available
+    fallback, so "shot boundaries unavailable" should effectively never
+    happen on a machine that can run this pipeline at all.
     """
     video = Path(video)
     workdir = Path(workdir)
@@ -160,8 +163,34 @@ def scene_boundaries(
 
     print("  * detecting the film's shot boundaries (one-time pass; on CPU a "
           "long movie can take several minutes) ...", flush=True)
-    pairs = _scenedetect(video, float(cfg_video.get("scene_threshold", 27.0)))
+    threshold = float(cfg_video.get("scene_threshold", 27.0))
+    pairs = _scenedetect(video, threshold)
     if not pairs:
+        # PySceneDetect not installed (or it failed): fall back to the SAME
+        # pure-ffmpeg scene filter the vision pass already uses successfully
+        # on this machine (select='gt(scene,T)',showinfo -- it found hundreds
+        # of real cuts there). Zero extra dependencies: every visual cut can
+        # still land on an actual camera cut instead of an arbitrary frame.
+        try:
+            from .vision import _scene_times  # local import: heavy module
+            # scenedetect's 0..100 content scale -> ffmpeg's 0..1 scene score
+            ff_threshold = min(max(threshold / 100.0, 0.2), 0.5)
+            duration = probe_duration(video)
+            ff_bounds = [round(t, 3) for t in
+                         _scene_times(video, ff_threshold, duration)]
+        except Exception:
+            ff_bounds = []
+        if ff_bounds:
+            try:
+                workdir.mkdir(parents=True, exist_ok=True)
+                cache.write_text(
+                    json.dumps({"sig": sig, "method": "ffmpeg-scene",
+                                "bounds": ff_bounds}),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+            return ff_bounds, "ffmpeg-scene"
         # No negative cache: if the user installs scenedetect later, the next
         # run detects for real instead of replaying "unavailable".
         return [], "none"

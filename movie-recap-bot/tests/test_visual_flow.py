@@ -1235,6 +1235,80 @@ def test_concat_join_drift_guard() -> None:
     print("ok: concat drift guard accepts exact joins, rejects drift")
 
 
+def test_shot_boundary_ffmpeg_fallback() -> None:
+    """THE USER'S RUN: 'shot boundaries unavailable' while the vision pass
+    had ALREADY detected 740 real shot changes with the pure-ffmpeg scene
+    filter on the same movie. scene_boundaries() now falls back to that same
+    filter when PySceneDetect is missing, converts the 0..100 threshold to
+    ffmpeg's 0..1 scene score, caches the result, and still writes no
+    negative cache when both detectors fail."""
+    import tempfile
+    from recap import scenes as scenes_mod
+    from recap import vision as vision_mod
+
+    with tempfile.TemporaryDirectory() as td:
+        video = Path(td) / "movie.mp4"
+        video.write_bytes(b"stub")
+        calls: dict = {}
+
+        def fake_scenedetect(v, threshold):
+            calls["sd"] = threshold
+            return None                       # not installed
+
+        def fake_scene_times(movie, threshold, duration):
+            calls["ff"] = threshold
+            calls["dur"] = duration
+            return [10.0, 25.5, 25.6, 60.0]   # real cut times
+
+        orig = (scenes_mod._scenedetect, vision_mod._scene_times,
+                scenes_mod.probe_duration)
+        scenes_mod._scenedetect = fake_scenedetect
+        vision_mod._scene_times = fake_scene_times
+        scenes_mod.probe_duration = lambda p: 6207.0
+        try:
+            bounds, method = scenes_mod.scene_boundaries(
+                video, {"scene_threshold": 27.0}, Path(td))
+            assert method == "ffmpeg-scene", method
+            assert bounds == [10.0, 25.5, 25.6, 60.0]
+            assert abs(calls["ff"] - 0.27) < 1e-9, \
+                "scenedetect 27 (0..100) -> ffmpeg 0.27 (0..1)"
+            assert calls["dur"] == 6207.0
+
+            # cached: the second call must not re-detect
+            def boom(*a, **k):
+                raise AssertionError("must read the cache, not re-detect")
+            scenes_mod._scenedetect = boom
+            vision_mod._scene_times = boom
+            b2, m2 = scenes_mod.scene_boundaries(
+                video, {"scene_threshold": 27.0}, Path(td))
+            assert b2 == bounds and m2 in ("ffmpeg-scene", "cache")
+        finally:
+            (scenes_mod._scenedetect, vision_mod._scene_times,
+             scenes_mod.probe_duration) = orig
+
+    # both detectors fail -> ([], "none") and NO cache file, so a later
+    # scenedetect install can still retry
+    with tempfile.TemporaryDirectory() as td:
+        video = Path(td) / "movie.mp4"
+        video.write_bytes(b"stub")
+        orig = (scenes_mod._scenedetect, vision_mod._scene_times,
+                scenes_mod.probe_duration)
+        scenes_mod._scenedetect = lambda v, t: None
+        vision_mod._scene_times = lambda m, t, d: []
+        scenes_mod.probe_duration = lambda p: 100.0
+        try:
+            bounds, method = scenes_mod.scene_boundaries(
+                video, {"scene_threshold": 27.0}, Path(td))
+            assert bounds == [] and method == "none"
+            assert not (Path(td) / "shot_boundaries.json").exists(), \
+                "no negative cache"
+        finally:
+            (scenes_mod._scenedetect, vision_mod._scene_times,
+             scenes_mod.probe_duration) = orig
+    print("ok: no PySceneDetect -> ffmpeg scene filter supplies (and caches) "
+          "real shot boundaries; both-fail writes no negative cache")
+
+
 if __name__ == "__main__":
     test_no_replay_same_window()
     test_no_replay_overlapping_windows()
@@ -1269,4 +1343,5 @@ if __name__ == "__main__":
     test_outro_gets_the_film_tail()
     test_outro_tail_negative_cases()
     test_concat_join_drift_guard()
+    test_shot_boundary_ffmpeg_fallback()
     print("\nALL VISUAL-FLOW TESTS PASSED")

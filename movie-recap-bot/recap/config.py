@@ -24,7 +24,10 @@ _DEFAULTS: dict[str, Any] = {
         "words_target": 2000,      # ~13-14 min at ~150 wpm (full-length recap)
         "words_min": 600,
         "words_max": 4200,
-        "words_per_minute": 150,   # speech rate used for all length maths
+        # STARTING GUESS for length maths; a measured per-voice rate is
+        # cached (_work/narration_rate.json) after the first run and every
+        # later calculation uses the measured value.
+        "words_per_minute": 180,
         # Default edge-tts narrators per language (all warm, deep male).
         "lang_voice": {"en": "en-US-ChristopherNeural",
                        "zh": "zh-CN-YunjianNeural",
