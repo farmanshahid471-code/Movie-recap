@@ -136,6 +136,18 @@ def concat_segments(
     return out
 
 
+def _concat_drift_ok(joined: float, expected: float, n_clips: int) -> bool:
+    """Did a stream-copy join come out the exact length of its parts?
+
+    Tolerance: a quarter second, or 3ms per clip (container rounding),
+    whichever is larger. Anything beyond that means the demuxer dropped or
+    duplicated frames and the join must be re-encoded.
+    """
+    if expected <= 0:
+        return True
+    return abs(joined - expected) <= max(0.25, n_clips * 0.003)
+
+
 def _cover_target(visual: Path, out: Path, target: float, cfg_video: dict) -> Path:
     """Guarantee the visual is >= target seconds (loop, then trim)."""
     total = probe_duration(visual)
@@ -334,6 +346,19 @@ def build_locked_visual(
             concat_segments(segments, raw, workdir, reencode=True,
                             media_seconds=total)
         raw_stamp.write_text(plan, encoding="utf-8")
+
+    # MEASURED GUARANTEE, not an assumption: a stream-copy join must come out
+    # exactly the sum of its parts. If the concat demuxer silently dropped or
+    # duplicated frames anywhere (non-monotonic DTS at a boundary), the join
+    # drifts and every later boundary lands late -- so verify it and fall
+    # back to the full re-encoding join when the numbers disagree.
+    joined = probe_duration(raw) if raw.exists() else 0.0
+    if not _concat_drift_ok(joined, total, len(segments)):
+        print(f"  ! stream-copy join measured {joined:.3f}s vs "
+              f"{total:.3f}s expected -- re-joining with a full re-encode",
+              flush=True)
+        concat_segments(segments, raw, workdir, reencode=True,
+                        media_seconds=total)
 
     # Lock the final length to the narration, to the millisecond.
     base = Path(workdir) / "visual.mp4"

@@ -107,7 +107,47 @@ def lock_durations(cues: Sequence, total_audio: float | None = None) -> list[flo
         # clamp so a mis-ordered cue can never produce a negative duration
         bounds.append(max(float(cues[i].start), bounds[-1]))
     bounds.append(max(end, bounds[-1] + 0.2))
-    return [bounds[i + 1] - bounds[i] for i in range(n)]
+    durs = [bounds[i + 1] - bounds[i] for i in range(n)]
+    return _fold_stub_beats(durs)
+
+
+# A real spoken sentence (including its share of the pause after it) is never
+# shorter than this. A duration below it is a cue-timing artifact (a whisper
+# stub, a duplicate cue start) -- rendered naively it becomes a 1-2 frame
+# flicker clip that reads as a stutter ("laggy"), like the two back-to-back
+# 0.050s clips in the user's run log.
+MIN_BEAT_SECONDS = 0.2
+
+
+def _fold_stub_beats(durs: list[float]) -> list[float]:
+    """Fold sub-``MIN_BEAT_SECONDS`` durations into a neighbour beat.
+
+    The stub's speech time is real (it is part of the audio span), so it is
+    ADDED to the nearest previous beat (the next one when only stubs precede
+    it) and the stub itself becomes 0.0. The sum is preserved exactly -- the
+    A/V lock depends on it -- and build_timeline then emits no clip for a
+    0.0 beat, so the previous beat's (now longer) cut covers the stub's
+    speech instead of flashing two frames of it.
+    """
+    out = list(durs)
+    for i, d in enumerate(out):
+        if d >= MIN_BEAT_SECONDS:
+            continue
+        target = None
+        for j in range(i - 1, -1, -1):
+            if out[j] > 0.0:
+                target = j
+                break
+        if target is None:
+            for j in range(i + 1, len(out)):
+                if out[j] > 0.0:
+                    target = j
+                    break
+        if target is None:
+            break  # every beat is a stub: leave for the downstream floors
+        out[target] += d
+        out[i] = 0.0
+    return out
 
 
 def _norm_tok(token: str) -> str:
@@ -296,7 +336,9 @@ def build_timeline(
     # beat's offset inside the narration mp3).
     cum: list[float] = [0.0]
     for d in durations[:n]:
-        cum.append(cum[-1] + max(float(d), 0.05))
+        # stub beats (folded to 0.0 by lock_durations) contribute their true
+        # 0.0 so the narration offsets stay exact
+        cum.append(cum[-1] + max(float(d), 0.0))
 
     # ---- group the sentences by the film window they were written from ----
     groups: list[dict] = []
@@ -335,7 +377,7 @@ def build_timeline(
             f1 = min(f0 + 1.0, movie_dur or (f0 + 1.0))
 
         idxs = g["idx"]
-        total_nar = sum(max(durations[i], 0.05) for i in idxs) or 1.0
+        total_nar = sum(max(float(durations[i]), 0.0) for i in idxs) or 1.0
         span = f1 - f0
 
         # ---- GROUP PACING (the motion guarantee) --------------------------
@@ -360,6 +402,11 @@ def build_timeline(
 
         acc = 0.0
         for i in idxs:
+            # stub beats emit no clip: their speech time was folded into the
+            # previous beat by lock_durations, so this beat would only flash
+            # 1-2 frames -- a stutter, not a shot
+            if float(durations[i]) <= 0.001:
+                continue
             d = max(durations[i], 0.05)
             # position inside this group's film window, proportional to how far
             # through the group's narration we are -> monotone within the group

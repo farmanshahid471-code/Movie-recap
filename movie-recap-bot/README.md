@@ -450,7 +450,27 @@ answers with paragraph-sized elements (a 9000-word script once shipped as 71
 "sentences" of 127 words each, which made every trim impossible and left the
 camera holding 15–45s static shots while the narration raced through a dozen
 events) gets them split into real sentence units, with guards so
-abbreviations ("Mr."), decimals and quotes are never cut. This is what keeps the narration from running
+abbreviations ("Mr."), decimals and quotes are never cut.
+
+Three render-side hardenings complete the lock:
+
+- **No flicker clips.** A cue-timing stub (a sentence measured at ~0s by the
+  aligner) used to render as a 1–2 frame clip that reads as a stutter.
+  `lock_durations` now folds any sub-0.2s beat into its neighbour (the sum
+  stays exactly the audio span) and the timeline emits no clip for it.
+- **The ending owns the film's tail.** The final section's zone used to stop
+  at its last transcript beat, leaving the film's last minutes owned by
+  nobody — the sign-off outro then squeezed an already-consumed window and
+  the timeline clamped it to 0.35× slow motion right at the climax. The
+  outro now gets `[last zone end, film end]` as its own zone and plays at
+  1× (credits rolling under "thanks for watching").
+- **The stream-copy join is verified, not assumed.** After the concat the
+  joined file is probed against the exact sum of its parts; if the demuxer
+  dropped or duplicated frames anywhere, the join is redone with a full
+  re-encode. (The subsequent audio-lock pass already re-encodes the whole
+  video once with `fps=30 -t <narration span>` — that pass is where A/V
+  sync is finally set — so the copy join is a speed optimization that is
+  now measured, not trusted.) the narration from running
 ahead of
 the picture on dialogue-dense sections. (For a typical movie this is far from
 binding — a 17-minute recap of a 2-hour film uses ~15% of the film time — it

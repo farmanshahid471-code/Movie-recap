@@ -1104,6 +1104,137 @@ def test_paragraph_writer_output_lands_on_budget() -> None:
           "delivered, no floor warning")
 
 
+def test_stub_beats_never_render_as_flicker_clips() -> None:
+    """THE USER'S LOG: two back-to-back `-t 0.050` clips (seg_0162/163) --
+    1-2 frame flickers that read as a stutter. Source: whisper/TTS cue
+    stubs (two sentences measured at ~0s). lock_durations now folds any
+    sub-0.2s duration into its neighbour (sum preserved exactly) and
+    build_timeline emits no clip for a folded beat."""
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    # cues 1 and 2 start almost together -> durations 0.05/0.05 (the stubs)
+    cues = [
+        TimedCue(s, 0.0, 2.9),
+        TimedCue(s, 3.0, 5.9),    # starts 0.05 after the previous -> stub
+        TimedCue(s, 3.05, 6.0),   # another stub right behind it
+        TimedCue(s, 3.10, 6.2),
+        TimedCue(s, 6.20, 9.0),
+    ]
+    span = 9.0
+    durs = timeline.lock_durations(cues, span)
+    assert abs(sum(durs) - span) < 1e-9, "sum must stay == audio span"
+    stubs = [d for d in durs if 0.0 < d < timeline.MIN_BEAT_SECONDS]
+    assert not stubs, f"no positive duration below the beat floor: {durs}"
+    assert abs(durs[0] - 3.1) < 1e-9, \
+        "both stubs fold into the first beat (3.0 + 0.05 + 0.05)"
+
+    segs = [{"sentence": s, "film_start": i * 40.0,
+             "film_end": i * 40.0 + 40.0} for i in range(5)]
+    beats = timeline.build_timeline(segs, durs, 6000.0, dict(CFG))
+    cuts = timeline.flatten_cuts(beats)
+    assert cuts, "sanity: real beats still emit cuts"
+    assert all(d >= 0.2 for _, d, _f, _v in cuts), \
+        f"no flicker clips: min cut {min(d for _, d, _f, _v in cuts):.3f}s"
+    assert abs(sum(d for _, d, _f, _v in cuts) - span) < 0.05, \
+        "cut durations still sum to the narration span (within the \
+cut-list's millisecond rounding)"
+    print(f"ok: 0.05s cue stubs folded away; {len(cuts)} cuts, "
+          f"min {min(d for _, d, _f, _v in cuts):.2f}s, sum == span")
+
+
+def test_outro_gets_the_film_tail() -> None:
+    """THE USER'S LOG: film is 6207s but coverage stops at 5553s -- the
+    final 654s belong to nobody, the sign-off squeezes the last section's
+    already-consumed window and the timeline clamps it to 0.35x (19s of
+    visible slow motion at the climax). _extend_final_zone gives the
+    trailing un-zoned outro [last zone end, film end] as its own zone, so
+    it paces there at 1x."""
+    import io
+    from contextlib import redirect_stdout
+    from recap import pipeline as pipe
+
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    segs: list[dict] = []
+    for sec in range(2):
+        zl, zh = sec * 240.0, sec * 240.0 + 240.0
+        for k in range(3):
+            a = zl + 20.0 + k * 16.0
+            segs.append({"sentence": s, "film_start": a - 2.6,
+                         "film_end": a + 3.9,
+                         "zone_lo": zl, "zone_hi": zh})
+    # the outro: appended by _append_sign_off with the LAST beat's window
+    # (a few seconds) and NO zone of its own -- the starved beat
+    segs.append({"sentence": "Thanks for watching.", "film_start": 436.0,
+                 "film_end": 444.0})
+    durs = [8.0] * 6 + [10.0]          # the outro narrates for 10s
+    movie_dur = 600.0                   # film ends 360s after the last zone
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        segs = pipe._extend_final_zone(segs, movie_dur)
+    assert "film's tail" in buf.getvalue()
+    out = segs[-1]
+    assert out["zone_lo"] == 480.0 and out["zone_hi"] == 599.0, \
+        "outro zone = [last zone end, film end - 1s]"
+    # every zoned section keeps its own zone (only the tail is assigned)
+    assert segs[0]["zone_lo"] == 0.0 and segs[5]["zone_hi"] == 480.0
+
+    rewin = timeline.rewindow_to_speech(segs, durs, movie_dur)
+    assert rewin[-1]["film_start"] >= 480.0 - 1e-6, \
+        "outro window now lives in the film tail"
+    assert rewin[-1]["film_end"] - rewin[-1]["film_start"] >= 10.0, \
+        "outro window is at least its narration -> 1x fits"
+
+    stats: dict = {}
+    beats = timeline.build_timeline(rewin, durs, movie_dur, dict(CFG),
+                                    stats=stats)
+    cuts = timeline.flatten_cuts(beats)
+    assert stats.get("slowed_groups", 0) == 0, \
+        "the ending must not be forced into slow motion any more"
+    assert all(v == 1.0 for _, _d, _f, v in cuts), "every cut at 1x"
+    assert cuts[-1][0] >= 480.0, "the outro shows the film's tail"
+    assert abs(sum(d for _, d, _f, _v in cuts) - sum(durs)) < 0.05
+    print("ok: outro paced in the film tail at 1x "
+          "(no 0.35x slow-mo at the ending)")
+
+
+def test_outro_tail_negative_cases() -> None:
+    """No tail (zone already reaches the film end) and old caches (no zones
+    at all) must stay untouched."""
+    from recap import pipeline as pipe
+    # zone reaches the end -> nothing to assign
+    segs = [{"sentence": "x.", "film_start": 10.0, "film_end": 20.0,
+             "zone_lo": 0.0, "zone_hi": 598.0},
+            {"sentence": "outro.", "film_start": 20.0, "film_end": 28.0}]
+    out = pipe._extend_final_zone([dict(s) for s in segs], 600.0)
+    assert "zone_lo" not in out[1], "no tail -> outro untouched"
+    # old cache: no zones anywhere -> untouched
+    segs2 = [{"sentence": "x.", "film_start": 10.0, "film_end": 20.0}]
+    out2 = pipe._extend_final_zone([dict(s) for s in segs2], 600.0)
+    assert "zone_lo" not in out2[0]
+    # no trailing un-zoned sentences -> nothing changes
+    segs3 = [{"sentence": "x.", "film_start": 10.0, "film_end": 20.0,
+              "zone_lo": 0.0, "zone_hi": 100.0}]
+    out3 = pipe._extend_final_zone([dict(s) for s in segs3], 600.0)
+    assert out3 == segs3
+    print("ok: tail assignment leaves no-tail / zone-less cases untouched")
+
+
+def test_concat_join_drift_guard() -> None:
+    """A stream-copy join must measure the exact sum of its parts; beyond a
+    quarter second (or 3ms/clip) the join is redone with a re-encode."""
+    from recap import clip as clip_mod
+    ok = clip_mod._concat_drift_ok
+    assert ok(100.0, 100.0, 380)
+    assert ok(100.20, 100.0, 10), "0.2s over 10 clips is within tolerance"
+    assert ok(100.0 + 380 * 0.003 - 0.005, 100.0, 380), \
+        "3ms/clip tolerance (just inside)"
+    assert not ok(100.0 + 380 * 0.003 + 0.01, 100.0, 380)
+    assert not ok(100.26, 100.0, 10), "0.26s is beyond the 0.25s floor"
+    assert not ok(99.5, 100.0, 10), "short joins fail too (dropped frames)"
+    assert ok(0.0, 0.0, 0), "degenerate: nothing to join"
+    print("ok: concat drift guard accepts exact joins, rejects drift")
+
+
 if __name__ == "__main__":
     test_no_replay_same_window()
     test_no_replay_overlapping_windows()
@@ -1134,4 +1265,8 @@ if __name__ == "__main__":
     test_floor_warning_when_trim_cannot_fit()
     test_parse_segment_splits_paragraph_units()
     test_paragraph_writer_output_lands_on_budget()
+    test_stub_beats_never_render_as_flicker_clips()
+    test_outro_gets_the_film_tail()
+    test_outro_tail_negative_cases()
+    test_concat_join_drift_guard()
     print("\nALL VISUAL-FLOW TESTS PASSED")

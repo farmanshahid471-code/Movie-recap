@@ -50,6 +50,43 @@ def _sig(*parts: object) -> str:
 RATE_CACHE_NAME = "narration_rate.json"
 
 
+def _extend_final_zone(segments: list[dict], movie_dur: float) -> list[dict]:
+    """Give the film's tail to the outro (and only the outro).
+
+    The user's run log: the film runs 6207s but the last section's zone ends
+    at 5553s -- the final 654s are owned by NOBODY. The sign-off outro,
+    which reuses the last beat's few-second window, then squeezes into a
+    group whose footage is already consumed and the timeline clamps it to
+    min_speed (0.35x): ~19s of visible 2.9x slow motion right at the climax
+    while the narration keeps pace. The fix is the natural edit: the outro
+    narrates over the film's tail (credits rolling under "thanks for
+    watching" is exactly what recap channels show), so the trailing
+    un-zoned sentences get [last zone end, film end] as their own zone and
+    rewindow_to_speech paces them there at 1x.
+    """
+    if movie_dur <= 0 or not segments:
+        return segments
+    zoned = [s for s in segments if s.get("zone_hi") is not None]
+    if not zoned:
+        return segments  # old cache without zones: leave the old behaviour
+    tail_hi = float(movie_dur) - 1.0
+    last_hi = max(float(s["zone_hi"]) for s in zoned)
+    if tail_hi <= last_hi + 1.0:
+        return segments  # no usable tail (zone already reaches the end)
+    changed = False
+    for s in reversed(segments):
+        if s.get("zone_hi") is not None:
+            break
+        s["zone_lo"] = last_hi
+        s["zone_hi"] = tail_hi
+        changed = True
+    if changed:
+        print(f"  * visual match: outro assigned the film's tail "
+              f"({last_hi:.0f}s -> {tail_hi:.0f}s) so the ending plays at "
+              "1x instead of slow motion", flush=True)
+    return segments
+
+
 def _rate_key(provider: str, voice: str, rate: str) -> str:
     return "|".join((str(provider or "").strip(),
                      str(voice or "").strip(),
@@ -1003,6 +1040,10 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         # picture from the first scene. The REAL durations are now
         # measured; re-size each section's windows to them so every
         # section that fits its footage plays at exactly 1x.
+        # The outro gets the film's tail BEFORE the re-windowing pass, so it
+        # is paced there at 1x instead of squeezing the final section's
+        # already-consumed zone (which forced 0.35x slow motion at the end).
+        seg_for_lang = _extend_final_zone(seg_for_lang, movie_dur)
         seg_for_lang = timeline.rewindow_to_speech(
             seg_for_lang, durations, movie_dur)
         beats = timeline.build_timeline(
