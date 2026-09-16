@@ -137,7 +137,10 @@ def ffmpeg_timeout(media_seconds: float, minimum: float = 300.0) -> float:
             return float(env)
         except ValueError:
             pass
-    return max(float(minimum), float(media_seconds) * 30.0)
+    # 30x realtime headroom, but capped at 4 hours: for a 6207s movie the
+    # old formula gave 51 HOURS -- not a ceiling, an absence of one. A truly
+    # deadlocked ffmpeg now gets reaped the same day.
+    return min(max(float(minimum), float(media_seconds) * 30.0), 14400.0)
 
 
 def rate_speed_factor(rate: str | None) -> float:

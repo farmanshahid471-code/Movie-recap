@@ -1061,6 +1061,12 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
             tl_stats.get("slowed_seconds", 0.0),
         )
         print(f"  * [{code}] timeline: {_report}")
+        _longest = max((d for b in beats for _, d, _f, _v in (b.get("cuts") or [])),
+                       default=0.0)
+        if _longest > 10.0:
+            print(f"  ! [{code}] longest shot is {_longest:.1f}s -- one visual "
+                  "outlasting several sentences; check the section budgets "
+                  "above if this read as out of sync", flush=True)
         # Honest sync prognosis: if sections still had to slow down after
         # the measured re-windowing, say WHY -- the section's narration is
         # genuinely longer than the film behind it (over-budget section or

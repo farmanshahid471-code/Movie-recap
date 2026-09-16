@@ -610,6 +610,11 @@ def timeline_report(beats: list[dict], audio_span: float,
     starts = [b["film_start"] for b in beats]
     monotone = all(starts[i] <= starts[i + 1] + 1e-6 for i in range(len(starts) - 1))
     bits = [f"{len(beats)} beats / {len(cuts)} cuts"]
+    # The direct answer to "a single visual remained for 15-20 sentences":
+    # a cut cannot outlive its own sentence, so a small longest-shot number
+    # makes that pathology structurally impossible in this render.
+    if cuts:
+        bits.append(f"longest shot {max(d for _, d, _f, _v in cuts):.1f}s")
     if word_locked:
         bits.append(f"word-locked {word_locked}/{len(beats)} beats")
     if snapped:

@@ -1309,6 +1309,120 @@ def test_shot_boundary_ffmpeg_fallback() -> None:
           "real shot boundaries; both-fail writes no negative cache")
 
 
+def test_network_failure_never_stalls_for_hours() -> None:
+    """THE USER'S CRASH: ConnectionAbortedError [WinError 10053] killed the
+    run after a 4h21m silent stall. Cause: LLM_TIMEOUT defaulted to 3600s,
+    so each of the 4 retries on a dead socket hung for up to an hour before
+    raising. Now: 180s default (llm + vision clients), the abort IS
+    classified retryable, retries absorb it, and ffmpeg timeouts have a
+    4-hour ceiling instead of 51 hours for a 6207s movie."""
+    import os
+    import time as _time
+    from recap import llm as llm_mod
+    from recap import util as util_mod
+
+    # the abort from the user's log is retryable
+    assert llm_mod._retryable(
+        ConnectionAbortedError("[WinError 10053] An established connection "
+                               "was aborted by the software in your host "
+                               "machine"))
+    # sane defaults
+    old = os.environ.pop("LLM_TIMEOUT", None)
+    try:
+        os.environ["LLM_TIMEOUT"] = "bogus"        # -> ValueError fallback
+        # the default and the fallback are both 180 (source-checked: the
+        # openai package is not installed in every test environment)
+        src_txt = Path(llm_mod.__file__).read_text(encoding="utf-8")
+        assert '"LLM_TIMEOUT", "180"' in src_txt
+        tail = src_txt.split("LLM_TIMEOUT")[1][:220]
+        assert "3600" not in tail, "the hour-long hang must be gone"
+    finally:
+        if old is not None:
+            os.environ["LLM_TIMEOUT"] = old
+        else:
+            os.environ.pop("LLM_TIMEOUT", None)
+
+    # retries absorb a transient connection abort and the call succeeds
+    class _FakeCompletions:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, **kw):
+            self.calls += 1
+            if self.calls < 3:
+                raise ConnectionAbortedError(
+                    "[WinError 10053] connection aborted")
+            class _Msg:
+                content = "ok"
+            class _Choice:
+                message = _Msg()
+            class _R:
+                choices = [_Choice()]
+                usage = None
+            return _R()
+
+    class _FakeClient:
+        def __init__(self):
+            self.chat = type("C", (), {"completions": _FakeCompletions()})()
+
+    fake = _FakeClient()
+    orig_from = llm_mod._client_from
+    sleeps: list[float] = []
+    orig_sleep = _time.sleep
+    _time.sleep = lambda s: sleeps.append(s)
+    old_retries = os.environ.get("LLM_RETRIES")
+    os.environ["LLM_RETRIES"] = "4"
+    try:
+        llm_mod._client_from = lambda p, m, b: (fake, "m")
+        out = llm_mod.complete("deepseek", "m", "sys", "user")
+        assert out == "ok"
+        assert fake.chat.completions.calls == 3, \
+            "two aborts absorbed by retries"
+        assert sleeps, "backoff happened between attempts"
+    finally:
+        llm_mod._client_from = orig_from
+        _time.sleep = orig_sleep
+        if old_retries is None:
+            os.environ.pop("LLM_RETRIES", None)
+        else:
+            os.environ["LLM_RETRIES"] = old_retries
+
+    # ffmpeg timeout ceiling: 30x realtime but never more than 4 hours
+    old = os.environ.pop("FFMPEG_TIMEOUT", None)
+    try:
+        assert util_mod.ffmpeg_timeout(6207.0, minimum=600.0) == 14400.0, \
+            "a 6207s movie must not get a 51-hour ffmpeg ceiling"
+        assert util_mod.ffmpeg_timeout(5.0, minimum=300.0) == 300.0, \
+            "minimum still honoured for tiny passes"
+        assert util_mod.ffmpeg_timeout(200.0, minimum=100.0) == 6000.0, \
+            "30x realtime headroom unchanged below the cap"
+    finally:
+        if old is not None:
+            os.environ["FFMPEG_TIMEOUT"] = old
+    print("ok: connection aborts are retried in minutes, not stalled for "
+          "hours; ffmpeg ceiling is 4h, not 51h")
+
+
+def test_timeline_report_shows_longest_shot() -> None:
+    """The direct diagnostic for 'a single visual remained for 15-20
+    sentences': a cut cannot outlive its own sentence, so the report now
+    prints the longest shot -- a small number makes that pathology
+    structurally impossible in the render."""
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    segs = [{"sentence": s, "film_start": i * 60.0,
+             "film_end": i * 60.0 + 60.0} for i in range(4)]
+    durs = [3.0, 12.0, 4.0, 5.0]
+    beats = timeline.build_timeline(segs, durs, 600.0, dict(CFG))
+    rep = timeline.timeline_report(beats, sum(durs))
+    assert "longest shot" in rep
+    longest = max(d for _, d, _f, _v in timeline.flatten_cuts(beats))
+    assert f"longest shot {longest:.1f}s" in rep
+    # and the degenerate case prints nothing about shots
+    rep0 = timeline.timeline_report([], 0.0)
+    assert "longest shot" not in rep0
+    print(f"ok: timeline report shows 'longest shot {longest:.1f}s'")
+
+
 if __name__ == "__main__":
     test_no_replay_same_window()
     test_no_replay_overlapping_windows()
@@ -1344,4 +1458,6 @@ if __name__ == "__main__":
     test_outro_tail_negative_cases()
     test_concat_join_drift_guard()
     test_shot_boundary_ffmpeg_fallback()
+    test_network_failure_never_stalls_for_hours()
+    test_timeline_report_shows_longest_shot()
     print("\nALL VISUAL-FLOW TESTS PASSED")

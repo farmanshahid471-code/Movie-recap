@@ -85,10 +85,16 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
     not just Ollama.
     """
     provider = (provider or "").strip().lower()
+    # 180s per chat request: a completion NEVER needs an hour. The old 3600s
+    # default turned one dead socket (VPN drop, machine sleep, provider
+    # hiccup) into a SILENT multi-hour stall -- x4 retries = 4+ hours of no
+    # output, then a raw ConnectionAbortedError killed the run. A dead
+    # connection now raises in minutes, gets retried with backoff, and only
+    # then fails with a clear message. Override with LLM_TIMEOUT if needed.
     try:
-        timeout = float(os.environ.get("LLM_TIMEOUT", "3600"))
+        timeout = float(os.environ.get("LLM_TIMEOUT", "180"))
     except ValueError:
-        timeout = 3600.0
+        timeout = 180.0
 
     if provider in ("", "none"):
         raise LLMError(

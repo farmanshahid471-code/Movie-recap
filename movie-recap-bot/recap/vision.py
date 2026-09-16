@@ -205,7 +205,9 @@ def _client(cfg_vision: dict):
         or os.environ.get("VISION_MODEL")
         or DEFAULT_VISION_MODEL[provider]
     )
-    client = openai.OpenAI(api_key=api_key, base_url=base, timeout=600)
+    # 180s, not 600: a caption batch is a small request; a dead socket must
+    # raise in minutes (the retry loop then handles it), never hang silently.
+    client = openai.OpenAI(api_key=api_key, base_url=base, timeout=180)
     return client, model
 
 
