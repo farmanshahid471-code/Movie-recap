@@ -1,7 +1,8 @@
 """Step A (pass 2) — summarize the action of each transcript chunk.
 
-Each 5-minute block of raw dialogue is distilled by the LLM into *what
-actually happens* in that block (action beats, present tense, third person).
+Each 3-minute block of raw dialogue is distilled by the LLM into *what
+actually happens* in that block — timestamped action beats (present tense,
+third person) that keep the film time of every moment.
 The per-chunk summaries are then concatenated in order and handed to the final
 script writer, so a full 2-hour film never has to fit one context window.
 
@@ -22,29 +23,118 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import llm
+from . import languages, llm
 
 SYSTEM_SUMMARY = (
-    "You are a movie plot analyst. You read timestamped film dialogue and "
-    "infer the ACTION that is happening on screen. You never quote dialogue "
-    "and you never repeat raw lines — you say what the characters do."
+    "Be this person for the entire session.\n\n"
+    "You are the script supervisor on a big film production — the one person "
+    "on set whose log is the single source of truth for what happens in "
+    "every scene. Directors trust your log because it is complete, precise "
+    "and neutral: every distinct on-screen moment gets its own line, in "
+    "order, with its timecode. Nothing is merged, nothing is dropped, "
+    "nothing is invented, nothing is editorialized.\n\n"
+    "Logging is a discipline, not a summary. The narrator of the recap will "
+    "ONLY ever see your log: a moment you skip is a moment that ceases to "
+    "exist for the audience. So you watch everything and you write down what "
+    "happens — crisp present tense, third person, visible action (\"Jessie "
+    "rides Bullseye across the yard\"). You never quote dialogue; you note "
+    "what the dialogue reveals is happening. You keep every name, place and "
+    "object exactly as the film uses it."
 )
 
-PROMPT_SUMMARY = """Below is a TIMESTAMPED DIALOGUE BLOCK from a movie (what the characters say, with timecodes).
-Read it and summarize the *action implied by the dialogue* — the story beats that are happening on screen.
+PROMPT_SUMMARY = """Below is a TIMESTAMPED DIALOGUE BLOCK from a movie (what the characters say, with [HH:MM:SS] timecodes).
+Read it and write out the ACTION that is happening on screen — the full story-beat list of this block, in exact order.
+
+Why this matters: your output is the ONLY source the final recap narration is written from, and its
+timecodes decide which film footage each narration line is shown over. Every beat you omit is a
+moment the recap can never show. Completeness and correct timecodes first.
 
 Rules:
-- Output a list of concise, factual beats, one per line, in chronological order.
-- Present tense, third person. Never quote dialogue. No "the movie/the scene shows".
-- Infer visual action from what is said ("He grabs her arm", not "she says she is scared").
-- Keep each beat short (under ~25 words) and dense. Skip filler and small talk.
-- Aim for roughly {budget} characters of output — use FEWER lines when the block is thin.
-- If this block continues an earlier scene, pick up where it left off naturally.
+- ONE LINE PER STORY BEAT. Cover EVERY distinct moment in order: each arrival, departure,
+  decision, discovery, confrontation, reveal, reaction, plan, trick, and scene change.
+  Never merge two different moments into one line; never drop a beat to keep it short.
+- START EVERY LINE WITH THE TIME OF THAT BEAT as [HH:MM:SS] — use the nearest timecode from the
+  transcript block where the beat happens (round to the nearest listed one). Times must increase
+  down the list. The dialogue may discuss the past: use the time the flashback/recollection
+  happens on screen, not the time it is spoken about.
+- ALWAYS name who acts, using the name the dialogue uses ("Buzz", "Jessie",
+  "Lilypad") — never just "he", "she", "the man" or "the girl". If the dialogue
+  reveals a character's name anywhere in the block, use it from then on.
+  Keep proper nouns: places, devices, objects, and app names when they matter.
+- Present tense, third person, VISIBLE action only ("Jessie hops onto Bullseye and rides off"),
+  inferred from what is said — never quote dialogue verbatim.
+- Keep each line dense (under ~35 words) but specific. No "the movie", "the scene shows", "we see".
+- The VISUAL NOTES section below describes what is ON SCREEN even when nobody talks. Those
+  moments have no dialogue beat, so include them as beats (with their timecodes) too — that is
+  the only way silent scenes get narrated. Merge them into the chronological list where their
+  time falls; skip a visual note only when a dialogue beat already covers the same moment.
+
+Example of the required format:
+[00:02:05] Bonnie plays with Forky and Rex in her room.
+[00:03:40] Jessie rides Bullseye across the yard.
 
 === TIMESTAMPED DIALOGUE BLOCK ===
 {transcript}
+{visual}
 === END OF BLOCK ===
 """
+
+
+def parse_beats(text: str) -> list[dict]:
+    """Parse timestamped beat lines ('[00:02:05] Jessie hops ...') into records.
+
+    Returns ``[{"t": float|None, "text": str}]`` in file order. ``t`` is the
+    beat's film time in seconds when the line carries a [HH:MM:SS] / [MM:SS]
+    prefix, else None (caller falls back to spreading evenly). Never raises:
+    anything that is not parseable is kept as an untimed beat so no beat is
+    lost to formatting drift.
+    """
+    out: list[dict] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        t: float | None = None
+        body = line
+        m = re.match(r"^\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]\s*(.*)$", line)
+        if m:
+            h, mi, s = m.group(1), m.group(2), m.group(3)
+            body = m.group(4).strip()
+            try:
+                t = int(h) * 3600 + int(mi) * 60 + int(s or 0)
+            except ValueError:
+                t = None
+        if body:
+            out.append({"t": t, "text": body})
+    return out
+
+
+def _summary_budget(text_chars: int) -> int:
+    """Character budget for one chunk summary (maximum-detail mode).
+
+    The old ~0.22x ratio compressed a dense block so hard that whole scenes
+    vanished before the script writer ever saw them. The default now keeps
+    ~0.6x of the raw transcript as story beats — near-complete beat coverage.
+    Tune with RECAP_SUMMARY_RATIO (e.g. 0.3 = lighter / cheaper) without
+    touching code; the floor/ceiling keep degenerate inputs sane.
+    """
+    import os
+
+    try:
+        ratio = float(os.environ.get("RECAP_SUMMARY_RATIO", "0.6"))
+    except ValueError:
+        ratio = 0.6
+    return max(400, min(8000, int(text_chars * ratio)))
+
+
+def _summary_max_tokens(budget_chars: int) -> int:
+    """Output cap for one chunk summary, derived from the requested size.
+
+    The prompt asks for ``budget`` *characters* of dense beats. English runs
+    ~4 chars/token, Chinese ~1; using ~0.9 tokens/char + padding caps a
+    rambling summary at ~2x what the job needs without truncating a good one.
+    """
+    return max(512, min(8192, int(budget_chars * 0.9) + 256))
 
 
 def _read_partial(path: Path) -> dict[int, str]:
@@ -75,19 +165,54 @@ def _read_partial(path: Path) -> dict[int, str]:
     return out
 
 
+def _visual_block(visual) -> str:
+    """Render a chunk's on-screen notes ('[MM:SS] caption' lines) for the prompt.
+
+    ``visual`` is an optional list of {"t": seconds, "text": ...} records. An
+    empty list yields an empty string so text-only runs are byte-identical to
+    before.
+    """
+    if not visual:
+        return ""
+    lines = []
+    for v in visual:
+        t = v.get("t")
+        text = (v.get("text") or "").strip()
+        if text is None or not text:
+            continue
+        if t is None:
+            lines.append(text)
+        else:
+            m, s = divmod(int(float(t)) % 3600, 60)
+            h = int(float(t)) // 3600
+            stamp = f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+            lines.append(f"[{stamp}] {text}")
+    if not lines:
+        return ""
+    return "\n\n=== WHAT IS ON SCREEN (VISUAL NOTES, WITH FILM TIMES) ===\n" \
+        + "\n".join(lines) + "\n=== END VISUAL NOTES ===\n"
+
+
 def _chunk_signature(chunks: list[dict]) -> str:
     """Cheap content signature of the chunk list.
 
     Two runs resume safely only when the chunks are byte-identical (same movie,
-    same transcript cache, same window/overlap). Anything that changes the
-    chunks — a different film, re-extracted transcript, window_seconds tweak —
-    yields a different signature, so stale summaries are never reused.
+    same transcript cache, same window/overlap, same on-screen notes). Anything
+    that changes the chunks — a different film, re-extracted transcript,
+    window_seconds tweak, new vision captions — yields a different signature,
+    so stale summaries are never reused.
     """
     h = hashlib.sha1()
     for c in chunks:
         t = (c.get("text", "") or "")
         h.update(str(len(t)).encode("utf-8", "replace"))
         h.update(t.encode("utf-8", "replace"))
+        vis = c.get("visual")
+        if vis:
+            h.update(b"|visual|")
+            for v in vis:
+                h.update(str(v.get("t", "")).encode("utf-8", "replace"))
+                h.update((v.get("text") or "").encode("utf-8", "replace"))
     return h.hexdigest()[:16]
 
 
@@ -98,12 +223,18 @@ def summarize_chunks(
     parallel: bool = False,
     max_workers: int = 4,
     out_partial: str | Path | None = None,
+    lang: str = "en",
 ) -> list[str]:
     """Summarize every transcript chunk. Returns summaries aligned to chunks.
 
     ``out_partial`` — if given, each finished summary is appended to that file
     immediately (so a crash never loses all progress and the file shows live
     progress while the pass runs).
+
+    ``lang`` — the recap language. For a native language the beat lines are
+    written in that language (the transcript is in that language too), so the
+    section script writer receives same-language beats. English stays
+    byte-identical to before (no instruction appended).
     """
     if not chunks:
         return []
@@ -111,6 +242,14 @@ def summarize_chunks(
     model = cfg_llm.get("summary_model") or cfg_llm.get("model") or ""
     n = len(chunks)
     started = time.time()
+    lang_name = languages.name(lang)
+    lang_instr = (
+        "\n\nLanguage: write the beat lines in " + lang_name + ", natural and "
+        "idiomatic — a " + lang_name + "-speaking recap audience will hear this. "
+        "Keep the [HH:MM:SS] timecode prefix format exactly as shown."
+        if lang and lang != "en"
+        else ""
+    )
 
     # Resume: if an out_partial file already holds completed chunks (from an
     # interrupted run) AND the chunk signature matches (same movie/transcript/
@@ -155,14 +294,20 @@ def summarize_chunks(
 
     def one(chunk: dict) -> str:
         text = chunk.get("text", "") or ""
-        budget = max(500, min(2200, int(len(text) * 0.22)))
-        user = PROMPT_SUMMARY.format(transcript=text, budget=budget)
+        budget = _summary_budget(len(text))
+        user = PROMPT_SUMMARY.format(
+            transcript=text, budget=budget,
+            visual=_visual_block(chunk.get("visual")),
+        )
+        if lang_instr:
+            user += lang_instr
         raw = llm.complete(
             cfg_llm.get("provider", ""),
             model,
             SYSTEM_SUMMARY,
             user,
             base_url=cfg_llm.get("base_url"),
+            max_tokens=_summary_max_tokens(budget),
         )
         return (raw or "").strip()
 

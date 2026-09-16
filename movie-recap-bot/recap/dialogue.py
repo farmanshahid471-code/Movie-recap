@@ -10,11 +10,9 @@ Returns a timestamped transcript in a compact text form the LLM can read.
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
-from typing import Iterable
 
-from .util import probe_duration, run, which_ffmpeg
+from .util import run, which_ffmpeg
 
 
 class DialogueError(RuntimeError):
@@ -60,12 +58,34 @@ def from_srt_path(path: Path) -> list[dict]:
     return cues
 
 
-def find_subtitle_near(video: Path, extra: str | None = None) -> Path | None:
-    """Look for an SRT/ASS/VTT matching the movie name (or an explicit path)."""
+def find_subtitle_near(video: Path, extra: str | None = None,
+                       lang: str | None = None) -> Path | None:
+    """Look for an SRT/ASS/VTT matching the movie name (or an explicit path).
+
+    With ``lang`` given, only a subtitle *tagged for that language* counts:
+    ``<movie>.<lang>.srt`` / ``<movie>_<lang>.srt`` (e.g. ``film.ar.srt``).
+    The untagged ``film.srt`` is never stolen by an Arabic/Spanish job — it
+    belongs to the English/master source. ``lang=None`` / ``"en"`` keeps the
+    legacy behaviour: an explicit path, any matching-name subtitle, or the
+    folder's single subtitle.
+    """
     if extra:
         p = Path(extra)
         if p.exists():
             return p
+    if lang and lang != "en":
+        tagged = [
+            video.with_name(f"{video.stem}.{lang}{ext}")
+            for ext in ("", ".srt", ".ass", ".vtt", ".sub", ".txt")
+        ] + [
+            video.with_name(f"{video.stem}_{lang}{ext}")
+            for ext in ("", ".srt", ".ass", ".vtt", ".sub", ".txt")
+        ]
+        for c in tagged:
+            if c.exists() and c != video:
+                return c
+        return None
+
     candidates = [
         video.with_suffix(x)
         for x in ("", ".srt", ".ass", ".vtt", ".sub", ".txt")
@@ -249,15 +269,20 @@ def extract_dialogue(
     word_timestamps: bool = False,
     whitelist: bool = True,
     tmp_dir: Path | None = None,
+    lang: str | None = None,
 ) -> list[dict]:
     """Return a list of timed cues from the film's dialogue.
 
     Prefers an existing subtitle; else transcribes the audio with Whisper.
+    ``lang`` narrows subtitle discovery to files tagged for that language
+    (``<movie>.<lang>.srt`` — see ``find_subtitle_near``), so an Arabic recap
+    reads the Arabic subtitle instead of accidentally grabbing the English one.
     With ``word_timestamps`` every ASR cue also carries a ``words`` list of
     ``{"word", "start", "end"}`` — used for the transcript sidecar files.
     """
     video = Path(video)
-    srt = find_subtitle_near(video, str(srt_path) if srt_path else None)
+    srt = find_subtitle_near(video, str(srt_path) if srt_path else None,
+                             lang=lang)
     if srt:
         cues = from_srt_path(srt)
         return _maybe_whitelist(cues, whitelist)

@@ -1,5 +1,14 @@
 # Setup Guide — Supabase (pgvector) + Docker
 
+> ⚠️ **Partly outdated.** This guide was written for the original design, where
+> Step D mapped narration lines to film moments with **pgvector/embeddings** and
+> Docker ran an **Ollama** container. The current engine replaced that with a
+> chronological, audio-locked timeline (no vector store, no embeddings, no
+> Ollama — see `recap/timeline.py` and `FIXES.md`), and the shipped
+> `docker-compose.yml` now drives the **DeepSeek API** directly. Sections of
+> this guide that still describe the old vector matcher / Ollama are kept for
+> history — follow `movie-recap-bot/README.md` for the current setup.
+
 This guide walks you through the two remaining pieces end to end:
 
 1. **Part 1 — Supabase pgvector** (the Step-D vector database that maps each

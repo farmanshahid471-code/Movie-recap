@@ -30,3 +30,7 @@ numpy>=1.24.0
 # ---- Optional: higher-quality TTS / forced alignment ----
 # elevenlabs>=1.0.0    # ElevenLabs multilingual TTS (best quality, paid)
 # whisperx            # ASR-based subtitle timing fallback (heavy, GPU helpful)
+
+# Optional (recommended): snap every visual cut onto the film's real
+# shot changes for a professional edit feel (timeline.snap_to_scenes).
+# pip install scenedetect[opencv]

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from . import llm
 from .script import normalize
+from .util import count_words
 
 SYSTEM_ZH = (
     "你是一名专业的电影解说视频中文配音撰稿人。负责把英文电影剧情解说翻译成"
@@ -37,13 +38,46 @@ PROMPT_ZH = """请把下面这份英文电影剧情解说（每行一个句子�
 
 
 def generate_online(english: str, cfg_llm: dict) -> str:
+    """Translate a full EN script to Simplified Chinese (one line per EN line).
+
+    ``max_tokens`` is derived from the source length so a well-behaved answer
+    is never truncated while a rambling one is stopped near what the job needs
+    (DeepSeek bills per output token).
+    """
     user = PROMPT_ZH.format(english=english)
+    est_out = max(512, min(8192, int(count_words(english) * 2.6) + 384))
     return llm.complete(
         cfg_llm.get("provider", ""),
         cfg_llm.get("model", ""),
         SYSTEM_ZH,
         user,
         base_url=cfg_llm.get("base_url"),
+        max_tokens=est_out,
+    )
+
+
+def check_alignment(
+    en_lines: list[str],
+    zh_lines: list[str],
+    *,
+    target: str = "ZH translation",
+    source: str = "EN source",
+) -> tuple[bool, str]:
+    """Sanity-check that a translation stayed line-aligned with its source.
+
+    A translation that merges or splits lines silently drifts the visuals
+    (each translated sentence is paired with the source sentence's film window
+    by index), so a mismatch should be surfaced instead of producing a subtly
+    wrong video.
+    """
+    if len(zh_lines) == len(en_lines):
+        return True, ""
+    return (
+        False,
+        f"{target} has {len(zh_lines)} lines but the {source} has "
+        f"{len(en_lines)} — lines must stay 1:1 aligned for visual sync. "
+        "Re-run the translation (it is cached per source, so only stale or "
+        "truncated translations need refreshing).",
     )
 
 
@@ -58,3 +92,66 @@ def write_translation_file(text: str, dest: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(text.strip() + "\n", encoding="utf-8")
     return dest
+
+
+# ---------------------------------------------------------------------------
+# Generic line-aligned translation (Arabic / Spanish / any catalogued code)
+# ---------------------------------------------------------------------------
+
+def _translation_prompt(target_name: str, source_name: str) -> tuple[str, str]:
+    """System + user prompt to translate a recap INTO ``target_name``."""
+    system = (
+        f"You are a professional movie-recap narration translator. You convert "
+        f"a {source_name} movie recap script into natural, idiomatic, "
+        f"colloquial {target_name} for video dubbing and subtitles."
+    )
+    prompt = f"""Translate the {source_name} movie recap script below (one sentence per line) into {target_name}.
+
+Requirements:
+- Keep a strict 1:1 mapping — one {target_name} sentence per {source_name} line, same line
+  count. Never merge or split lines (each line is matched to its own film moment).
+- Use the spoken, "movie-recap" storytelling register of {target_name}: natural and
+  flowing, not word-for-word.
+- Present tense, matching the source's narration pace.
+- Character names: keep them recognizable — use the established {target_name} name if one
+  exists (and stay consistent across the whole script), else keep the original.
+- Output ONLY the translation, one sentence per line. No titles, notes, or extra text.
+
+=== {source_name} SCRIPT (one sentence per line) ===
+
+{{script}}
+
+=== {target_name} TRANSLATION ===
+"""
+    return system, prompt
+
+
+def generate_translation(
+    source_text: str,
+    cfg_llm: dict,
+    *,
+    target: str,
+    source: str = "en",
+) -> str:
+    """Translate a full recap script (one line per sentence) into ``target``.
+
+    Line-aligned 1:1 with the source, so every translated sentence can reuse
+    the source sentence's film window. ``max_tokens`` is derived from the
+    source length so a well-behaved answer is never truncated while a rambling
+    one is stopped near what the job needs.
+    """
+    from . import languages
+
+    target_name = languages.name(target)
+    source_name = languages.name(source)
+    system, prompt = _translation_prompt(target_name, source_name)
+    user = prompt.format(script=source_text)
+    est_out = max(512, min(8192, int(count_words(source_text) * 2.6) + 384))
+    return llm.complete(
+        cfg_llm.get("provider", ""),
+        cfg_llm.get("model", ""),
+        system,
+        user,
+        base_url=cfg_llm.get("base_url"),
+        max_tokens=est_out,
+    )

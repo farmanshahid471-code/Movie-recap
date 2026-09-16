@@ -1,0 +1,1463 @@
+"""Tests for the visual-flow fixes (no replays + shot-boundary snapping).
+
+The reported bugs:
+  1. "Scenes repeat while the narration is going on" — consecutive cuts
+     pointed at film times that overlapped or even rewound, so the same
+     footage replayed with a stutter.
+  2. "Scene changes feel laggy" — cuts landed mid-shot at arbitrary computed
+     times instead of on the film's real shot changes.
+
+Run:  python tests/test_visual_flow.py
+(no third-party deps needed)
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from recap import timeline  # noqa: E402
+from recap.script import count_words  # noqa: E402
+from recap.tts import TimedCue  # noqa: E402
+
+CFG = {"micro_cut_seconds": 2.4, "max_cuts_per_beat": 4, "min_cut_seconds": 1.2}
+
+
+def _cuts_in_order(beats):
+    """Every cut as (film_start, duration, freeze) in play order."""
+    for b in beats:
+        yield from b["cuts"]
+
+
+def test_no_replay_same_window() -> None:
+    """Many sentences anchored to ONE tight film moment must never rewind."""
+    cues = [TimedCue(f"S{i}.", i * 4.0, i * 4.0 + 3.2) for i in range(3)]
+    durs = timeline.lock_durations(cues, 12.0)
+    sents = [{"sentence": c.text, "film_start": 100.0, "film_end": 103.0}
+             for c in cues]
+    beats = timeline.build_timeline(sents, durs, 6000.0, CFG)
+    prev_end = -1.0
+    for s, d, f, sp in _cuts_in_order(beats):
+        assert s >= prev_end - 1e-6, (
+            f"cut at {s:.2f}s replays footage that ended at {prev_end:.2f}s"
+        )
+        # a freeze-hold does not consume film: track the moving footage end
+        prev_end = max(prev_end, s + (d - f) * sp)
+    print("ok: tight same-window beats never replay (was 5 rewinds before)")
+
+
+def test_no_replay_overlapping_windows() -> None:
+    """Beats whose anchor windows overlap by design still never rewind."""
+    cues = [TimedCue(f"S{i}.", i * 4.0, i * 4.0 + 3.2) for i in range(4)]
+    durs = timeline.lock_durations(cues, 16.0)
+    # each window starts only 1s after the previous one, extends 6s
+    sents = [{"sentence": c.text,
+              "film_start": 200.0 + i * 1.0,
+              "film_end": 206.0 + i * 1.0}
+             for i, c in enumerate(cues)]
+    beats = timeline.build_timeline(sents, durs, 6000.0, CFG)
+    prev_end = -1.0
+    for s, d, f, sp in _cuts_in_order(beats):
+        assert s >= prev_end - 1e-6, f"rewind: {s:.2f} < {prev_end:.2f}"
+        prev_end = max(prev_end, s + (d - f) * sp)
+    # length lock still exact
+    total = sum(d for _, d, _f, _v in _cuts_in_order(beats))
+    assert abs(total - 16.0) < 1e-6
+    print("ok: overlapping anchor windows never rewind, length locked")
+
+
+def test_no_replay_long_run_random_windows() -> None:
+    """A 150-sentence montage over jittery windows: strictly forward film."""
+    cues = [TimedCue(f"S{i}.", i * 6.0, i * 6.0 + 4.0) for i in range(150)]
+    span = 149 * 6.0 + 4.0
+    durs = timeline.lock_durations(cues, span)
+    sents = []
+    t = 0.0
+    for i, c in enumerate(cues):
+        w = 20.0 + (i % 7) * 13.0        # windows of varying width...
+        t += 15.0 + (i % 5) * 9.0        # ...at jittery, increasing positions
+        sents.append({"sentence": c.text, "film_start": t,
+                      "film_end": min(t + w, 5900.0)})
+    beats = timeline.build_timeline(sents, durs, 6000.0, CFG)
+    prev_end = -1.0
+    for s, d, f, sp in _cuts_in_order(beats):
+        assert s >= prev_end - 1e-6, (
+            f"beat rewound the film: {s:.2f}s after {prev_end:.2f}s"
+        )
+        prev_end = max(prev_end, s + (d - f) * sp)
+    total = sum(d for _, d, _f, _v in _cuts_in_order(beats))
+    assert abs(total - span) < 0.5
+    print(f"ok: 150-sentence montage strictly forward, {total:.0f}s locked")
+
+
+def test_snap_to_boundary() -> None:
+    """Cuts move onto the nearest real shot change within tolerance."""
+    assert timeline._snap_to_boundary(100.4, [100.0, 112.5, 130.0], 0.8) == 100.0
+    assert timeline._snap_to_boundary(112.9, [100.0, 112.5, 130.0], 0.8) == 112.5
+    assert timeline._snap_to_boundary(120.0, [100.0, 112.5, 130.0], 0.8) == 120.0
+    assert timeline._snap_to_boundary(129.7, [100.0, 112.5, 130.0], 0.8) == 130.0
+    assert timeline._snap_to_boundary(50.0, [], 0.8) == 50.0
+    print("ok: snapping picks the nearest boundary within tolerance only")
+
+
+def test_timeline_uses_scene_bounds() -> None:
+    """build_timeline snaps cut starts onto supplied shot boundaries and
+    still never rewinds."""
+    cues = [TimedCue(f"S{i}.", i * 6.0, i * 6.0 + 4.5) for i in range(6)]
+    durs = timeline.lock_durations(cues, 34.0)
+    sents = [{"sentence": c.text, "film_start": 40.0 + i * 25.0,
+              "film_end": 65.0 + i * 25.0} for i, c in enumerate(cues)]
+    bounds = [40.0, 52.37, 65.11, 90.0, 102.44, 115.3, 130.0, 142.9, 160.0,
+              172.15, 190.0]
+    stats = {}
+    beats = timeline.build_timeline(
+        sents, durs, 600.0, CFG, stats=stats, scene_bounds=bounds,
+    )
+    assert stats.get("snapped_cuts", 0) > 0, "expected some cuts to snap"
+    prev_end = -1.0
+    on_boundary = 0
+    total_cuts = 0
+    for s, d, f, sp in _cuts_in_order(beats):
+        assert s >= prev_end - 1e-6, "snap caused a rewind"
+        if any(abs(s - b) < 1e-6 for b in bounds):
+            on_boundary += 1
+        total_cuts += 1
+        prev_end = max(prev_end, s + (d - f) * sp)
+    total = sum(d for _, d, _f, _v in _cuts_in_order(beats))
+    assert abs(total - 34.0) < 1e-6
+    print(f"ok: {on_boundary}/{total_cuts} cuts land on real shot boundaries, "
+          f"no rewind, length locked")
+
+
+def test_snap_never_breaks_monotonic_playhead() -> None:
+    """A boundary just behind the film playhead must be ignored."""
+    cues = [TimedCue("A.", 0.0, 4.0), TimedCue("B.", 5.0, 9.0)]
+    durs = timeline.lock_durations(cues, 9.5)
+    # window 0: film [100,110] -> first cut plays [99.6, 104.1]
+    # boundary at 101 would snap cut2's desired 101.8 backwards -> must NOT.
+    sents = [{"sentence": "A.", "film_start": 100.0, "film_end": 110.0},
+             {"sentence": "B.", "film_start": 100.0, "film_end": 110.0}]
+    bounds = [101.0, 104.09, 108.0]
+    beats = timeline.build_timeline(sents, durs, 600.0, CFG, scene_bounds=bounds)
+    prev_end = -1.0
+    for s, d, f, sp in _cuts_in_order(beats):
+        assert s >= prev_end - 1e-6, "snap rewound below the film playhead"
+        prev_end = max(prev_end, s + (d - f) * sp)
+    print("ok: snapping respects the film playhead (no forced rewinds)")
+
+
+def test_end_of_film_stays_in_bounds() -> None:
+    """Narration longer than the film: cuts clamp inside the movie."""
+    cues = [TimedCue(f"S{i}.", i * 9.0, i * 9.0 + 8.0) for i in range(40)]
+    span = 39 * 9.0 + 8.0
+    durs = timeline.lock_durations(cues, span)
+    sents = [{"sentence": c.text, "film_start": 0.0, "film_end": 300.0}
+             for c in cues]
+    beats = timeline.build_timeline(sents, durs, 300.0, CFG)
+    for s, d, _f, _v in _cuts_in_order(beats):
+        assert 0.0 <= s <= 300.0
+    total = sum(d for _, d, _f, _v in _cuts_in_order(beats))
+    assert abs(total - span) < 0.5
+    print("ok: end-of-film clamp keeps every cut inside the movie")
+
+
+def test_visuals_never_run_ahead_of_the_narration() -> None:
+    """Dense-beat section: the narration is LONGER than its footage. Before
+    the pacing fix the forward walk made the visuals run up to ~86s of film
+    ahead of the story. Now the section plays in SLOW MOTION: the picture
+    never stops, never repeats, and stays with the narrated moment."""
+    # 25 sentences, 6s narration each (149s) over beats only 2.4s apart.
+    cues = [TimedCue(f"S{i}.", i * 6.0, i * 6.0 + 5.0) for i in range(25)]
+    span = 24 * 6.0 + 5.0
+    durs = timeline.lock_durations(cues, span)
+    sents = [{"sentence": c.text,
+              "film_start": 1000.0 + i * 2.4,
+              "film_end": 1002.4 + i * 2.4}
+             for i, c in enumerate(cues)]
+    cfg = dict(CFG)
+    cfg["min_speed"] = 0.35
+    stats: dict = {}
+    beats = timeline.build_timeline(sents, durs, 6000.0, cfg, stats=stats)
+
+    max_lead_seen = 0.0
+    prev_end = -1.0
+    for b in beats:
+        for s, d, f, sp in b["cuts"]:
+            lead = s - b["film_start"]
+            max_lead_seen = max(max_lead_seen, lead)
+            assert s >= prev_end - 1e-6, "no-replay must still hold"
+            prev_end = max(prev_end, s + (d - f) * sp)
+    assert max_lead_seen <= 8.0, (
+        f"visuals ran {max_lead_seen:.1f}s ahead of the narration "
+        "(was ~86s before pacing)"
+    )
+    # THE MOTION GUARANTEE: not a single frozen frame mid-film
+    frozen = sum(f for _, _d, f, _v in _cuts_in_order(beats))
+    assert frozen == 0.0, "mid-film freezes are forbidden (slow-mo instead)"
+    assert stats.get("held_shots", 0) == 0
+    # the dense section was paced in slow motion, never below min_speed
+    assert stats.get("slowed_groups", 0) > 0
+    for _s, _d, _f, sp in _cuts_in_order(beats):
+        assert sp >= 0.35 - 1e-6, "speed must respect min_speed"
+    # durations still sum to the narration exactly
+    total = sum(d for _, d, _f, _v in _cuts_in_order(beats))
+    assert abs(total - span) < 1e-6
+    print(f"ok: dense section -> lead {max_lead_seen:.1f}s (was ~86s), "
+          f"{stats['slowed_groups']} slow-mo groups, 0 frozen seconds, "
+          f"{total:.0f}s locked")
+
+
+def test_holds_keep_av_lock_in_sparse_sections() -> None:
+    """Normal pacing (windows wider than narration) must not hold at all."""
+    cues = [TimedCue(f"S{i}.", i * 5.0, i * 5.0 + 4.0) for i in range(10)]
+    span = 9 * 5.0 + 4.0
+    durs = timeline.lock_durations(cues, span)
+    sents = [{"sentence": c.text,
+              "film_start": i * 60.0, "film_end": i * 60.0 + 40.0}
+             for i, c in enumerate(cues)]   # wide windows, plenty of footage
+    stats: dict = {}
+    beats = timeline.build_timeline(sents, durs, 6000.0, dict(CFG), stats=stats)
+    assert stats.get("held_shots", 0) == 0, "no holds expected when windows are wide"
+    assert stats.get("slowed_groups", 0) == 0, "no slow-mo when film is ample"
+    for _s, _d, f, sp in _cuts_in_order(beats):
+        assert f == 0.0 and abs(sp - 1.0) < 1e-9
+    total = sum(d for _, d, _f, _v in _cuts_in_order(beats))
+    assert abs(total - span) < 1e-6
+    print("ok: wide-window sections play straight through at 1x speed")
+
+
+def test_slow_motion_cut_command() -> None:
+    """A paced (slow-mo) cut reads only duration*speed of film and slows it
+    with setpts so the motion is continuous (no freeze, no fps drop)."""
+    from recap import clip
+
+    captured: list[list[str]] = []
+    original_run, original_which = clip.run, clip.which_ffmpeg
+
+    def fake_run(cmd, **kw):
+        captured.append(list(cmd))
+
+    clip.run = fake_run
+    clip.which_ffmpeg = lambda: "ffmpeg"
+    try:
+        # 8s of screen time at 0.5x = 4s of film
+        clip.cut_segment(Path("movie.mp4"), Path("seg.mp4"), 100.0, 8.0,
+                         {"fps": 30}, mode="reencode", exact=True,
+                         freeze=0.0, speed=0.5)
+    finally:
+        clip.run = original_run
+        clip.which_ffmpeg = original_which
+
+    cmd = captured[0]
+    assert cmd[cmd.index("-t") + 1] == "4.000", \
+        f"input must read 8*0.5=4s of film: {cmd}"
+    assert cmd[cmd.index("-t", cmd.index("-i")) + 1] == "8.000", \
+        "output must be the full 8s"
+    joined = " ".join(cmd)
+    assert "setpts=PTS/0.5000" in joined, "slowdown via setpts"
+    assert "tpad" not in joined, "no freeze in a pure slow-mo cut"
+    print("ok: slow-mo cut = 4s of film stretched to a full 8s of motion")
+
+
+def test_freeze_cut_command() -> None:
+    """A freeze-hold cut reads only the moving part of the shot and clones
+    the last frame for the rest (no ffmpeg binary needed: we capture the
+    command the pipeline would run)."""
+    from recap import clip
+
+    captured: list[list[str]] = []
+    original_run, original_which = clip.run, clip.which_ffmpeg
+
+    def fake_run(cmd, **kw):
+        captured.append(list(cmd))
+
+    clip.run = fake_run
+    clip.which_ffmpeg = lambda: "ffmpeg"
+    try:
+        clip.cut_segment(Path("movie.mp4"), Path("seg.mp4"), 100.0, 8.0,
+                         {"fps": 30}, mode="reencode", exact=True, freeze=5.0)
+    finally:
+        clip.run = original_run
+        clip.which_ffmpeg = original_which
+
+    assert captured, "cut_segment must invoke ffmpeg"
+    cmd = captured[0]
+    joined = " ".join(cmd)
+    # input read limit = duration - freeze ...
+    assert cmd[cmd.index("-t") + 1] == "3.000", \
+        f"moving part must be 8-5=3s: {cmd}"
+    i_ss, i_t = cmd.index("-ss"), cmd.index("-t")
+    assert i_ss < i_t < cmd.index("-i"), "input limit must precede -i"
+    # ... output still locked to the full 8s ...
+    assert cmd[cmd.index("-t", i_t + 1) + 1] == "8.000", "output -t must be the full duration"
+    # ... via a tpad clone of the final frame
+    assert "tpad=stop_mode=clone:stop_duration=5.000" in joined
+    print("ok: freeze cut = 3s of film + 5s frame-hold, output exactly 8s")
+
+
+def test_visual_matched_budgets() -> None:
+    """Section budgets are sized by FILM TIME and capped at 1x footage."""
+    from recap import script as script_mod
+
+    # 10 sections x 150s of distinct film; cap = 150/60*150*0.8 = 300 words
+    film_secs = [150.0] * 10
+    caps = [s / 60 * 150 * 0.8 for s in film_secs]
+    b = script_mod._visual_matched_budgets(2250, film_secs, caps)
+    assert len(b) == 10 and all(x <= 300 for x in b)
+    assert abs(sum(b) - 2250) <= 10, "normal target preserved"
+
+    # extreme target: caps bind but nothing exceeds its footage capacity
+    b2 = script_mod._visual_matched_budgets(6000, film_secs, caps)
+    assert all(x <= 300 for x in b2), "no section may outrun its footage"
+
+    # one dialogue-dense (tiny) section: capped, the others absorb the excess
+    film_secs2 = [150.0, 150.0, 20.0, 150.0]
+    caps2 = [s / 60 * 150 * 0.8 for s in film_secs2]
+    b3 = script_mod._visual_matched_budgets(600, film_secs2, caps2)
+    assert b3[2] <= caps2[2] + 0.5, "dense section capped at 1x footage"
+    assert abs(sum(b3) - 600) <= 20, "total preserved (rounding/floor slack)"
+    print("ok: budgets sized by film time, dense sections capped, total kept")
+
+
+def test_paced_anchors_spread_clusters() -> None:
+    """Clustered anchors are spread one narration-length apart; well-spread
+    anchors are left alone."""
+    from recap import script as script_mod
+
+    sents = ["The pilot wakes up in a forest full of tall dark trees."] * 4
+    # four sentences all anchored onto one busy 2-second moment
+    raw = [1001.0, 1001.4, 1001.8, 1002.2]
+    out = script_mod._paced_anchors(raw, sents, 1000.0, 1150.0, 150)
+    assert all(out[i] > out[i - 1] for i in range(1, 4)), "must be monotone"
+    # each gap must fit BOTH adjacent windows: _anchor_windows splits every
+    # gap at the midpoint and each window reaches `lead` back to its anchor,
+    # so a gap must be 2 x (narration - lead) wide
+    est = 12 / 150 * 60 * 1.15 + 1.0
+    need = 2 * (est - 0.8)
+    assert all(out[i] - out[i - 1] >= need - 1e-6 for i in range(1, 4))
+    assert out[-1] <= 1150.0
+
+    # already-spread anchors stay where they are (except the half-step for
+    # the first window, by design)
+    raw2 = [1000.0, 1100.0, 1200.0]
+    out2 = script_mod._paced_anchors(raw2, sents[:3], 1000.0, 1300.0, 150)
+    assert out2[1:] == raw2[1:] and out2[0] >= raw2[0]
+
+    # impossible clustering (no room) -> even spread, still in bounds
+    out3 = script_mod._paced_anchors([1148.0] * 4, sents, 1000.0, 1150.0, 150)
+    assert all(1000.0 <= a <= 1150.0 for a in out3)
+    assert all(out3[i] > out3[i - 1] for i in range(1, 4))
+    print("ok: clustered anchors paced apart; sparse anchors untouched")
+
+
+def test_matched_script_plays_at_1x() -> None:
+    """THE PAYOFF: a script budgeted by film time, with paced anchors, plays
+    every section at NORMAL SPEED -- even over beats packed 2.4s apart. No
+    slow motion, no frozen frames, exact A/V lock."""
+    from recap import script as script_mod
+
+    # 63 beats, 2.4s apart, in the film window [1000, 1150)
+    beats = [{"t": 1000.0 + i * 2.4, "text": f"beat {i}"} for i in range(63)]
+    # film-time budget -> only ~5 sentences for this window (not 63)
+    sents = ["The pilot wakes up in a forest full of tall dark trees.",
+             "He crawls toward the burning wreck of his own plane.",
+             "An armed stranger inspects the smoke and finds him there.",
+             "The stranger raises his gun and shouts a warning at him.",
+             "The pilot grabs the barrel and both men fall down hard."]
+    # writer anchored the 5 sentences onto the FIRST five (clustered) beats
+    raw = [b["t"] for b in beats[:5]]
+    paced = script_mod._paced_anchors(raw, sents, 1000.0, 1150.0, 150)
+    wins = script_mod._anchor_windows(
+        1000.0, 1150.0, beats, len(sents),
+        anchor_values=paced, lead=0.8, tail=6.0,
+    )
+    segs = [{"sentence": s, "film_start": lo, "film_end": hi}
+            for s, (lo, hi) in zip(sents, wins)]
+
+    # narration: 4.8s speech + 0.4s pause per sentence
+    cues = [TimedCue(s, i * 5.2, i * 5.2 + 4.8) for i, s in enumerate(sents)]
+    span = 4 * 5.2 + 4.8
+    durs = timeline.lock_durations(cues, span)
+    stats: dict = {}
+    beats_tl = timeline.build_timeline(segs, durs, 6000.0, dict(CFG), stats=stats)
+
+    assert stats.get("slowed_groups", 0) == 0, "no slow motion anywhere"
+    assert stats.get("held_shots", 0) == 0, "no frozen frames"
+    for _s, _d, f, sp in _cuts_in_order(beats_tl):
+        assert abs(sp - 1.0) < 1e-9, f"expected 1x, got {sp}x"
+        assert f == 0.0
+    total = sum(d for _, d, _f, _v in _cuts_in_order(beats_tl))
+    assert abs(total - span) < 1e-6, "A/V lock exact"
+    prev_end = -1.0
+    for s, d, f, sp in _cuts_in_order(beats_tl):
+        assert s >= prev_end - 1e-6, "no replay"
+        prev_end = max(prev_end, s + (d - f) * sp)
+    print(f"ok: matched script over 2.4s-packed beats -> all 1x, "
+          f"{total:.1f}s locked, no slow-mo, no freeze")
+
+
+def test_fit_section_to_footage() -> None:
+    """The per-section budget is a CEILING: over-delivered sections are
+    trimmed to what their footage can show at 1x."""
+    from recap import script as script_mod
+
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    assert count_words(s) == 12
+    sents = [s] * 20  # 240 words for a 150-word section
+    out = script_mod._fit_section_to_footage(sents, 150, [])
+    assert len(out) < 20 and count_words(" ".join(out)) <= 150
+    assert len(out) >= 3
+    assert out[0] == sents[0] and out[-1] == sents[-1], "hand-off ends kept"
+
+    # name-bearing middle sentences survive the trim
+    named = [s] * 20
+    named[7] = "Troy grabs his gun and aims it at the armed stranger."
+    out2 = script_mod._fit_section_to_footage(named, 150, ["Troy"])
+    assert any("Troy" in x for x in out2), "name-bearing sentence kept"
+
+    # within budget -> untouched; tiny section -> floor of 3 kept
+    assert script_mod._fit_section_to_footage([s] * 5, 150, []) == [s] * 5
+    out3 = script_mod._fit_section_to_footage([s] * 3, 10, [])
+    assert len(out3) == 3, "never trim below 3 sentences"
+    print("ok: over-delivered sections trimmed to their footage; "
+          "names + hand-off ends kept")
+
+
+def test_overdelivered_section_still_plays_at_1x() -> None:
+    """THE USER'S BUG, reproduced and fixed: the writer over-delivers (240
+    words for a 150-word section). Untrimmed, the section cannot pace its
+    anchors 1x-safe, falls back to an even spread, every window is shorter
+    than its sentence -> the timeline slow-moes the whole section and the
+    narration runs AHEAD of the picture. After the hard fit, the same
+    over-delivery plays every cut at exactly 1x."""
+    from recap import script as script_mod
+
+    beats = [{"t": 1000.0 + i * 2.4, "text": f"beat {i}"} for i in range(63)]
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    over = [s] * 20                      # 240 words; writer ignored the budget
+    cap = 150                            # 150s of film x 1 word/s (150 wpm, 0.4)
+
+    # --- before the fix: over-budget section drifts into slow motion ------
+    raw = [b["t"] for b in beats[:20]]   # clustered anchors on busy beats
+    paced = script_mod._paced_anchors(raw, over, 1000.0, 1150.0, 150)
+    wins = script_mod._anchor_windows(
+        1000.0, 1150.0, beats, len(over),
+        anchor_values=paced, lead=0.8, tail=6.0,
+    )
+    segs = [{"sentence": x, "film_start": lo, "film_end": hi}
+            for x, (lo, hi) in zip(over, wins)]
+    cues = [TimedCue(x, i * 5.2, i * 5.2 + 4.8) for i, x in enumerate(over)]
+    stats: dict = {}
+    timeline.build_timeline(segs, timeline.lock_durations(cues, 20 * 5.2),
+                            6000.0, dict(CFG), stats=stats)
+    assert stats.get("slowed_groups", 0) > 0, \
+        "over-budget section must be the slow-mo case (bug reproduction)"
+
+    # --- after the fix: trimmed to the footage -> all 1x, nothing frozen --
+    fitted = script_mod._fit_section_to_footage(over, cap, [])
+    assert count_words(" ".join(fitted)) <= cap
+    n = len(fitted)
+    paced2 = script_mod._paced_anchors(
+        [b["t"] for b in beats[:n]], fitted, 1000.0, 1150.0, 150)
+    wins2 = script_mod._anchor_windows(
+        1000.0, 1150.0, beats, n,
+        anchor_values=paced2, lead=0.8, tail=6.0,
+    )
+    segs2 = [{"sentence": x, "film_start": lo, "film_end": hi}
+             for x, (lo, hi) in zip(fitted, wins2)]
+    span = (n - 1) * 5.2 + 4.8
+    cues2 = [TimedCue(x, i * 5.2, i * 5.2 + 4.8) for i, x in enumerate(fitted)]
+    durs = timeline.lock_durations(cues2, span)
+    stats2: dict = {}
+    btl = timeline.build_timeline(segs2, durs, 6000.0, dict(CFG), stats=stats2)
+
+    assert stats2.get("slowed_groups", 0) == 0, "no slow motion after the fit"
+    assert stats2.get("held_shots", 0) == 0, "no frozen frames after the fit"
+    speeds = [sp for _, _d, _f, sp in _cuts_in_order(btl)]
+    assert speeds and all(abs(sp - 1.0) < 1e-9 for sp in speeds), \
+        f"expected all 1x, got {sorted(set(round(x, 3) for x in speeds))}"
+    total = sum(d for _, d, _f, _v in _cuts_in_order(btl))
+    assert abs(total - span) < 1e-6, "A/V lock exact"
+    prev_end = -1.0
+    for st, d, f, sp in _cuts_in_order(btl):
+        assert st >= prev_end - 1e-6, "no replay"
+        prev_end = max(prev_end, st + (d - f) * sp)
+    print(f"ok: 240-word over-delivery -> {count_words(' '.join(fitted))} "
+          f"words/{n} sentences -> all 1x, {total:.1f}s exact lock "
+          f"(untrimmed: {stats.get('slowed_groups')} slowed groups)")
+
+
+def test_condense_section_tightens_story() -> None:
+    """Over-delivered sections are CONDENSED (same story, tighter wording),
+    not sentence-dropped -- dropping middles is only the backstop."""
+    import json
+    from recap import script as script_mod
+
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    over = [s] * 20  # 240 words
+    condensed = ["The pilot wakes in pain in a forest.",
+                 "His crashed plane burns behind him.",
+                 "An armed stranger finds the wreck.",
+                 "The pilot grabs his gun and passes out."]  # 33 words
+    calls = []
+
+    def fake_complete(provider, model, system, user, **kw):
+        calls.append(user)
+        return json.dumps({"sentences": condensed})
+
+    orig = script_mod.llm.complete
+    script_mod.llm.complete = fake_complete
+    try:
+        out = script_mod._condense_section(
+            {"provider": "deepseek", "model": "x"}, over, 150, ["Troy"])
+    finally:
+        script_mod.llm.complete = orig
+    assert out == condensed, "in-budget rewrite accepted verbatim"
+    assert "AT MOST 150 words" in calls[0]
+    assert "SAME order" in calls[0], "must demand the causal chain be kept"
+    assert "Troy" in calls[0], "names must be required in the rewrite"
+
+    # rewrite that still overshoots -> None (caller falls back to the trim)
+    script_mod.llm.complete = lambda *a, **k: json.dumps({"sentences": over})
+    try:
+        assert script_mod._condense_section(
+            {"provider": "deepseek", "model": "x"}, over, 150, []) is None
+    finally:
+        script_mod.llm.complete = orig
+
+    # provider blow-up -> None, never an exception into the pipeline
+    def boom(*a, **k):
+        raise RuntimeError("api down")
+    script_mod.llm.complete = boom
+    try:
+        assert script_mod._condense_section(
+            {"provider": "deepseek", "model": "x"}, over, 150, []) is None
+    finally:
+        script_mod.llm.complete = orig
+    print("ok: condense pass accepts in-budget rewrites, rejects "
+          "overshoots, survives api failures")
+
+
+def test_overdelivery_is_condensed_not_dropped() -> None:
+    """Full loop: the writer returns 240 words for a 150-word footage
+    budget; the pipeline makes ONE condense call (not a mechanical drop),
+    and the condensed section -- story kept -- is what reaches the
+    timeline, windows attached."""
+    import json
+    from recap import script as script_mod
+
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    over = [s] * 20                                     # 240 words
+    condensed = [                                       # 120 words, ordered
+        "The pilot wakes up hurt in a dark forest near his burning plane.",
+        "A stranger with a gun inspects the wreck and finds him.",
+        "The pilot grabs the barrel and both men fall hard.",
+        "He drags himself away and hides in the trees.",
+        "By morning the whole army is tracking his trail.",
+        "He crosses a frozen river to throw the dogs off.",
+        "A village family hides him inside their barn.",
+        "The soldiers search the village house by house.",
+        "He slips out at night and steals a truck.",
+        "The chase ends at the border bridge at dawn.",
+    ]
+    assert count_words(" ".join(condensed)) == 96
+    calls = []
+
+    def fake_complete(provider, model, system, user, **kw):
+        calls.append(user)
+        if len(calls) == 1:
+            return json.dumps({"sentences": over})
+        return json.dumps({"sentences": condensed})
+
+    chunk = {
+        "index": 0, "start": 1000.0, "end": 1150.0,
+        "summary": "A pilot is shot down and hunted through the woods.",
+        "beats": [{"t": 1000.0 + i * 2.4, "text": f"beat {i}"}
+                  for i in range(63)],
+    }
+    orig = script_mod.llm.complete
+    script_mod.llm.complete = fake_complete
+    try:
+        out = script_mod.generate_segmented_script(
+            [chunk], {"provider": "deepseek", "model": "x"}, 200,
+            words_per_minute=150, lang_name="Spanish",
+            sign_off=False, visual_match=True, humanize=False,
+        )
+    finally:
+        script_mod.llm.complete = orig
+
+    assert len(calls) == 2, ("one write + one condense, no retries: "
+                             f"got {len(calls)} calls")
+    assert "AT MOST 150 words" in calls[1], "second call is the condense"
+    assert [o["sentence"] for o in out] == condensed, \
+        "the condensed story (not the dropped-middles version) is the script"
+    assert all("film_start" in o and "film_end" in o for o in out)
+    assert all(o["film_end"] > o["film_start"] for o in out)
+    prev = -1.0
+    for o in out:
+        assert o["film_start"] >= prev - 1e-9, "windows stay forward"
+        prev = o["film_start"]
+    print(f"ok: 240-word over-delivery -> one condense call -> "
+          f"{count_words(' '.join(condensed))}-word ordered story with "
+          "windows attached")
+
+
+def test_humanize_script_pass() -> None:
+    """The humanizer pass (adapted from blader/humanizer, MIT): one call,
+    exact sentence count, AI-tell patterns in the prompt, graceful
+    failure."""
+    import json
+    from recap import script as script_mod
+
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    sents = [s] * 8
+    ok = ["The pilot comes to in a dark forest, every breath hurting."] * 8
+    calls = []
+
+    def fake_complete(provider, model, system, user, **kw):
+        calls.append((system, user))
+        return json.dumps({"sentences": ok})
+
+    orig = script_mod.llm.complete
+    script_mod.llm.complete = fake_complete
+    try:
+        out = script_mod._humanize_script(
+            {"provider": "deepseek", "model": "x"}, sents, "English")
+    finally:
+        script_mod.llm.complete = orig
+    assert out == ok
+    system, user = calls[0]
+    assert system is script_mod.SYSTEM_HUMANIZER
+    # the pattern pack + timing constraints are all in the prompt
+    for needle in ("not just X, it's Y", "showcase", "EXACTLY 8",
+                   "10% longer", "English", "FINISHED SCRIPT"):
+        assert needle in user, needle
+    assert "1. The pilot wakes up" in user, "sentences are numbered 1:1"
+
+    # wrong sentence count -> None (caller keeps the original script)
+    script_mod.llm.complete = lambda *a, **k: json.dumps({"sentences": ok[:5]})
+    try:
+        assert script_mod._humanize_script(
+            {"provider": "deepseek", "model": "x"}, sents, "English") is None
+    finally:
+        script_mod.llm.complete = orig
+
+    # api blow-up -> None, never an exception into the pipeline
+    def boom(*a, **k):
+        raise RuntimeError("api down")
+    script_mod.llm.complete = boom
+    try:
+        assert script_mod._humanize_script(
+            {"provider": "deepseek", "model": "x"}, sents, "English") is None
+    finally:
+        script_mod.llm.complete = orig
+    print("ok: humanizer call carries the pattern pack + timing locks; "
+          "bad counts and api failures fall back to the original")
+
+
+def test_humanizer_full_loop_keeps_timing() -> None:
+    """Full loop with humanize=True: the final pass rewrites AI-telling
+    lines, but a rewrite that would outrun its film window (over +10% +2
+    words) is rejected per-sentence and the original line kept."""
+    import json
+    from recap import script as script_mod
+
+    written = [
+        "It is not just a crash site, it is the start of a manhunt.",
+        "The pilot wakes up in a forest full of tall dark trees.",
+        "An armed stranger inspects the wreck and finds him.",
+        "The pilot grabs the barrel and both men fall down hard.",
+        "He drags himself away and hides deep inside the trees.",
+        "By morning the whole army is tracking his trail.",
+        "He crosses a frozen river to throw the dogs off.",
+        "The chase finally ends at the border bridge.",
+    ]
+    bloated = ("What happens next is that the pilot, who is injured and "
+               "exhausted and lying in thick snow, slowly and painfully "
+               "begins to crawl toward the wreck while the armed stranger "
+               "watches him very closely indeed.")
+    humanized = [
+        "The crash site becomes the start of a manhunt.",   # shorter: ok
+        "The pilot comes to in a dark forest, hurting.",    # shorter: ok
+        bloated,                                            # way over: reject
+        written[3],                                         # identical: keep
+        "He drags himself into the trees to hide.",         # shorter: ok
+        "By morning the army is tracking his trail.",       # shorter: ok
+        "He crosses a frozen river to lose the dogs.",      # shorter: ok
+        "The chase ends at the border bridge.",             # shorter: ok
+    ]
+
+    def fake_complete(provider, model, system, user, **kw):
+        if "FINISHED SCRIPT" in user:
+            return json.dumps({"sentences": humanized})
+        return json.dumps({"sentences": written})
+
+    chunk = {
+        "index": 0, "start": 1000.0, "end": 1150.0,
+        "summary": "A pilot is shot down and hunted through the woods.",
+        "beats": [{"t": 1000.0 + i * 2.4, "text": f"beat {i}"}
+                  for i in range(63)],
+    }
+    orig = script_mod.llm.complete
+    script_mod.llm.complete = fake_complete
+    try:
+        out = script_mod.generate_segmented_script(
+            [chunk], {"provider": "deepseek", "model": "x"}, 200,
+            words_per_minute=150, lang_name="Spanish",
+            sign_off=False, visual_match=True, humanize=True,
+        )
+    finally:
+        script_mod.llm.complete = orig
+
+    assert len(out) == len(written), "sentence count is the timing lock"
+    assert out[0]["sentence"] == humanized[0], "fitting rewrite accepted"
+    assert out[1]["sentence"] == humanized[1]
+    assert out[2]["sentence"] == written[2], \
+        "over-length rewrite rejected, original kept"
+    assert out[3]["sentence"] == written[3], "identical line untouched"
+    assert out[7]["sentence"] == humanized[7]
+    assert all(o["film_end"] > o["film_start"] for o in out), \
+        "every sentence keeps its film window"
+    print("ok: humanizer rewrites flow through; a rewrite that would "
+          "outrun its footage is rejected and the original kept")
+
+
+def test_rewindow_to_speech_guarantees_1x() -> None:
+    """THE REPORTED BUG: 'the narration gets ahead from the start, the
+    visuals move slowly.' The script sized every window from an ESTIMATE
+    (words / words_per_minute); the real voice speaks ~35% slower than
+    that, so every window is smaller than its sentence and the timeline
+    slow-moes the whole video. rewindow_to_speech() re-sizes the windows
+    from the MEASURED durations -> everything plays at 1x."""
+    # 3 sections x 270s zones; 5 sentences each, est-sized windows (~6.5s,
+    # what the 150-wpm estimate produces for a 12-word sentence)
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    segs: list[dict] = []
+    for sec in range(3):
+        zl, zh = sec * 270.0, sec * 270.0 + 270.0
+        for k in range(5):
+            a = zl + 20.0 + k * 16.0
+            segs.append({"sentence": s, "film_start": a - 2.6,
+                         "film_end": a + 3.9,
+                         "zone_lo": zl, "zone_hi": zh})
+    # the REAL audio: the voice speaks 35% slower than the estimate ->
+    # every cue spans 9.0s, not 6.5s
+    n = len(segs)
+    cues = [TimedCue(s, i * 9.0, i * 9.0 + 8.4) for i in range(n)]
+    span = (n - 1) * 9.0 + 8.4
+    durs = timeline.lock_durations(cues, span)
+
+    # --- before the fix: every section slow-moes --------------------------
+    stats_bug: dict = {}
+    timeline.build_timeline(segs, durs, 6000.0, dict(CFG), stats=stats_bug)
+    assert stats_bug.get("slowed_groups", 0) >= 3, \
+        "estimate-sized windows + slower voice must slow-mo (bug repro)"
+
+    # --- after the fix: windows re-sized to the measured speech -----------
+    rewin = timeline.rewindow_to_speech(segs, durs, 6000.0)
+    for i, o in enumerate(rewin):
+        zl, zh = segs[i]["zone_lo"], segs[i]["zone_hi"]
+        assert zl - 1e-6 <= o["film_start"] < o["film_end"] <= zh + 1e-6, \
+            "window stays inside its section's zone"
+        assert o["film_end"] - o["film_start"] >= durs[i] - 1e-6, \
+            "window is at least the sentence's real duration -> 1x fits"
+        if i and segs[i]["zone_lo"] == segs[i - 1]["zone_lo"]:
+            assert abs(o["film_start"] - rewin[i - 1]["film_end"]) <= 0.01, \
+                "windows walk the zone contiguously"
+    stats: dict = {}
+    btl = timeline.build_timeline(rewin, durs, 6000.0, dict(CFG), stats=stats)
+    assert stats.get("slowed_groups", 0) == 0, "no slow motion anywhere"
+    assert stats.get("held_shots", 0) == 0, "no frozen frames"
+    for _s0, _d0, f0, sp0 in _cuts_in_order(btl):
+        assert abs(sp0 - 1.0) < 1e-9, f"expected 1x, got {sp0}x"
+        assert f0 == 0.0
+    total = sum(d for _, d, _f, _v in _cuts_in_order(btl))
+    assert abs(total - span) < 1e-6, "A/V lock exact"
+    prev_end = -1.0
+    for st0, d0, f0, sp0 in _cuts_in_order(btl):
+        assert st0 >= prev_end - 1e-6, "no replay"
+        prev_end = max(prev_end, st0 + (d0 - f0) * sp0)
+    # the picture stays WITH the narration's zone (no look-ahead)
+    for b, o in zip(btl, rewin):
+        assert o["zone_lo"] - 1e-6 <= b["film_start"] <= o["zone_hi"] + 1e-6
+    print(f"ok: 35%-slower voice -> windows re-sized from measured speech "
+          f"-> all 1x, {total:.0f}s exact lock (before: "
+          f"{stats_bug.get('slowed_groups')} slowed sections)")
+
+
+def test_rewindow_overbudget_walks_contiguously() -> None:
+    """A section whose measured narration genuinely exceeds its film zone
+    keeps a contiguous, monotone walk (the slow-mo net then handles it --
+    rare and honest)."""
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    segs = [{"sentence": s, "film_start": 10.0 + i, "film_end": 10.5 + i,
+             "zone_lo": 0.0, "zone_hi": 100.0} for i in range(15)]
+    durs = [9.0] * 15                      # 135s of speech, 100s of film
+    rewin = timeline.rewindow_to_speech(segs, durs, 6000.0)
+    prev_hi = 0.0
+    for i, o in enumerate(rewin):
+        assert o["film_start"] >= prev_hi - 0.01, "contiguous, monotone"
+        assert o["film_end"] <= 100.0 + 1e-6, "never leaves the zone"
+        prev_hi = o["film_end"]
+    assert abs(prev_hi - 100.0) <= 0.01, "the walk fills the zone exactly"
+
+
+def test_rewindow_preserves_unzoned_sentences() -> None:
+    """Sentences without zone info (the sign-off outro, old cached
+    segments) keep their windows untouched."""
+    segs = [{"sentence": "Thanks for watching.", "film_start": 400.0,
+             "film_end": 406.0}]
+    out = timeline.rewindow_to_speech(segs, [8.0], 6000.0)
+    assert out[0]["film_start"] == 400.0 and out[0]["film_end"] == 406.0
+
+
+def test_enforcement_uses_section_budget_not_ceiling() -> None:
+    """THE USER'S LOG, REGRESSION-LOCKED: 'section 4/36: 319 words
+    (budget 76)' with NO correction -- the enforcement checked the raw
+    footage ceiling (cap_words) instead of the section's allocated
+    budget, so sections sailed 2-7x past their allotment, the delivered
+    script landed at ~2x the requested length, and the timeline fell
+    into near-permanent slow motion (99 of 152 beats). Enforcement now
+    caps at min(ceiling, budget * 1.15)."""
+    import json
+    from recap import script as script_mod
+
+    # 4 sections x 270s of distinct film; target 308 -> ~77 words each;
+    # raw footage ceiling per section = 270 words (270s x 150wpm x 0.4/60)
+    chunks = [
+        {"index": i, "start": i * 270.0, "end": i * 270.0 + 300.0,
+         "summary": f"Section {i} of the story.",
+         "beats": [{"t": i * 270.0 + k * 6.0, "text": f"beat {k}"}
+                   for k in range(45)]}
+        for i in range(4)
+    ]
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    over = [s] * 16      # 192 words: UNDER the old 270-word ceiling (the
+                         # bug let this through untouched) but 2.5x the
+                         # 77-word budget
+    fits = ["The pilot wakes up in pain in a dark forest.",
+            "A stranger with a gun finds the burning wreck.",
+            "The pilot grabs the barrel and both men fall."]  # 27 words
+
+    state = {"n": 0}
+
+    def fake_complete(provider, model, system, user, **kw):
+        state["n"] += 1
+        if state["n"] == 1:          # section 1/4: the writer over-delivers
+            return json.dumps({"sentences": over})
+        if state["n"] == 2:          # the condense call for section 1
+            return json.dumps({"sentences": fits})
+        return json.dumps({"sentences": fits})   # other sections behave
+
+    orig = script_mod.llm.complete
+    script_mod.llm.complete = fake_complete
+    try:
+        out = script_mod.generate_segmented_script(
+            chunks, {"provider": "deepseek", "model": "x"}, 308,
+            words_per_minute=150, lang_name="Spanish",
+            sign_off=False, visual_match=True, humanize=False,
+        )
+    finally:
+        script_mod.llm.complete = orig
+
+    # the enforced cap must be the section's BUDGET (~77 x 1.15 = 88),
+    # not the 270-word footage ceiling: the 192-word over-delivery that
+    # the old code let through is now condensed back to the allotment
+    sec0 = [o for o in out if o["zone_lo"] == 0.0]
+    assert count_words(" ".join(o["sentence"] for o in sec0)) <= 88, \
+        ("section 1 must be held to its budget (88 words), not the "
+         "270-word ceiling")
+    assert [o["sentence"] for o in sec0] == fits, \
+        "the condensed (in-budget) rewrite is what reaches the timeline"
+    # every other section is in budget too -> the script lands near the
+    # requested total instead of 2x
+    total = count_words(" ".join(o["sentence"] for o in out))
+    assert total <= 308 + 40, f"delivered {total} words for a 308 target"
+    assert all(o["film_end"] > o["film_start"] for o in out)
+    print(f"ok: 192-word over-delivery for a 77-word budget is condensed "
+          f"back (old ceiling would have let it through); delivered "
+          f"{total}/{308} words")
+
+
+def test_measured_wpm_cache_roundtrip() -> None:
+    """The voice's measured words-per-minute persists across runs and keys
+    on (provider, voice, rate) -- the self-calibration behind accurate
+    --minutes targets and honest budgets."""
+    import tempfile
+    from recap import pipeline as pipe
+
+    with tempfile.TemporaryDirectory() as td:
+        wd = Path(td)
+        assert pipe.measured_wpm_for(wd, "edge", "en-US-X", "-8%") is None
+        pipe.save_measured_wpm(wd, "edge", "en-US-X", "-8%",
+                               192.0, 2842.5, 9100)
+        got = pipe.measured_wpm_for(wd, "edge", "en-US-X", "-8%")
+        assert got is not None and abs(got - 192.0) < 0.05
+        # a different voice / rate / provider must not see it
+        assert pipe.measured_wpm_for(wd, "edge", "en-US-X", "+0%") is None
+        assert pipe.measured_wpm_for(wd, "edge", "en-US-Y", "-8%") is None
+        assert pipe.measured_wpm_for(wd, "openai", "en-US-X", "-8%") is None
+        # a second voice merges into the same cache file
+        pipe.save_measured_wpm(wd, "edge", "ar-SA-HamedNeural", "+0%",
+                               140.0, 900.0, 2100)
+        assert abs(pipe.measured_wpm_for(
+            wd, "edge", "ar-SA-HamedNeural", "+0%") - 140.0) < 0.05
+        assert abs(pipe.measured_wpm_for(
+            wd, "edge", "en-US-X", "-8%") - 192.0) < 0.05
+        # out-of-range measurements are never trusted/cached
+        pipe.save_measured_wpm(wd, "edge", "bad", "+0%", 9999.0, 1.0, 2)
+        assert pipe.measured_wpm_for(wd, "edge", "bad", "+0%") is None
+    print("ok: measured wpm caches per provider/voice/rate and survives "
+          "the roundtrip")
+
+
+def test_narration_voice_one_resolution() -> None:
+    """The measured-rate cache keys on the voice that ACTUALLY speaks:
+    one resolver (config override or language default) shared by the
+    synthesis call, the budget loop and the CLI."""
+    from recap import pipeline as pipe
+
+    # config override wins
+    assert pipe.narration_voice(
+        {"lang_voice": {"en": "en-US-AndrewNeural"}}, "en") \
+        == "en-US-AndrewNeural"
+    # missing override -> the language default (never an empty key)
+    v = pipe.narration_voice({"lang_voice": {}}, "en")
+    assert v and v == pipe.languages.voice_default("en")
+    v2 = pipe.narration_voice({}, "ar")
+    assert v2 and v2 == pipe.languages.voice_default("ar")
+    # and the cache round-trips under exactly that resolution
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        wd = Path(td)
+        pipe.save_measured_wpm(wd, "edge", v, "+0%", 160.0, 900.0, 2400)
+        assert pipe.measured_wpm_for(wd, "edge", v, "+0%") is not None
+        assert pipe.measured_wpm_for(wd, "edge", "", "+0%") is None, \
+            "an empty voice key must never match the real voice's rate"
+    print("ok: one voice resolution everywhere; rate cache keys on the "
+          "voice that actually speaks")
+
+
+def test_floor_warning_when_trim_cannot_fit() -> None:
+    """A section of 3 very long sentences (the trim floor) that is still
+    over budget must be reported LOUDLY, never shipped silently -- silent
+    over-delivery is exactly how a 2x script once slipped through."""
+    import io
+    import json
+    from contextlib import redirect_stdout
+    from recap import script as script_mod
+
+    fat = ("What happens over the next few minutes is that the pilot, "
+           "badly injured and half frozen, crawls across the entire width "
+           "of the dark forest while the armed stranger searches the "
+           "wreckage above him, and all of this happens before either man "
+           "understands what the crash has actually started.")  # ~50 words
+    over = [fat, fat, fat]          # 3 sentences, ~150 words, budget ~100
+    assert len(over) == 3
+
+    def fake_complete(provider, model, system, user, **kw):
+        # writer AND condense both return the same fat 3 sentences (the
+        # condense cannot fit -> None -> mechanical trim -> floor)
+        return json.dumps({"sentences": over})
+
+    chunk = {
+        "index": 0, "start": 1000.0, "end": 1150.0,
+        "summary": "A pilot is shot down and hunted through the woods.",
+        "beats": [{"t": 1000.0 + i * 6.0, "text": f"beat {i}"}
+                  for i in range(25)],
+    }
+    orig = script_mod.llm.complete
+    script_mod.llm.complete = fake_complete
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            out = script_mod.generate_segmented_script(
+                [chunk], {"provider": "deepseek", "model": "x"}, 100,
+                words_per_minute=150, lang_name="Spanish",
+                sign_off=False, visual_match=True, humanize=False,
+            )
+    finally:
+        script_mod.llm.complete = orig
+
+    assert len(out) == 3, "the 3-sentence floor held (continuity)"
+    got_words = count_words(" ".join(o["sentence"] for o in out))
+    assert got_words > 115, "the section legitimately could not fit"
+    assert "3-sentence floor" in buf.getvalue(), (
+        "an over-budget section that cannot be trimmed must WARN, not pass "
+        "silently")
+    assert all(o["film_end"] > o["film_start"] for o in out)
+    print(f"ok: un-trimmable over-budget section ({got_words} words) "
+          "ships with a loud floor warning, never silently")
+
+
+def test_parse_segment_splits_paragraph_units() -> None:
+    """THE USER'S LOG: deepseek returned PARAGRAPH-sized array elements
+    (71 'sentences' for 9002 words = 127 words/element). _parse_segment
+    now splits any element with real internal sentence boundaries into
+    true sentences, with guards for abbreviations, decimals and quotes."""
+    import json
+    from recap import script as script_mod
+
+    para1 = ("Troy wakes up in a dark forest and his crashed plane is "
+             "still burning behind him. An armed stranger walks around "
+             "the wreck searching for survivors. Troy grabs his gun from "
+             "the snow and aims it at the man. The stranger raises his "
+             "hands and slowly backs away. Mr. Potato Head would have "
+             "fainted at the sight of all that blood. Troy passes out "
+             "before he can ask any questions.")
+    para2 = ("The next morning the whole army is tracking his trail "
+             "through the frozen woods! He crosses an icy river to throw "
+             "the dogs off his scent at 3.5 miles from the crash site. "
+             "A village family hides him inside their barn.")
+    out = script_mod._parse_segment(
+        json.dumps({"sentences": [para1, para2]}))
+    assert len(out) >= 8, f"expected ~9 real sentences, got {len(out)}"
+    assert all(count_words(x) <= 45 for x in out), \
+        "no element may stay paragraph-sized"
+    joined = " ".join(out)
+    assert "Mr. Potato Head" in joined, "abbreviation must never split"
+    assert "3.5 miles" in joined, "decimals must never split"
+    # short single sentences pass through untouched
+    one = script_mod._parse_segment(
+        json.dumps({"sentences": ["Woody disagrees.", "Now they run."]}))
+    assert one == ["Woody disagrees.", "Now they run."]
+    print(f"ok: paragraph elements split into {len(out)} real sentences "
+          "(abbreviations and decimals intact; short ones untouched)")
+
+
+def test_paragraph_writer_output_lands_on_budget() -> None:
+    """THE USER'S RUN, end to end: the writer answers a 100-word section
+    with 2 paragraph elements (~300 words); before the fix the 3-sentence
+    floor made the trim impossible (25 sections shipped 2-5x over budget,
+    2877s video for a 1500s request). With paragraph elements split into
+    real sentences at parse time, the same writer output is held to its
+    budget and every shipped element is a real sentence."""
+    import io
+    import json
+    from contextlib import redirect_stdout
+    from recap import script as script_mod
+
+    para_a = ("Troy wakes up in a dark forest and his crashed plane is "
+              "still burning behind him. An armed stranger walks around "
+              "the wreck searching for survivors. Troy grabs his gun from "
+              "the snow and aims it at the man. The stranger raises his "
+              "hands and slowly backs away. Troy passes out before he can "
+              "ask any questions.")
+    para_b = ("The next morning the whole army is tracking his trail "
+              "through the frozen woods. He crosses an icy river to throw "
+              "the dogs off his scent. A village family hides him inside "
+              "their barn until the soldiers move on. By dawn he is "
+              "already planning his escape across the border.")
+    para_c = ("He steals a coat from the line behind the barn. The "
+              "tracking dogs find his trail again by noon. That night "
+              "he finally reaches the frozen lake road and limps toward "
+              "the border lights. A patrol truck rolls up beside him "
+              "and stops.")
+    over = [para_a, para_b, para_c]   # 3 paragraph elements, ~160 words
+    assert count_words(" ".join(over)) > 140, "must be over the cap"
+
+    calls = []
+
+    def fake_complete(provider, model, system, user, **kw):
+        calls.append(user)
+        if len(calls) == 1:        # the section writer: paragraphs
+            return json.dumps({"sentences": over})
+        return json.dumps({"sentences": over})   # condense also fails
+
+    chunk = {
+        "index": 0, "start": 1000.0, "end": 1150.0,
+        "summary": "A pilot is shot down and hunted through the woods.",
+        "beats": [{"t": 1000.0 + i * 6.0, "text": f"beat {i}"}
+                  for i in range(25)],
+    }
+    orig = script_mod.llm.complete
+    script_mod.llm.complete = fake_complete
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            out = script_mod.generate_segmented_script(
+                [chunk], {"provider": "deepseek", "model": "x"}, 100,
+                words_per_minute=150, lang_name="Spanish",
+                sign_off=False, visual_match=True, humanize=False,
+            )
+    finally:
+        script_mod.llm.complete = orig
+
+    got = count_words(" ".join(o["sentence"] for o in out))
+    assert got <= 115, (f"delivered {got} words for a 115-word cap -- the "
+                        "3-sentence floor bug")
+    assert all(count_words(o["sentence"]) <= 45 for o in out), \
+        "every shipped element must be a real sentence"
+    assert len(out) >= 4, "several real sentences survive the trim"
+    assert "3-sentence floor" not in buf.getvalue(), \
+        "the floor must not bind when real sentences are the units"
+    assert all(o["film_end"] > o["film_start"] for o in out)
+    prev = -1.0
+    for o in out:
+        assert o["film_start"] >= prev - 1e-9
+        prev = o["film_start"]
+    print(f"ok: 2-paragraph (~{count_words(' '.join(over))}-word) answer "
+          f"for a 100-word budget -> {len(out)} sentences, {got} words "
+          "delivered, no floor warning")
+
+
+def test_stub_beats_never_render_as_flicker_clips() -> None:
+    """THE USER'S LOG: two back-to-back `-t 0.050` clips (seg_0162/163) --
+    1-2 frame flickers that read as a stutter. Source: whisper/TTS cue
+    stubs (two sentences measured at ~0s). lock_durations now folds any
+    sub-0.2s duration into its neighbour (sum preserved exactly) and
+    build_timeline emits no clip for a folded beat."""
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    # cues 1 and 2 start almost together -> durations 0.05/0.05 (the stubs)
+    cues = [
+        TimedCue(s, 0.0, 2.9),
+        TimedCue(s, 3.0, 5.9),    # starts 0.05 after the previous -> stub
+        TimedCue(s, 3.05, 6.0),   # another stub right behind it
+        TimedCue(s, 3.10, 6.2),
+        TimedCue(s, 6.20, 9.0),
+    ]
+    span = 9.0
+    durs = timeline.lock_durations(cues, span)
+    assert abs(sum(durs) - span) < 1e-9, "sum must stay == audio span"
+    stubs = [d for d in durs if 0.0 < d < timeline.MIN_BEAT_SECONDS]
+    assert not stubs, f"no positive duration below the beat floor: {durs}"
+    assert abs(durs[0] - 3.1) < 1e-9, \
+        "both stubs fold into the first beat (3.0 + 0.05 + 0.05)"
+
+    segs = [{"sentence": s, "film_start": i * 40.0,
+             "film_end": i * 40.0 + 40.0} for i in range(5)]
+    beats = timeline.build_timeline(segs, durs, 6000.0, dict(CFG))
+    cuts = timeline.flatten_cuts(beats)
+    assert cuts, "sanity: real beats still emit cuts"
+    assert all(d >= 0.2 for _, d, _f, _v in cuts), \
+        f"no flicker clips: min cut {min(d for _, d, _f, _v in cuts):.3f}s"
+    assert abs(sum(d for _, d, _f, _v in cuts) - span) < 0.05, \
+        "cut durations still sum to the narration span (within the \
+cut-list's millisecond rounding)"
+    print(f"ok: 0.05s cue stubs folded away; {len(cuts)} cuts, "
+          f"min {min(d for _, d, _f, _v in cuts):.2f}s, sum == span")
+
+
+def test_outro_gets_the_film_tail() -> None:
+    """THE USER'S LOG: film is 6207s but coverage stops at 5553s -- the
+    final 654s belong to nobody, the sign-off squeezes the last section's
+    already-consumed window and the timeline clamps it to 0.35x (19s of
+    visible slow motion at the climax). _extend_final_zone gives the
+    trailing un-zoned outro [last zone end, film end] as its own zone, so
+    it paces there at 1x."""
+    import io
+    from contextlib import redirect_stdout
+    from recap import pipeline as pipe
+
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    segs: list[dict] = []
+    for sec in range(2):
+        zl, zh = sec * 240.0, sec * 240.0 + 240.0
+        for k in range(3):
+            a = zl + 20.0 + k * 16.0
+            segs.append({"sentence": s, "film_start": a - 2.6,
+                         "film_end": a + 3.9,
+                         "zone_lo": zl, "zone_hi": zh})
+    # the outro: appended by _append_sign_off with the LAST beat's window
+    # (a few seconds) and NO zone of its own -- the starved beat
+    segs.append({"sentence": "Thanks for watching.", "film_start": 436.0,
+                 "film_end": 444.0})
+    durs = [8.0] * 6 + [10.0]          # the outro narrates for 10s
+    movie_dur = 600.0                   # film ends 360s after the last zone
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        segs = pipe._extend_final_zone(segs, movie_dur)
+    assert "film's tail" in buf.getvalue()
+    out = segs[-1]
+    assert out["zone_lo"] == 480.0 and out["zone_hi"] == 599.0, \
+        "outro zone = [last zone end, film end - 1s]"
+    # every zoned section keeps its own zone (only the tail is assigned)
+    assert segs[0]["zone_lo"] == 0.0 and segs[5]["zone_hi"] == 480.0
+
+    rewin = timeline.rewindow_to_speech(segs, durs, movie_dur)
+    assert rewin[-1]["film_start"] >= 480.0 - 1e-6, \
+        "outro window now lives in the film tail"
+    assert rewin[-1]["film_end"] - rewin[-1]["film_start"] >= 10.0, \
+        "outro window is at least its narration -> 1x fits"
+
+    stats: dict = {}
+    beats = timeline.build_timeline(rewin, durs, movie_dur, dict(CFG),
+                                    stats=stats)
+    cuts = timeline.flatten_cuts(beats)
+    assert stats.get("slowed_groups", 0) == 0, \
+        "the ending must not be forced into slow motion any more"
+    assert all(v == 1.0 for _, _d, _f, v in cuts), "every cut at 1x"
+    assert cuts[-1][0] >= 480.0, "the outro shows the film's tail"
+    assert abs(sum(d for _, d, _f, _v in cuts) - sum(durs)) < 0.05
+    print("ok: outro paced in the film tail at 1x "
+          "(no 0.35x slow-mo at the ending)")
+
+
+def test_outro_tail_negative_cases() -> None:
+    """No tail (zone already reaches the film end) and old caches (no zones
+    at all) must stay untouched."""
+    from recap import pipeline as pipe
+    # zone reaches the end -> nothing to assign
+    segs = [{"sentence": "x.", "film_start": 10.0, "film_end": 20.0,
+             "zone_lo": 0.0, "zone_hi": 598.0},
+            {"sentence": "outro.", "film_start": 20.0, "film_end": 28.0}]
+    out = pipe._extend_final_zone([dict(s) for s in segs], 600.0)
+    assert "zone_lo" not in out[1], "no tail -> outro untouched"
+    # old cache: no zones anywhere -> untouched
+    segs2 = [{"sentence": "x.", "film_start": 10.0, "film_end": 20.0}]
+    out2 = pipe._extend_final_zone([dict(s) for s in segs2], 600.0)
+    assert "zone_lo" not in out2[0]
+    # no trailing un-zoned sentences -> nothing changes
+    segs3 = [{"sentence": "x.", "film_start": 10.0, "film_end": 20.0,
+              "zone_lo": 0.0, "zone_hi": 100.0}]
+    out3 = pipe._extend_final_zone([dict(s) for s in segs3], 600.0)
+    assert out3 == segs3
+    print("ok: tail assignment leaves no-tail / zone-less cases untouched")
+
+
+def test_concat_join_drift_guard() -> None:
+    """A stream-copy join must measure the exact sum of its parts; beyond a
+    quarter second (or 3ms/clip) the join is redone with a re-encode."""
+    from recap import clip as clip_mod
+    ok = clip_mod._concat_drift_ok
+    assert ok(100.0, 100.0, 380)
+    assert ok(100.20, 100.0, 10), "0.2s over 10 clips is within tolerance"
+    assert ok(100.0 + 380 * 0.003 - 0.005, 100.0, 380), \
+        "3ms/clip tolerance (just inside)"
+    assert not ok(100.0 + 380 * 0.003 + 0.01, 100.0, 380)
+    assert not ok(100.26, 100.0, 10), "0.26s is beyond the 0.25s floor"
+    assert not ok(99.5, 100.0, 10), "short joins fail too (dropped frames)"
+    assert ok(0.0, 0.0, 0), "degenerate: nothing to join"
+    print("ok: concat drift guard accepts exact joins, rejects drift")
+
+
+def test_shot_boundary_ffmpeg_fallback() -> None:
+    """THE USER'S RUN: 'shot boundaries unavailable' while the vision pass
+    had ALREADY detected 740 real shot changes with the pure-ffmpeg scene
+    filter on the same movie. scene_boundaries() now falls back to that same
+    filter when PySceneDetect is missing, converts the 0..100 threshold to
+    ffmpeg's 0..1 scene score, caches the result, and still writes no
+    negative cache when both detectors fail."""
+    import tempfile
+    from recap import scenes as scenes_mod
+    from recap import vision as vision_mod
+
+    with tempfile.TemporaryDirectory() as td:
+        video = Path(td) / "movie.mp4"
+        video.write_bytes(b"stub")
+        calls: dict = {}
+
+        def fake_scenedetect(v, threshold):
+            calls["sd"] = threshold
+            return None                       # not installed
+
+        def fake_scene_times(movie, threshold, duration):
+            calls["ff"] = threshold
+            calls["dur"] = duration
+            return [10.0, 25.5, 25.6, 60.0]   # real cut times
+
+        orig = (scenes_mod._scenedetect, vision_mod._scene_times,
+                scenes_mod.probe_duration)
+        scenes_mod._scenedetect = fake_scenedetect
+        vision_mod._scene_times = fake_scene_times
+        scenes_mod.probe_duration = lambda p: 6207.0
+        try:
+            bounds, method = scenes_mod.scene_boundaries(
+                video, {"scene_threshold": 27.0}, Path(td))
+            assert method == "ffmpeg-scene", method
+            assert bounds == [10.0, 25.5, 25.6, 60.0]
+            assert abs(calls["ff"] - 0.27) < 1e-9, \
+                "scenedetect 27 (0..100) -> ffmpeg 0.27 (0..1)"
+            assert calls["dur"] == 6207.0
+
+            # cached: the second call must not re-detect
+            def boom(*a, **k):
+                raise AssertionError("must read the cache, not re-detect")
+            scenes_mod._scenedetect = boom
+            vision_mod._scene_times = boom
+            b2, m2 = scenes_mod.scene_boundaries(
+                video, {"scene_threshold": 27.0}, Path(td))
+            assert b2 == bounds and m2 in ("ffmpeg-scene", "cache")
+        finally:
+            (scenes_mod._scenedetect, vision_mod._scene_times,
+             scenes_mod.probe_duration) = orig
+
+    # both detectors fail -> ([], "none") and NO cache file, so a later
+    # scenedetect install can still retry
+    with tempfile.TemporaryDirectory() as td:
+        video = Path(td) / "movie.mp4"
+        video.write_bytes(b"stub")
+        orig = (scenes_mod._scenedetect, vision_mod._scene_times,
+                scenes_mod.probe_duration)
+        scenes_mod._scenedetect = lambda v, t: None
+        vision_mod._scene_times = lambda m, t, d: []
+        scenes_mod.probe_duration = lambda p: 100.0
+        try:
+            bounds, method = scenes_mod.scene_boundaries(
+                video, {"scene_threshold": 27.0}, Path(td))
+            assert bounds == [] and method == "none"
+            assert not (Path(td) / "shot_boundaries.json").exists(), \
+                "no negative cache"
+        finally:
+            (scenes_mod._scenedetect, vision_mod._scene_times,
+             scenes_mod.probe_duration) = orig
+    print("ok: no PySceneDetect -> ffmpeg scene filter supplies (and caches) "
+          "real shot boundaries; both-fail writes no negative cache")
+
+
+def test_network_failure_never_stalls_for_hours() -> None:
+    """THE USER'S CRASH: ConnectionAbortedError [WinError 10053] killed the
+    run after a 4h21m silent stall. Cause: LLM_TIMEOUT defaulted to 3600s,
+    so each of the 4 retries on a dead socket hung for up to an hour before
+    raising. Now: 180s default (llm + vision clients), the abort IS
+    classified retryable, retries absorb it, and ffmpeg timeouts have a
+    4-hour ceiling instead of 51 hours for a 6207s movie."""
+    import os
+    import time as _time
+    from recap import llm as llm_mod
+    from recap import util as util_mod
+
+    # the abort from the user's log is retryable
+    assert llm_mod._retryable(
+        ConnectionAbortedError("[WinError 10053] An established connection "
+                               "was aborted by the software in your host "
+                               "machine"))
+    # sane defaults
+    old = os.environ.pop("LLM_TIMEOUT", None)
+    try:
+        os.environ["LLM_TIMEOUT"] = "bogus"        # -> ValueError fallback
+        # the default and the fallback are both 180 (source-checked: the
+        # openai package is not installed in every test environment)
+        src_txt = Path(llm_mod.__file__).read_text(encoding="utf-8")
+        assert '"LLM_TIMEOUT", "180"' in src_txt
+        tail = src_txt.split("LLM_TIMEOUT")[1][:220]
+        assert "3600" not in tail, "the hour-long hang must be gone"
+    finally:
+        if old is not None:
+            os.environ["LLM_TIMEOUT"] = old
+        else:
+            os.environ.pop("LLM_TIMEOUT", None)
+
+    # retries absorb a transient connection abort and the call succeeds
+    class _FakeCompletions:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, **kw):
+            self.calls += 1
+            if self.calls < 3:
+                raise ConnectionAbortedError(
+                    "[WinError 10053] connection aborted")
+            class _Msg:
+                content = "ok"
+            class _Choice:
+                message = _Msg()
+            class _R:
+                choices = [_Choice()]
+                usage = None
+            return _R()
+
+    class _FakeClient:
+        def __init__(self):
+            self.chat = type("C", (), {"completions": _FakeCompletions()})()
+
+    fake = _FakeClient()
+    orig_from = llm_mod._client_from
+    sleeps: list[float] = []
+    orig_sleep = _time.sleep
+    _time.sleep = lambda s: sleeps.append(s)
+    old_retries = os.environ.get("LLM_RETRIES")
+    os.environ["LLM_RETRIES"] = "4"
+    try:
+        llm_mod._client_from = lambda p, m, b: (fake, "m")
+        out = llm_mod.complete("deepseek", "m", "sys", "user")
+        assert out == "ok"
+        assert fake.chat.completions.calls == 3, \
+            "two aborts absorbed by retries"
+        assert sleeps, "backoff happened between attempts"
+    finally:
+        llm_mod._client_from = orig_from
+        _time.sleep = orig_sleep
+        if old_retries is None:
+            os.environ.pop("LLM_RETRIES", None)
+        else:
+            os.environ["LLM_RETRIES"] = old_retries
+
+    # ffmpeg timeout ceiling: 30x realtime but never more than 4 hours
+    old = os.environ.pop("FFMPEG_TIMEOUT", None)
+    try:
+        assert util_mod.ffmpeg_timeout(6207.0, minimum=600.0) == 14400.0, \
+            "a 6207s movie must not get a 51-hour ffmpeg ceiling"
+        assert util_mod.ffmpeg_timeout(5.0, minimum=300.0) == 300.0, \
+            "minimum still honoured for tiny passes"
+        assert util_mod.ffmpeg_timeout(200.0, minimum=100.0) == 6000.0, \
+            "30x realtime headroom unchanged below the cap"
+    finally:
+        if old is not None:
+            os.environ["FFMPEG_TIMEOUT"] = old
+    print("ok: connection aborts are retried in minutes, not stalled for "
+          "hours; ffmpeg ceiling is 4h, not 51h")
+
+
+def test_timeline_report_shows_longest_shot() -> None:
+    """The direct diagnostic for 'a single visual remained for 15-20
+    sentences': a cut cannot outlive its own sentence, so the report now
+    prints the longest shot -- a small number makes that pathology
+    structurally impossible in the render."""
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    segs = [{"sentence": s, "film_start": i * 60.0,
+             "film_end": i * 60.0 + 60.0} for i in range(4)]
+    durs = [3.0, 12.0, 4.0, 5.0]
+    beats = timeline.build_timeline(segs, durs, 600.0, dict(CFG))
+    rep = timeline.timeline_report(beats, sum(durs))
+    assert "longest shot" in rep
+    longest = max(d for _, d, _f, _v in timeline.flatten_cuts(beats))
+    assert f"longest shot {longest:.1f}s" in rep
+    # and the degenerate case prints nothing about shots
+    rep0 = timeline.timeline_report([], 0.0)
+    assert "longest shot" not in rep0
+    print(f"ok: timeline report shows 'longest shot {longest:.1f}s'")
+
+
+if __name__ == "__main__":
+    test_no_replay_same_window()
+    test_no_replay_overlapping_windows()
+    test_no_replay_long_run_random_windows()
+    test_snap_to_boundary()
+    test_timeline_uses_scene_bounds()
+    test_snap_never_breaks_monotonic_playhead()
+    test_end_of_film_stays_in_bounds()
+    test_visuals_never_run_ahead_of_the_narration()
+    test_holds_keep_av_lock_in_sparse_sections()
+    test_slow_motion_cut_command()
+    test_freeze_cut_command()
+    test_visual_matched_budgets()
+    test_paced_anchors_spread_clusters()
+    test_matched_script_plays_at_1x()
+    test_fit_section_to_footage()
+    test_overdelivered_section_still_plays_at_1x()
+    test_condense_section_tightens_story()
+    test_overdelivery_is_condensed_not_dropped()
+    test_humanize_script_pass()
+    test_humanizer_full_loop_keeps_timing()
+    test_rewindow_to_speech_guarantees_1x()
+    test_rewindow_overbudget_walks_contiguously()
+    test_rewindow_preserves_unzoned_sentences()
+    test_enforcement_uses_section_budget_not_ceiling()
+    test_measured_wpm_cache_roundtrip()
+    test_narration_voice_one_resolution()
+    test_floor_warning_when_trim_cannot_fit()
+    test_parse_segment_splits_paragraph_units()
+    test_paragraph_writer_output_lands_on_budget()
+    test_stub_beats_never_render_as_flicker_clips()
+    test_outro_gets_the_film_tail()
+    test_outro_tail_negative_cases()
+    test_concat_join_drift_guard()
+    test_shot_boundary_ffmpeg_fallback()
+    test_network_failure_never_stalls_for_hours()
+    test_timeline_report_shows_longest_shot()
+    print("\nALL VISUAL-FLOW TESTS PASSED")

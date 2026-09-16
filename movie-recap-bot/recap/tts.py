@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 from typing import Protocol
 
-from .util import fmt_ts_ass
+from .util import probe_duration
 
 
 class TTSError(RuntimeError):
@@ -66,11 +66,12 @@ class TTSProvider(Protocol):
 class EdgeTTS:
     name = "edge"
 
-    def __init__(self, rate: str = "+0%"):
+    def __init__(self, rate: str = "+0%", pitch: str = "-0Hz"):
         import edge_tts  # type: ignore
 
         self._edge = edge_tts
         self.rate = rate
+        self.pitch = pitch
 
     def synthesize(self, sentences: list[str], voice: str, out_mp3: Path) -> list[TimedCue]:
         """Synthesize with a few automatic retries for transient network faults.
@@ -100,7 +101,9 @@ class EdgeTTS:
 
     async def _sync(self, sentences: list[str], voice: str, out_mp3: Path) -> None:
         text = "\n".join(sentences)          # sentence separators -> natural pauses
-        communicate = self._edge.Communicate(text, voice, rate=self.rate)
+        communicate = self._edge.Communicate(
+            text, voice, rate=self.rate, pitch=self.pitch
+        )
         bounds: list[tuple[float, float, str]] = []
         words: list[tuple[float, float, str]] = []   # word-level timestamps
         audio = bytearray()
@@ -189,7 +192,10 @@ def _build_cues(bounds: list[tuple[float, float, str]], sentences: list[str]) ->
 def make_provider(name: str, cfg_narration: dict) -> TTSProvider:
     name = (name or "edge").strip().lower()
     if name == "edge":
-        return EdgeTTS(rate=cfg_narration.get("rate", "+0%"))
+        return EdgeTTS(
+            rate=cfg_narration.get("rate", "+0%"),
+            pitch=cfg_narration.get("pitch", "-0Hz"),
+        )
     if name == "elevenlabs":
         return _ElevenLabs(cfg_narration)
     if name == "openai":
@@ -206,8 +212,6 @@ def _ElevenLabs(cfg: dict) -> TTSProvider:
         name = "elevenlabs"
 
         def synthesize(self, sentences, voice, out_mp3):
-            import requests  # type: ignore
-
             api_key = os.environ.get("ELEVENLABS_API_KEY")
             if not api_key:
                 raise TTSError("ELEVENLABS_API_KEY not set.")
@@ -222,6 +226,12 @@ def _ElevenLabs(cfg: dict) -> TTSProvider:
             # ElevenLabs is POST-only per utterance; synth sequentially.
             import requests
 
+            seg_path = Path(path)
+            seg_path.parent.mkdir(parents=True, exist_ok=True)
+            # Truncate first — appending to an mp3 left by a previous run would
+            # silently double the narration (and double the billed TTS cost).
+            with open(seg_path, "wb"):
+                pass
             for stmt in sentences:
                 url = f"https://api.elevenlabs.io/v1/text-to-speech/{vid}"
                 r = requests.post(
@@ -231,8 +241,6 @@ def _ElevenLabs(cfg: dict) -> TTSProvider:
                     timeout=60,
                 )
                 r.raise_for_status()
-                seg_path = Path(path)
-                seg_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(seg_path, "ab") as f:
                     f.write(r.content)
 
@@ -253,7 +261,6 @@ def _OpenAI(cfg: dict) -> TTSProvider:
 
             with tempfile.TemporaryDirectory() as td:
                 cues: list[TimedCue] = []
-                start = 0.0
                 files = []
                 for i, stmt in enumerate(sentences):
                     p = Path(td) / f"seg_{i:03d}.mp3"
@@ -299,6 +306,27 @@ def _attach_words(cues: list[TimedCue], words: list[tuple[float, float, str]]) -
             cue.words.sort(key=lambda t: t[1])
 
 
+def _proportional_cues(sentences: list[str], total: float) -> list[TimedCue]:
+    """Estimate per-sentence cues from the full mp3 length.
+
+    Used when a TTS backend gives no sentence timings (OpenAI/ElevenLabs
+    return only a concatenated mp3): every line gets a cue proportional to its
+    word count so the video still has *some* A/V lock. The length lock uses
+    the real audio span either way, so the render is never truncated.
+    """
+    if total <= 0 or not sentences:
+        return []
+    weights = [max(len(s.split()), 1) for s in sentences]
+    wsum = float(sum(weights))
+    cues: list[TimedCue] = []
+    acc = 0.0
+    for text, w in zip(sentences, weights):
+        seg = total * (w / wsum)
+        cues.append(TimedCue(text.strip(), acc, acc + seg))
+        acc += seg
+    return cues
+
+
 def synthesize_language(
     sentences: list[str],
     lang: dict,
@@ -311,6 +339,17 @@ def synthesize_language(
     voice = lang.get("voice", "")
     mp3 = workdir / f"{code}.mp3"
     cues = provider.synthesize(sentences, voice, mp3)
+
+    # Providers without word/sentence boundaries (openai, elevenlabs) return no
+    # timing cues — that used to silently produce an empty timeline and a
+    # "no cuts to assemble" crash in Step D. Fall back to a proportional
+    # estimate over the real audio duration so the run still completes and
+    # every beat still has a locked visual length.
+    if not cues or not any(c.end > c.start > -1e-9 for c in cues):
+        print(f"  * {code}: TTS returned no sentence timing — estimating cue "
+              f"times from the audio length ({probe_duration(mp3):.1f}s) ...")
+        cues = _proportional_cues(sentences, probe_duration(mp3))
+
     seg_dir = workdir / "assemble" / code
     seg_dir.mkdir(parents=True, exist_ok=True)
     # Save timing json
