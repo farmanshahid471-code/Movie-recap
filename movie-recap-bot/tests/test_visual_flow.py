@@ -600,9 +600,20 @@ def test_overdelivery_is_condensed_not_dropped() -> None:
     for o in out:
         assert o["film_start"] >= prev - 1e-9, "windows stay forward"
         prev = o["film_start"]
+    # every sentence carries the beat it was WRITTEN from, in story order
+    # inside its zone -- the field timeline.rewindow_to_speech() keys on
+    # to keep the footage on the narrated moment after TTS
+    assert all(o.get("anchor") is not None for o in out), \
+        "every segment must carry its anchor beat"
+    prev_a = -1.0
+    for o in out:
+        assert o["zone_lo"] - 1e-6 <= o["anchor"] <= o["zone_hi"] + 1e-6, \
+            "anchor must live inside the section's zone"
+        assert o["anchor"] >= prev_a - 1e-6, "anchors stay in story order"
+        prev_a = o["anchor"]
     print(f"ok: 240-word over-delivery -> one condense call -> "
           f"{count_words(' '.join(condensed))}-word ordered story with "
-          "windows attached")
+          "windows + anchor beats attached")
 
 
 def test_humanize_script_pass() -> None:
@@ -731,7 +742,8 @@ def test_rewindow_to_speech_guarantees_1x() -> None:
     (words / words_per_minute); the real voice speaks ~35% slower than
     that, so every window is smaller than its sentence and the timeline
     slow-moes the whole video. rewindow_to_speech() re-sizes the windows
-    from the MEASURED durations -> everything plays at 1x."""
+    from the MEASURED durations -- keeping each window on the ANCHOR beat
+    the sentence narrates -> everything plays at 1x, in sync."""
     # 3 sections x 270s zones; 5 sentences each, est-sized windows (~6.5s,
     # what the 150-wpm estimate produces for a 12-word sentence)
     s = "The pilot wakes up in a forest full of tall dark trees."
@@ -742,6 +754,7 @@ def test_rewindow_to_speech_guarantees_1x() -> None:
             a = zl + 20.0 + k * 16.0
             segs.append({"sentence": s, "film_start": a - 2.6,
                          "film_end": a + 3.9,
+                         "anchor": a,
                          "zone_lo": zl, "zone_hi": zh})
     # the REAL audio: the voice speaks 35% slower than the estimate ->
     # every cue spans 9.0s, not 6.5s
@@ -764,9 +777,18 @@ def test_rewindow_to_speech_guarantees_1x() -> None:
             "window stays inside its section's zone"
         assert o["film_end"] - o["film_start"] >= durs[i] - 1e-6, \
             "window is at least the sentence's real duration -> 1x fits"
+        # THE ANCHOR CONTRACT: the window sits ON the beat the sentence
+        # narrates (centered on its anchor), not on a proportional slice
+        # of the zone. The old tiling slid these windows up to 40s off
+        # their beats -- "the narration and the visuals do not match".
+        mid = (o["film_start"] + o["film_end"]) / 2.0
+        assert abs(mid - segs[i]["anchor"]) <= 0.8 + 1e-6, (
+            f"window {i} drifted {abs(mid - segs[i]['anchor']):.1f}s off "
+            "its anchor beat"
+        )
         if i and segs[i]["zone_lo"] == segs[i - 1]["zone_lo"]:
-            assert abs(o["film_start"] - rewin[i - 1]["film_end"]) <= 0.01, \
-                "windows walk the zone contiguously"
+            assert o["film_start"] >= rewin[i - 1]["film_end"] - 1e-6, \
+                "windows stay monotone inside a zone (no rewind)"
     stats: dict = {}
     btl = timeline.build_timeline(rewin, durs, 6000.0, dict(CFG), stats=stats)
     assert stats.get("slowed_groups", 0) == 0, "no slow motion anywhere"
@@ -784,8 +806,78 @@ def test_rewindow_to_speech_guarantees_1x() -> None:
     for b, o in zip(btl, rewin):
         assert o["zone_lo"] - 1e-6 <= b["film_start"] <= o["zone_hi"] + 1e-6
     print(f"ok: 35%-slower voice -> windows re-sized from measured speech "
-          f"-> all 1x, {total:.0f}s exact lock (before: "
-          f"{stats_bug.get('slowed_groups')} slowed sections)")
+          f"on their anchor beats -> all 1x, {total:.0f}s exact lock "
+          f"(before: {stats_bug.get('slowed_groups')} slowed sections)")
+
+
+def test_rewindow_keeps_windows_on_their_anchor() -> None:
+    """THE USER'S BUG: 'the narration and the visuals just don't match at
+    all from the start.' Beats cluster inside a zone (one busy scene, then
+    a quiet stretch), so the OLD proportional tiling slid every window off
+    the beat it narrates (15-40s of drift). The anchored placement keeps
+    each sentence on its beat, sized to its measured speech."""
+    # one 150s zone; the story's action clusters in its first 60s
+    anchors = [10.0, 22.0, 35.0, 50.0, 120.0]
+    segs = [{"sentence": f"Sentence {k} of the story.",
+             "film_start": a - 3.0, "film_end": a + 4.0,
+             "anchor": a,
+             "zone_lo": 0.0, "zone_hi": 150.0}
+            for k, a in enumerate(anchors)]
+    durs = [6.0] * 5            # measured speech: 30s, fits the 150s zone
+
+    # document the bug: the old proportional tiling (zone / total per
+    # sentence) would show the 4th sentence (beat at 50s) over footage
+    # from 90-120s -- 40-70s off the moment it narrates
+    old = [ (k * 30.0, (k + 1) * 30.0) for k in range(5) ]
+    old_drift = max(abs((lo + hi) / 2.0 - a) for (lo, hi), a in zip(old, anchors))
+    assert old_drift > 20.0, "sanity: the old tiling really drifts"
+
+    rewin = timeline.rewindow_to_speech(segs, durs, 6000.0)
+    for k, o in enumerate(rewin):
+        mid = (o["film_start"] + o["film_end"]) / 2.0
+        assert abs(mid - anchors[k]) <= 0.01, (
+            f"sentence {k} shows footage {abs(mid - anchors[k]):.1f}s "
+            f"off its beat (anchor {anchors[k]}s)"
+        )
+        assert o["film_end"] - o["film_start"] >= 6.0 - 1e-6
+    # monotone, no rewind
+    for i in range(1, len(rewin)):
+        assert rewin[i]["film_start"] >= rewin[i - 1]["film_end"] - 1e-6
+
+    # and the timeline plays it all at 1x with nothing frozen
+    stats: dict = {}
+    btl = timeline.build_timeline(rewin, durs, 6000.0, dict(CFG), stats=stats)
+    assert stats.get("slowed_groups", 0) == 0
+    assert stats.get("held_shots", 0) == 0
+    for _s, _d, f, sp in _cuts_in_order(btl):
+        assert abs(sp - 1.0) < 1e-9 and f == 0.0
+    # the on-screen footage for sentence k sits at sentence k's beat
+    for k, b in enumerate(btl):
+        assert abs(b["film_start"] - anchors[k]) <= 6.0 + 0.8, (
+            f"on-screen footage for sentence {k} is {abs(b['film_start'] - anchors[k]):.1f}s "
+            f"away from its beat (anchor {anchors[k]}s)"
+        )
+    print(f"ok: clustered beats -> windows stay on their anchors "
+          f"(old tiling drifted {old_drift:.0f}s), all 1x, nothing frozen")
+
+
+def test_rewindow_legacy_segments_fall_back_to_midpoint() -> None:
+    """Old cached segments carry no 'anchor' field -- the re-windowing
+    pass must still work: it centers each window on the midpoint of the
+    sentence's ORIGINAL window (its best estimate of the narrated beat)."""
+    segs = [{"sentence": f"Sentence {k}.",
+             "film_start": 100.0 + k * 20.0, "film_end": 106.0 + k * 20.0,
+             "zone_lo": 0.0, "zone_hi": 300.0} for k in range(4)]
+    durs = [8.0] * 4
+    rewin = timeline.rewindow_to_speech(segs, durs, 6000.0)
+    for o, s0 in zip(rewin, segs):
+        mid = (o["film_start"] + o["film_end"]) / 2.0
+        orig_mid = (s0["film_start"] + s0["film_end"]) / 2.0
+        assert abs(mid - orig_mid) <= 0.1, \
+            "legacy window stays centered on its original midpoint"
+        assert o["film_end"] - o["film_start"] >= 8.0 - 1e-6
+        assert 0.0 - 1e-6 <= o["film_start"] and o["film_end"] <= 300.0 + 1e-6
+    print("ok: legacy (anchor-less) segments fall back to midpoint anchoring")
 
 
 def test_rewindow_overbudget_walks_contiguously() -> None:
@@ -1445,6 +1537,8 @@ if __name__ == "__main__":
     test_humanize_script_pass()
     test_humanizer_full_loop_keeps_timing()
     test_rewindow_to_speech_guarantees_1x()
+    test_rewindow_keeps_windows_on_their_anchor()
+    test_rewindow_legacy_segments_fall_back_to_midpoint()
     test_rewindow_overbudget_walks_contiguously()
     test_rewindow_preserves_unzoned_sentences()
     test_enforcement_uses_section_budget_not_ceiling()

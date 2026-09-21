@@ -422,12 +422,21 @@ normal speed from the first cut to the last — the narration and the picture
 advance in lockstep, and neither slow motion nor a held frame is ever *needed*
 to keep them together. And because estimates can be wrong, the lock is
 **measured, not guessed**: after the voice is synthesized, every sentence's
-window is re-sized from its *measured* duration (`rewindow_to_speech`), so a
-slower voice, a longer pause or a different language can never make a window
-smaller than its sentence — the picture walks each section's film in step
-with the real narration (a slice per sentence, the reference-channel edit
-shape), and the run log prints the voice's true words-per-minute against the
-configured one. That measured rate is also **cached per voice**
+window is re-sized from its *measured* duration (`rewindow_to_speech`) — and
+**kept on the anchor beat the sentence was written from**: the new window is
+the sentence's own beat, centered, exactly as long as the sentence takes to
+say, clamped to the section's zone. This is the fix for "the narration and
+the visuals do not match at all from the start": the earlier version of this
+pass re-tiled each zone *proportionally to speech time*, throwing the beats
+away — beats cluster (one busy scene, then a quiet stretch), so proportional
+tiling showed footage 15–40 s off the narrated moment from the first second
+of the video, and stretched a 5-s sentence's three micro-cuts across a 50-s
+window. With anchor-true windows the median sentence sits within a couple of
+seconds of its beat, a sentence's shots stay inside that sentence's own
+beat, and the run log prints the measured number
+(`visual sync: footage within Xs (median) / Ys (90th pct) of the beat each
+sentence narrates`). The run log also prints the voice's true
+words-per-minute against the configured one. That measured rate is also **cached per voice**
 (`_work/narration_rate.json`, keyed by provider + voice + rate), so every
 later run — including the `--minutes`/`--seconds` → word-target conversion —
 budgets with the voice's *measured* speed instead of the `words_per_minute`
@@ -490,10 +499,14 @@ that window — `speed = window / narration`, clamped to `timeline.min_speed`
 (0.35x) — so the footage plays as gentle slow motion that stays locked to the
 moment being narrated. Exactly what a human editor does. Mid-film the picture
 is therefore ALWAYS moving: new footage at 1x, or the same moment in slow
-motion. A frozen frame now occurs only if the narration outlasts the entire
-movie. In the stress fixture (25 sentences over 2.4s-apart beats) this took
-the visual lead from ~86s of look-ahead down to under a second — with zero
-frozen frames and the durations still summing to the narration exactly.
+motion. A frozen frame can now occur only if the narration outlasts the
+entire movie — and if that ever happens for more than a couple of seconds
+(the "hundreds of sentences over one still frame" pathology), the run log
+raises a loud `WARNING: the picture is FROZEN for Ns ...` instead of
+shipping it silently. In the stress fixture (25 sentences over
+2.4s-apart beats) this took the visual lead from ~86s of look-ahead down to
+under a second — with zero frozen frames and the durations still summing to
+the narration exactly.
 With `visual_match` on this is a *safety net* — the script budgets already
 keep almost every section at 1x — but it stays on so no input can ever
 produce a still frame.

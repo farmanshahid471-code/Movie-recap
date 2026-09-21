@@ -1472,9 +1472,19 @@ def generate_segmented_script(
             )
         else:
             wins = []
-        for s, (lo, hi) in zip(sents, wins):
+            anchors = []
+        for k, (s, (lo, hi)) in enumerate(zip(sents, wins)):
             out.append({
                 "sentence": s, "film_start": lo, "film_end": hi,
+                # The beat this sentence was WRITTEN from. After TTS,
+                # timeline.rewindow_to_speech() re-sizes the window to the
+                # MEASURED speech and must keep it on THIS film moment --
+                # carrying the anchor explicitly is what stops the
+                # re-windowing pass from sliding the footage off the
+                # narration ("the visuals and the voice do not match").
+                "anchor": round(float(anchors[k]), 2)
+                if k < len(anchors)
+                else round((lo + hi) / 2.0, 2),
                 # The section's own film territory (see _visual_matched_
                 # budgets): the zone this section's narration must walk.
                 # timeline.rewindow_to_speech() re-sizes each sentence's
@@ -1593,6 +1603,12 @@ def _append_sign_off(segments: list[dict], *, lang_name: str, enabled: bool) -> 
             "sentence": line,
             "film_start": last.get("film_start", 0.0),
             "film_end": last.get("film_end", 0.0),
+            # The outro is narrated over the film's closing moments, so it
+            # anchors where the story's last sentence did; re-windowing then
+            # sizes it to the outro's own speech length instead of stretching
+            # it across the whole remaining tail (the "one frozen visual
+            # under a long sign-off" symptom).
+            "anchor": last.get("anchor"),
         }
     )
 

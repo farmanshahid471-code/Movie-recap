@@ -760,6 +760,17 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
     for code in native:
         cues = transcripts[code]
         chunks = chunk.chunk_cues(cues, window, overlap)
+        if movie_dur > 0:
+            # A chunk's film territory may never extend past the film
+            # itself. The last window of a SHORT clip otherwise claims
+            # hours of footage that does not exist (a 90s sample with the
+            # default 300s chunk window claims [0, 300]), the anchors
+            # spread across that phantom zone, and the ending sentences
+            # pile onto the film's final frame -- the picture freezes
+            # under the last stretch of narration.
+            for c in chunks:
+                if c["end"] > movie_dur:
+                    c["end"] = movie_dur
         _attach_visual(chunks)
         (wd / "chunks").mkdir(parents=True, exist_ok=True)
         for c in chunks:
@@ -804,17 +815,24 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                   f"({_measured:.0f} wpm, cached from a previous run) "
                   f"instead of the configured {wpm} wpm")
             wpm = int(round(_measured))
-        # VISUAL MATCH: never ask for more narration than the film can show
-        # at 1x. A recap is normally far shorter than its film, so this only
-        # fires for extreme targets (e.g. 25 minutes out of a 30-minute
-        # movie) -- the picture then stays at full speed instead of drifting
-        # into permanent slow motion.
+        # VISUAL MATCH: never ask for more narration than the footage can
+        # show at 1x. The footage a recap can actually DRAW on is the
+        # transcript's own coverage (a partial subtitle covers less of the
+        # film than the film's runtime) bounded by the film's length. A
+        # recap is normally far shorter than its film, so this only fires
+        # for extreme targets (25 minutes of narration out of a 30-minute
+        # movie, or any target against a short clip) -- the picture then
+        # stays at full speed instead of drifting into permanent slow
+        # motion.
         if nar.get("visual_match", True) and movie_dur > 0:
-            film_cap = int(movie_dur / 60.0 * wpm * 0.75)
-            if film_cap >= 600 and target > film_cap:
+            coverage = max((float(c.get("end", 0.0)) for c in chunks),
+                           default=0.0)
+            narratable = min(movie_dur, max(coverage, 0.0)) or movie_dur
+            film_cap = int(narratable / 60.0 * wpm * 0.75)
+            if target > film_cap:
                 print(f"  * visual match: target {target} words exceeds what "
-                      f"the film can show at 1x ({film_cap} words); clamping "
-                      "so the narration never outruns the footage.")
+                      f"the footage can show at 1x ({film_cap} words); "
+                      "clamping so the narration never outruns the picture.")
                 target = film_cap
         print(f"  * Target: {target} words ≈ "
               f"{target / max(wpm, 1) * 60:.0f}s of speech at {wpm} wpm")
@@ -1020,13 +1038,16 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
             seg_for_lang = authored[code]["segments"]
         else:
             # Translated lines stay 1:1 with the master, so reuse the master's
-            # film windows (clamped so a slightly misaligned translation can
-            # never index past the end).
+            # film windows AND its anchors (clamped so a slightly misaligned
+            # translation can never index past the end) -- the re-windowing
+            # pass keeps each translated sentence on the same beat its
+            # master sentence narrates.
             ms = master_segments
             seg_for_lang = [
                 {"sentence": c.text,
                  "film_start": ms[min(i, len(ms) - 1)]["film_start"],
                  "film_end": ms[min(i, len(ms) - 1)]["film_end"],
+                 "anchor": ms[min(i, len(ms) - 1)].get("anchor"),
                  "zone_lo": ms[min(i, len(ms) - 1)].get("zone_lo"),
                  "zone_hi": ms[min(i, len(ms) - 1)].get("zone_hi")}
                 for i, c in enumerate(cues_t)
@@ -1067,6 +1088,40 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
             print(f"  ! [{code}] longest shot is {_longest:.1f}s -- one visual "
                   "outlasting several sentences; check the section budgets "
                   "above if this read as out of sync", flush=True)
+        # The one "burst" that must never ship silently: the picture sitting
+        # FROZEN under a long stretch of narration because the narration has
+        # run past the end of the film (the freeze-at-film-end path). A
+        # couple of seconds of tail padding is honest; many seconds is the
+        # visible "hundreds of sentences over one still frame" symptom.
+        _frozen = sum(_f for b in beats for (_s, _d, _f, _v)
+                      in (b.get("cuts") or []))
+        if _frozen > 10.0:
+            print(f"  ! [{code}] WARNING: the picture is FROZEN for "
+                  f"{_frozen:.1f}s of this video -- the narration runs past "
+                  "the end of the film, so the last sentences sit on a "
+                  "single still frame. Lower narration.words_target (or "
+                  "shorten the requested length) so every sentence has "
+                  "footage to play on.", flush=True)
+        # Measured sync: how far the shown footage sits from the beat each
+        # sentence actually narrates. Before the anchored re-windowing this
+        # read 20-40s for most of a long video ("the narration and the
+        # visuals do not match at all"); a healthy run reads a second or
+        # two.
+        _offs = []
+        for _b, _s in zip(beats, seg_for_lang):
+            _a = _s.get("anchor")
+            if _a is None:
+                continue
+            _d = float(_b.get("duration", 0.0))
+            _offs.append(abs(float(_b["film_start"])
+                             - (float(_a) - _d / 2.0)))
+        if _offs:
+            _offs.sort()
+            _med = _offs[len(_offs) // 2]
+            _p90 = _offs[min(len(_offs) - 1, int(len(_offs) * 0.9))]
+            print(f"  * [{code}] visual sync: footage within {_med:.1f}s "
+                  f"(median) / {_p90:.1f}s (90th pct) of the beat each "
+                  "sentence narrates")
         # Honest sync prognosis: if sections still had to slow down after
         # the measured re-windowing, say WHY -- the section's narration is
         # genuinely longer than the film behind it (over-budget section or

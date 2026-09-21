@@ -524,20 +524,38 @@ def rewindow_to_speech(
     because the script only ever sees the estimate.
 
     After TTS (+ whisper alignment) the pipeline knows the REAL duration of
-    every sentence. This pass re-walks each section's film zone (the
-    ``zone_lo``/``zone_hi`` the script attached) allocating each sentence a
-    window proportional to its measured duration, contiguously and in
-    order. Because the section budgets capped the narration at ~40% of the
-    zone's film time, every window comes out at least ~2x the sentence's
-    real duration: the timeline can then play EVERY cut at 1x, while the
-    picture walks the film in step with the narration (a slice per
-    sentence, exactly the reference-channel edit shape). Sections that
-    genuinely over-run their zone (real narration longer than the film
-    behind it) keep a contiguous walk and the timeline's slow-motion
-    safety net -- that is now rare and honest instead of everywhere.
+    every sentence. This pass re-sizes each sentence's window to that
+    measured duration -- and keeps it ON THE BEAT the sentence narrates.
+    Each segment carries the film moment it was written from (``anchor``,
+    set by ``script.generate_segmented_script``; old cached segments carry
+    no anchor, and the midpoint of their pre-resize window is used
+    instead). The new window is that anchor, centered, exactly as long as
+    the sentence's real speech, clamped to the section's zone
+    (``zone_lo``/``zone_hi``); a forward walk resolves any overlap so the
+    windows never rewind and the picture always lands on the moment the
+    voice is describing.
 
-    Sentences without zone information (the sign-off outro, old cached
-    segments) keep their existing windows untouched.
+    Why the anchor matters (the reported "narration and visuals do not
+    match at all"): the earlier version of this pass re-tiled each zone
+    PROPORTIONALLY TO SPEECH TIME, throwing the anchors away. Beats are not
+    spread evenly through a zone -- a zone holds one busy scene and a quiet
+    stretch -- so proportional tiling made every sentence show footage 15-40
+    seconds off the beat it narrates, from the first second of the video,
+    and stretched a 5-second sentence's three micro-cuts across a 50-second
+    window (the picture racing ~9x ahead of the story inside one sentence).
+    Anchored windows fix both: the median sentence now sits within a couple
+    of seconds of its beat, and a sentence's shots stay inside that
+    sentence's own beat.
+
+    Because the section budgets capped the narration at ~40% of the zone's
+    film time, the measured windows normally fit the zone with room to
+    spare and the timeline plays EVERY cut at 1x. A section whose measured
+    narration genuinely exceeds its film zone (the rare, honest case)
+    keeps a contiguous walk scaled to the zone, and the timeline's
+    slow-motion safety net paces it.
+
+    Sentences without zone information (the sign-off outro on an old
+    cache, pre-zone segments) keep their existing windows untouched.
     """
     n = min(len(segments), len(durations))
     if n <= 0:
@@ -566,22 +584,57 @@ def rewindow_to_speech(
         if zone <= 0 or total <= 0:
             i = j
             continue
-        scale = zone / total  # >= 1 whenever the section fits its footage
-        walk = 0.0
-        for rel in range(i, j):
-            lo = lo0 + walk
-            walk += durs[rel - i] * scale
-            hi = min(lo0 + walk, hi0)
-            if hi < lo:
-                hi = lo
-            out[rel]["film_start"] = round(lo, 3)
-            out[rel]["film_end"] = round(max(hi, lo + 0.8), 3)
-            resized += 1
+        if total <= zone:
+            # ANCHOR-TRUE PLACEMENT: the section fits its footage, so every
+            # sentence keeps the beat it was written from: window = anchor
+            # (centered), sized to the MEASURED speech, clamped to the zone.
+            # A forward walk resolves overlaps (monotone, no rewind); when
+            # anchors are well spaced (the paced case) the walk never binds
+            # and every window is exactly centered on its beat.
+            anchors = []
+            for rel in range(i, j):
+                s = out[rel]
+                a = s.get("anchor")
+                if a is None:
+                    a = (float(s.get("film_start", lo0))
+                         + float(s.get("film_end", lo0))) / 2.0
+                anchors.append(min(max(float(a), lo0), hi0))
+            walk = lo0
+            for k, rel in enumerate(range(i, j)):
+                d = durs[k]
+                a = anchors[k]
+                lo = min(max(a - d / 2.0, walk), max(hi0 - d, walk))
+                hi = min(lo + d, hi0)
+                if hi < lo:
+                    hi = lo
+                out[rel]["film_start"] = round(lo, 3)
+                # 0.8s floor so a whisper-stub sentence still gets a real
+                # shot -- but the floor may never push a window past the
+                # zone end (degenerate zone-end case: keep it inside).
+                out[rel]["film_end"] = round(max(hi, min(lo + 0.8, hi0)), 3)
+                walk = hi
+                resized += 1
+        else:
+            # Genuinely over-budget section (measured narration longer than
+            # the film zone): the zone cannot hold the speech, so walk it
+            # contiguously at zone scale -- the timeline's slow-motion net
+            # then paces it (rare and honest, not the norm).
+            scale = zone / total
+            walk = 0.0
+            for rel in range(i, j):
+                lo = lo0 + walk
+                walk += durs[rel - i] * scale
+                hi = min(lo0 + walk, hi0)
+                if hi < lo:
+                    hi = lo
+                out[rel]["film_start"] = round(lo, 3)
+                out[rel]["film_end"] = round(max(hi, min(lo + 0.8, hi0)), 3)
+                resized += 1
         i = j
     if resized:
         print(f"  * visual match: {resized} sentence windows re-sized to "
-              "the MEASURED narration (the voice's real rate no longer has "
-              "to be guessed) -- every section can now play at 1x",
+              "the MEASURED narration and kept on the beat each sentence "
+              "narrates -- every section can now play at 1x in sync",
               flush=True)
     return out
 
