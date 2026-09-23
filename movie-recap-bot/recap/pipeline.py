@@ -724,19 +724,68 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         if visual_notes:
             print(f"  * Vision notes: {len(visual_notes)} on-screen moments "
                   f"merged into each language's beat list.")
+            # Per-beat confidence summary (Spec 2.5)
+            _high = sum(1 for n in visual_notes if n.get("confidence", "high") == "high" and n.get("provider", "primary") != "fallback")
+            _low = len(visual_notes) - _high
+            _provider_primary = sum(1 for n in visual_notes if n.get("provider", "primary") == "primary")
+            _provider_fallback = len(visual_notes) - _provider_primary
+            if _low > 0 or _provider_fallback > 0:
+                print(f"  * Vision confidence summary: {_high} high / {_low} low "
+                      f"({ _provider_fallback} via fallback provider — degraded, weighted lower in beat-matching) "
+                      f"over {len(visual_notes)} notes", flush=True)
+            else:
+                print(f"  * Vision confidence: all {len(visual_notes)} high-confidence notes", flush=True)
+        # Hard coverage gate before scriptwriting (Spec 2.1)
+        try:
+            vision.coverage_gate(movie, vcfg, wd)
+        except vision.VisionError as exc:
+            # If allow_incomplete is not set, fail the build loudly; else just warn
+            _allow = bool(vcfg.get("allow_incomplete")) or False
+            # Also check env override (already handled inside coverage_gate for skipping, but re-check for logging)
+            import os as _os
+            if _os.environ.get("VISION_ALLOW_INCOMPLETE", "").lower() in ("1", "true", "yes"):
+                _allow = True
+            if not _allow:
+                print(f"  ! VISION_COVERAGE_GATE FAILED: {exc}", flush=True)
+                print(f"  ! Failing build — set vision.allow_incomplete: true / VISION_ALLOW_INCOMPLETE=1 or fix coverage", flush=True)
+                raise
+            else:
+                print(f"  ! Vision coverage gate would have failed but VISION_ALLOW_INCOMPLETE=1 — continuing anyway: {exc}", flush=True)
 
     def _attach_visual(chunks: list[dict]) -> None:
-        by_t = {int(n.get("t", -1)): (n.get("text") or "").strip()
-                for n in visual_notes if n.get("t") is not None}
+        # Preserve confidence/provider per visual note (Spec 2.5)
+        by_t: dict[int, dict] = {}
+        for n in visual_notes:
+            t = n.get("t")
+            if t is None:
+                continue
+            ti = int(t)
+            text = (n.get("text") or "").strip()
+            if not text:
+                continue
+            by_t[ti] = {
+                "text": text,
+                "confidence": n.get("confidence", "high"),
+                "provider": n.get("provider", "primary"),
+                "retried": bool(n.get("retried", False)),
+            }
         if not by_t:
             return
         for c in chunks:
             lo, hi = float(c.get("start", 0.0)), float(c.get("end", 0.0))
-            vis = [{"t": t, "text": by_t[t]}
+            vis = [{"t": t, "text": by_t[t]["text"],
+                    "confidence": by_t[t].get("confidence", "high"),
+                    "provider": by_t[t].get("provider", "primary"),
+                    "retried": bool(by_t[t].get("retried", False))}
                    for t in sorted(by_t)
-                   if lo - 1.0 <= t < hi and by_t[t]]
+                   if lo - 1.0 <= t < hi and by_t[t]["text"]]
             if vis:
                 c["visual"] = vis
+                # Log per-chunk confidence for this language pass
+                _low = sum(1 for v in vis if v.get("confidence") != "high" or v.get("provider") == "fallback")
+                if _low:
+                    print(f"    ... chunk {c['index']}: {len(vis)} visual notes ({len(vis)-_low} high / {_low} low-fallback — weighted lower) "
+                          f"[{c['start']:.0f}-{c['end']:.0f}s]", flush=True)
 
     # Summarization is the slowest LLM step on a CPU-only machine. Fail fast
     # when the model is missing (otherwise Ollama silently downloads it, which

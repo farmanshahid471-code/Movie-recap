@@ -131,6 +131,9 @@ vision:
   provider: "gemini"        # gemini (free) | openai | groq (OpenAI-compatible)
   model: "gemini-3.6-flash" # Gemini Flash models are multimodal; any works
   base_url: null            # null = provider default (Gemini OpenAI-compat)
+  fallback_provider: ""     # e.g. "openai" — auto-tried when primary 503s persist (needs its own key)
+  fallback_model: ""        # e.g. "gpt-4o-mini" (auto-picks provider default if empty)
+  fallback_base_url: null
   cadence_seconds: 20       # legacy key (kept for config compatibility);
                             # frames are now chosen by STRATIFIED sampling:
                             # one per ~10s time-bin of the film, preferring
@@ -140,13 +143,17 @@ vision:
                             # last ~43% had zero frames)
   scene_threshold: 0.35     # also caption real shot changes above this delta
   max_frames: 600           # hard cap per movie (~1 caption per 10s of a
-                            # 100-min film, full runtime; ~150 API calls at
-                            # 4 frames/request)
+                            # 100-min film, full runtime; ~100 API calls at
+                            # 6 frames/request vs 150 at 4 — less hammering)
   width: 512                # JPEG width sent to the model (smaller = cheaper)
-  frames_per_request: 4     # frames per API call (free-tier request economy)
+  frames_per_request: 6     # frames per API call: 6 = fewer, larger batches (less concurrent hammering)
   sweep_pause_seconds: 60   # pause before the FINAL SWEEP that re-captures
                             # the frames a 503 "high demand" storm killed
                             # (set 0 to sweep immediately)
+  coverage_threshold: 0.99  # hard gate: scriptwriting requires ≥99% captions before proceeding
+  allow_incomplete: false   # set true (or VISION_ALLOW_INCOMPLETE=1) to bypass coverage gate (debug only)
+  max_consecutive_failures: 3  # circuit breaker: after N failed batches, pause whole pass
+  circuit_breaker_pause: 180   # seconds to cooldown when breaker trips (3-5 min)
 
 # Step D — chronological timeline (recap line -> film moment, in order).
 # Beats advance monotonically through the film and each beat's visual length is

@@ -171,6 +171,7 @@ def _visual_block(visual) -> str:
     ``visual`` is an optional list of {"t": seconds, "text": ...} records. An
     empty list yields an empty string so text-only runs are byte-identical to
     before.
+    Low-confidence / fallback captions are tagged so the summarizer weights them lower.
     """
     if not visual:
         return ""
@@ -180,13 +181,19 @@ def _visual_block(visual) -> str:
         text = (v.get("text") or "").strip()
         if text is None or not text:
             continue
+        conf = v.get("confidence", "high")
+        prov = v.get("provider", "primary")
+        # Tag low confidence / fallback so model knows to weight lower
+        suffix = ""
+        if prov == "fallback" or conf != "high":
+            suffix = " [low confidence — use only if not contradicted by dialogue]"
         if t is None:
-            lines.append(text)
+            lines.append(text + suffix)
         else:
             m, s = divmod(int(float(t)) % 3600, 60)
             h = int(float(t)) // 3600
             stamp = f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
-            lines.append(f"[{stamp}] {text}")
+            lines.append(f"[{stamp}] {text}{suffix}")
     if not lines:
         return ""
     return "\n\n=== WHAT IS ON SCREEN (VISUAL NOTES, WITH FILM TIMES) ===\n" \

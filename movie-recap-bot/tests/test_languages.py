@@ -223,7 +223,7 @@ def test_prompts_are_language_aware() -> None:
     script.generate_segmented_script(
         [{"index": 0, "start": 0.0, "end": 30.0, "summary": "s",
           "beats": [{"t": 1.0, "text": "beat"}]}],
-        {"provider": "x", "model": "y"}, 400, lang_name="Arabic",
+        {"provider": "x", "model": "y", "allow_unhumanized": True}, 400, lang_name="Arabic",
     )
     assert "entirely in Arabic" in calls[n0], calls[n0]   # section writer
     assert "in Arabic" in calls[-1], calls[-1]            # humanizer pass
@@ -232,7 +232,7 @@ def test_prompts_are_language_aware() -> None:
     script.generate_segmented_script(
         [{"index": 0, "start": 0.0, "end": 30.0, "summary": "s",
           "beats": [{"t": 1.0, "text": "beat"}]}],
-        {"provider": "x", "model": "y"}, 400, lang_name="Spanish",
+        {"provider": "x", "model": "y", "allow_unhumanized": True}, 400, lang_name="Spanish",
     )
     assert "entirely in Spanish" in calls[n1]
     assert "in Spanish" in calls[-1]

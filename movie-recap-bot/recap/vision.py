@@ -16,8 +16,8 @@ Quota / cost notes (see README "Vision pass" for exact numbers)
   DeepSeek. Gemini's free tier does not charge for images (rate-limited).
   A paid OpenAI/Gemini key bills per image — cents, at 512px.
 * Requests per movie ~= (frames / frames_per_request): a 100-min film gets
-  ~600 stratified frames (one per ~10s of film, full runtime) ≈ 150
-  requests at 4 frames/request.
+  ~600 stratified frames (one per ~10s of film, full runtime) ≈ 100
+  requests at 6 frames/request (was 150 at 4).
 """
 
 from __future__ import annotations
@@ -242,6 +242,47 @@ def _client(cfg_vision: dict):
     return client, model
 
 
+def _fallback_client(cfg_vision: dict):
+    """Try to build a client for the configured fallback provider, or None."""
+    import openai  # type: ignore
+
+    provider = (cfg_vision.get("fallback_provider") or "").strip().lower()
+    if not provider:
+        # No explicit fallback; try to auto-pick a different configured provider
+        # (e.g. primary gemini failed, fallback to openai if key exists)
+        primary = (cfg_vision.get("provider") or "gemini").strip().lower()
+        for cand in ("openai", "gemini", "groq"):
+            if cand != primary and provider_configured(cand):
+                provider = cand
+                break
+        if not provider:
+            return None, None
+    if provider not in PROVIDER_KEY_ENV:
+        return None, None
+    if not provider_configured(provider):
+        return None, None
+    key_env = PROVIDER_KEY_ENV[provider]
+    api_key = os.environ.get(key_env)
+    if not api_key:
+        return None, None
+    base = (
+        cfg_vision.get("fallback_base_url")
+        or PROVIDER_BASE_DEFAULT.get(provider)
+    )
+    model = (
+        cfg_vision.get("fallback_model")
+        or os.environ.get("VISION_FALLBACK_MODEL")
+        or DEFAULT_VISION_MODEL.get(provider, "")
+    )
+    if not model:
+        return None, None
+    try:
+        client = openai.OpenAI(api_key=api_key, base_url=base, timeout=180)
+        return client, model
+    except Exception:
+        return None, None
+
+
 def _parse_caption_batch(
     raw: str, frames: list[tuple[int, Path]]
 ) -> dict[int, str]:
@@ -259,7 +300,7 @@ def _parse_caption_batch(
         body = ""
         if tl is not None:
             body = re.sub(
-                r"^\[?\d{1,3}:\d{2}(?::\d{2})?\]?\s*[\):.\-]?\s*", "", ln, count=1
+                r"^\[?\d{1,3}:\d{2}(?::\d{2})?\]?\s*[\):.\-]?\\s*", "", ln, count=1
             ).strip()
         if tl is not None and body and any(abs(tl - ft) <= 1 for ft, _ in frames):
             matched[tl] = body
@@ -382,6 +423,38 @@ def _caption_batch(
     return _parse_caption_batch(raw, frames)
 
 
+def _caption_batch_with_fallback(
+    client, model: str,
+    fallback_client, fallback_model: str | None,
+    frames: list[tuple[int, Path]],
+) -> tuple[dict[int, str], str]:
+    """Try primary, then fallback provider. Returns (captions, provider_used).
+
+    provider_used is "primary", "fallback", or raises VisionError if both fail.
+    """
+    try:
+        res = _caption_batch(client, model, frames)
+        return res, "primary"
+    except VisionError as exc:
+        # Primary failed after its own 4-try ladder. Try fallback if available.
+        if fallback_client is None or not fallback_model:
+            raise
+        print(f"    ... primary provider failed ({exc}); "
+              f"trying fallback provider ({fallback_model}) ...", flush=True)
+        try:
+            res = _caption_batch(fallback_client, fallback_model, frames)
+            print(f"    ... fallback provider succeeded for batch "
+                  f"({len([v for v in res.values() if v])}/{len(frames)} captioned)",
+                  flush=True)
+            return res, "fallback"
+        except Exception as exc2:
+            # Both failed: surface the combined error
+            raise VisionError(
+                f"both primary ({model}) and fallback ({fallback_model}) failed: "
+                f"{exc} | fallback: {exc2}"
+            ) from exc2
+
+
 def _movie_sig(movie: Path, cfg: dict) -> str:
     try:
         st = movie.stat()
@@ -397,9 +470,135 @@ def _movie_sig(movie: Path, cfg: dict) -> str:
             "width": cfg.get("width", 512),
             "provider": cfg.get("provider", "gemini"),
             "model": cfg.get("model") or os.environ.get("VISION_MODEL") or "",
+            "fallback_provider": cfg.get("fallback_provider", ""),
+            "fallback_model": cfg.get("fallback_model", ""),
         },
         sort_keys=True,
     )
+
+
+def _load_cached_notes(cache_path: Path, sig: str) -> tuple[dict[int, dict], bool]:
+    """Load cached visual notes. Returns ({t: {text, confidence, provider}}, cache_ok).
+
+    Supports both old format (frames: [{t, text}]) and new format with metadata.
+    """
+    cached: dict[int, dict] = {}
+    cache_ok = False
+    try:
+        if cache_path.exists():
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            if data.get("sig") == sig:
+                cache_ok = True
+                for fr in data.get("frames", []):
+                    t = fr.get("t")
+                    text = (fr.get("text") or "").strip()
+                    if t is not None and text:
+                        cached[int(t)] = {
+                            "text": text,
+                            "confidence": fr.get("confidence", "high"),
+                            "provider": fr.get("provider", "primary"),
+                            "retried": bool(fr.get("retried", False)),
+                        }
+            elif data.get("sig") is not None:
+                # stale sig: treat as no cache but don't delete (debug)
+                pass
+    except Exception:
+        cached = {}
+    return cached, cache_ok
+
+
+def _save_cached_notes(cache_path: Path, sig: str, cached: dict[int, dict]) -> None:
+    """Persist cached notes with confidence metadata."""
+    try:
+        cache_path.write_text(
+            json.dumps(
+                {"sig": sig, "frames": [
+                    {"t": t,
+                     "text": cached[t]["text"],
+                     "confidence": cached[t].get("confidence", "high"),
+                     "provider": cached[t].get("provider", "primary"),
+                     "retried": bool(cached[t].get("retried", False))}
+                    for t in sorted(cached)]},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def check_coverage(
+    movie: Path,
+    cfg_vision: dict,
+    workdir: Path,
+) -> tuple[float, int, int]:
+    """Check current caption coverage without running capture.
+
+    Returns (coverage_ratio, captioned_count, total_expected).
+    coverage_ratio is 0.0-1.0; total_expected is len(pick_times(...)).
+    """
+    cfg = dict(cfg_vision or {})
+    duration = probe_duration(movie)
+    if duration <= 0:
+        return 1.0, 0, 0
+    try:
+        scenes = _scene_times(
+            movie, float(cfg.get("scene_threshold", 0.35)), duration
+        )
+    except RuntimeError:
+        scenes = []
+    times = pick_times(
+        duration,
+        cadence=float(cfg.get("cadence_seconds", 20.0)),
+        scenes=scenes,
+        max_frames=int(cfg.get("max_frames", 600)),
+    )
+    if not times:
+        return 1.0, 0, 0
+    cache_path = Path(workdir) / "visual_notes.json"
+    sig = _movie_sig(movie, cfg)
+    cached, _ = _load_cached_notes(cache_path, sig)
+    total = len(times)
+    have = len([t for t in times if t in cached])
+    return (have / total) if total else 1.0, have, total
+
+
+def coverage_gate(
+    movie: Path,
+    cfg_vision: dict,
+    workdir: Path,
+) -> None:
+    """Hard gate: ensure vision coverage >= threshold before scriptwriting.
+
+    Raises VisionError if coverage is below threshold and not overridden.
+    Called from pipeline before Step B. The log from capture already ran;
+    this is the gate that blocks progression on degraded data.
+    """
+    cfg = dict(cfg_vision or {})
+    if not cfg.get("enabled", True):
+        return
+    threshold = float(cfg.get("coverage_threshold", 0.99))
+    if cfg.get("allow_incomplete") or os.environ.get("VISION_ALLOW_INCOMPLETE", "").lower() in ("1", "true", "yes"):
+        return
+    provider = (cfg.get("provider") or "gemini").strip().lower()
+    if not provider_configured(provider):
+        # No key -> gracefully text-only; gate doesn't apply
+        return
+    ratio, have, total = check_coverage(movie, cfg, workdir)
+    if total == 0:
+        return
+    if ratio < threshold:
+        pct = ratio * 100
+        need = int(total * threshold) - have
+        raise VisionError(
+            f"Vision caption coverage {pct:.1f}% ({have}/{total}) is below "
+            f"the required {threshold*100:.0f}% ({int(total*threshold)}/{total}). "
+            f"{need} more frames needed. Re-run the same movie (cached frames are "
+            f"reused, only missing ones are re-captured), or set "
+            f"vision.allow_incomplete: true / VISION_ALLOW_INCOMPLETE=1 to proceed "
+            f"anyway, or increase vision sweep attempts. The timeline's beat-matching "
+            f"would be degraded on incomplete data."
+        )
 
 
 def capture(
@@ -408,13 +607,21 @@ def capture(
     workdir: Path,
     progress=None,
 ) -> list[dict]:
-    """Caption the film's on-screen action. Returns [{"t": int, "text": str}].
+    """Caption the film's on-screen action. Returns [{"t": int, "text": str, ...}].
 
     Fully resumable: every finished batch is written to ``visual_notes.json``
     next to the extracted frames, keyed by the movie + settings signature, so a
     crash or quota pause never re-captions finished frames. Best effort — any
     batch that fails logs a warning and the run continues with the frames it
     has (a partial caption list is far better than a dead pipeline).
+
+    New in this fix:
+    - Larger batches by default (6 instead of 4) = fewer requests, less hammering.
+    - Circuit breaker: after N consecutive 503s, pause the whole pass for a
+      longer cooldown instead of hammering the saturated endpoint.
+    - Fallback provider: if primary fails, automatically try a secondary.
+    - Confidence tracking: each note tagged high/fallback/low, surfaced in logs.
+    - Hard coverage gate is checked by pipeline.coverage_gate before writing.
     """
     movie = Path(movie)
     cfg = dict(cfg_vision or {})
@@ -457,25 +664,53 @@ def capture(
     cache_path = Path(workdir) / "visual_notes.json"
     sig = _movie_sig(movie, cfg)
 
-    cached: dict[int, str] = {}
-    cache_ok = False
+    cached_raw, cache_ok = _load_cached_notes(cache_path, sig)
+    # Adapt to new dict format; also handle old cache where values are strings
+    cached: dict[int, dict] = {}
+    for t, v in cached_raw.items():
+        if isinstance(v, str):
+            cached[t] = {"text": v, "confidence": "high", "provider": "primary", "retried": False}
+        elif isinstance(v, dict):
+            cached[t] = v
+        else:
+            cached[t] = {"text": str(v), "confidence": "high", "provider": "primary", "retried": False}
+    # Also handle legacy caches that were loaded as strings above but stored as dicts
+    # Re-load properly: _load_cached_notes already gave dicts, but ensure compat
+    # For old files that stored flat [{"t":..., "text":...}], we already migrated.
+
+    # Re-scan for legacy string caches that _load_cached_notes missed due to format variation
+    # (if cache existed but sig matched and frames lacked confidence fields)
     try:
         if cache_path.exists():
             data = json.loads(cache_path.read_text(encoding="utf-8"))
             if data.get("sig") == sig:
-                cache_ok = True
                 for fr in data.get("frames", []):
-                    t, text = fr.get("t"), (fr.get("text") or "").strip()
-                    if t is not None and text:
-                        cached[int(t)] = text
+                    t = fr.get("t")
+                    if t is not None and int(t) not in cached:
+                        text = (fr.get("text") or "").strip()
+                        if text:
+                            cached[int(t)] = {
+                                "text": text,
+                                "confidence": fr.get("confidence", "high"),
+                                "provider": fr.get("provider", "primary"),
+                                "retried": bool(fr.get("retried", False)),
+                            }
     except Exception:
-        cached = {}
+        pass
 
     missing = [t for t in times if t not in cached]
     if cache_ok and not missing:
         print(f"  * Vision pass: reusing {len(cached)} cached captions "
               f"({cache_path.name})", flush=True)
-        return [{"t": t, "text": cached[t]} for t in sorted(cached)]
+        # Report confidence summary for cached runs too
+        low = sum(1 for v in cached.values() if v.get("confidence") != "high" or v.get("provider") == "fallback")
+        if low:
+            print(f"  * Vision confidence: {len(cached)-low}/{len(cached)} high, "
+                  f"{low} low/fallback (degraded source)", flush=True)
+        return [{"t": t, "text": cached[t]["text"],
+                 "confidence": cached[t].get("confidence", "high"),
+                 "provider": cached[t].get("provider", "primary")}
+                for t in sorted(cached)]
 
     frames = extract_frames(
         movie, missing, frames_dir, width=int(cfg.get("width", 512))
@@ -483,56 +718,100 @@ def capture(
     if not frames:
         print("  ! Vision pass: no frames could be extracted - continuing "
               "text-only.", flush=True)
-        return [{"t": t, "text": cached[t]} for t in sorted(cached)]
+        return [{"t": t, "text": cached[t]["text"],
+                 "confidence": cached[t].get("confidence", "high"),
+                 "provider": cached[t].get("provider", "primary")}
+                for t in sorted(cached)]
 
     try:
         client, model = _client(cfg)
     except VisionError as exc:
         print(f"  ! Vision pass SKIPPED: {exc}", flush=True)
-        return [{"t": t, "text": cached[t]} for t in sorted(cached)]
+        return [{"t": t, "text": cached[t]["text"],
+                 "confidence": cached[t].get("confidence", "high"),
+                 "provider": cached[t].get("provider", "primary")}
+                for t in sorted(cached)]
+
+    # Fallback client (optional, may be None)
+    try:
+        fb_client, fb_model = _fallback_client(cfg)
+        if fb_client and fb_model:
+            print(f"  * Vision fallback provider ready: {cfg.get('fallback_provider') or 'auto'}/{fb_model}",
+                  flush=True)
+    except Exception:
+        fb_client, fb_model = None, None
+        print("  ! Vision fallback provider not configured (primary only)", flush=True)
 
     todo = [t for t in missing if t in frames]
-    batch_size = max(1, int(cfg.get("frames_per_request", 4)))
+    # Larger batches = fewer requests. Default 6 (was 4): 600 frames = 100 req vs 150.
+    # Configurable via vision.frames_per_request.
+    batch_size = max(1, int(cfg.get("frames_per_request", 6)))
+    # Circuit breaker config
+    max_consec = max(1, int(cfg.get("max_consecutive_failures", 3)))
+    breaker_pause = float(cfg.get("circuit_breaker_pause", 180.0))  # 3 min default
+    breaker_pause = max(0.0, min(breaker_pause, 600.0))
     print(f"  * Vision pass: captioning {len(todo)} frames via "
-          f"{provider}/{model} in batches of {batch_size} ...", flush=True)
+          f"{provider}/{model} in batches of {batch_size} "
+          f"(+ fallback {fb_model or 'none'}) ...", flush=True)
     started = time.time()
+
+    consecutive_failures = 0
 
     def _caption_pass(times: list[int], tag: str) -> list[int]:
         """Caption ``times`` in order; return the frames that still failed."""
+        nonlocal consecutive_failures
         failed: list[int] = []
         for i in range(0, len(times), batch_size):
             batch = [(t, frames[t]) for t in times[i : i + batch_size]]
+            # Circuit breaker: if we've hit N consecutive failures, pause the
+            # whole pass instead of hammering the saturated endpoint.
+            if consecutive_failures >= max_consec:
+                print(f"    ... circuit breaker: {consecutive_failures} consecutive batches failed — "
+                      f"pausing whole vision pass for {breaker_pause:.0f}s cooldown ...", flush=True)
+                if breaker_pause:
+                    time.sleep(breaker_pause)
+                consecutive_failures = 0
+
+            used_fallback = False
             try:
-                res = _caption_batch(client, model, batch)
+                # Try primary with built-in retries; on failure try fallback
+                if fb_client and fb_model:
+                    res, provider_used = _caption_batch_with_fallback(
+                        client, model, fb_client, fb_model, batch)
+                    used_fallback = (provider_used == "fallback")
+                else:
+                    res = _caption_batch(client, model, batch)
+                consecutive_failures = 0
             except VisionError as exc:
                 print(f"    ! vision batch {i // batch_size + 1} {tag}failed: "
                       f"{exc} — those frames stay queued for the final "
                       "sweep / next run", flush=True)
                 failed.extend(t for t, _ in batch)
+                consecutive_failures += 1
                 continue
             for t, text in res.items():
                 if text:
-                    cached[t] = text
+                    # Tag confidence: fallback = low confidence, retried = true if tag contains sweep
+                    confidence = "low" if used_fallback else "high"
+                    if tag and "sweep" in tag:
+                        confidence = "low" if confidence == "high" else confidence
+                    cached[t] = {
+                        "text": text,
+                        "confidence": confidence,
+                        "provider": "fallback" if used_fallback else "primary",
+                        "retried": bool(tag),
+                    }
             # Persist after every batch: a quota pause resumes without
             # rework (and the next run re-captures only what is missing).
-            try:
-                cache_path.write_text(
-                    json.dumps(
-                        {"sig": sig, "frames": [
-                            {"t": t, "text": cached[t]}
-                            for t in sorted(cached)]},
-                        ensure_ascii=False,
-                    ),
-                    encoding="utf-8",
-                )
-            except OSError:
-                pass
+            _save_cached_notes(cache_path, sig, cached)
             if progress:
                 progress(min(i + batch_size, len(times)), len(times),
                          len(cached))
             elif (i // batch_size) % 5 == 0 or i + batch_size >= len(times):
+                low_cnt = sum(1 for v in cached.values() if v.get("provider") == "fallback")
+                fb_note = f", {low_cnt} via fallback" if low_cnt else ""
                 print(f"    ... {min(i + batch_size, len(times))}/{len(times)} "
-                      f"frames ({len(cached)} captioned, "
+                      f"frames ({len(cached)} captioned{fb_note}, "
                       f"{(time.time() - started) / 60:.1f} min)", flush=True)
         return failed
 
@@ -547,23 +826,52 @@ def capture(
               flush=True)
         if pause:
             time.sleep(pause)
+        # Reset breaker for sweep
+        consecutive_failures = 0
         failed = _caption_pass(failed, "(sweep) ")
 
-    result = [{"t": t, "text": cached[t]} for t in sorted(cached)]
+    result = [{"t": t, "text": cached[t]["text"],
+               "confidence": cached[t].get("confidence", "high"),
+               "provider": cached[t].get("provider", "primary"),
+               "retried": bool(cached[t].get("retried", False))}
+              for t in sorted(cached)]
+    # Confidence summary for this run
+    low_total = sum(1 for r in result if r.get("confidence") != "high" or r.get("provider") == "fallback")
+    retried_total = sum(1 for r in result if r.get("retried"))
     if failed:
         # Never read a demand spike as "the film has no visual notes": say
         # exactly what is missing and how cheaply to get it (the cache
         # reuses everything that already succeeded).
+        coverage = len(result) / max(len(times), 1) * 100
         print(f"  ! Vision pass: {len(failed)}/{len(missing)} frames could "
               f"NOT be captioned — provider {provider} is under high demand "
-              f"('{model}' returned 503). The run continues with "
+              f"('{model}' returned 503). Coverage {coverage:.1f}% "
+              f"({len(result)}/{len(times)}). The run continues with "
               f"{len(result)} notes. Re-run the SAME movie: cached frames "
               "are reused and only the missing ones are re-captured. If "
               "this keeps happening, try the default flash model "
               "(vision.model in config.yaml) — the -lite free tier is the "
               "most throttled — or set vision.enabled: false for a "
               "text-only run.", flush=True)
+        if low_total:
+            print(f"  * Vision confidence: {len(result)-low_total} high, "
+                  f"{low_total} low/fallback ({retried_total} retried/sweep)",
+                  flush=True)
+        # Emit a structured warning for pipeline gate
+        print(f"  ! VISION_COVERAGE {coverage:.1f}% — below 99% threshold; "
+              f"scriptwriting should be gated (use --allow-incomplete-captions to override)",
+              flush=True)
     else:
         print(f"  * Vision pass: {len(result)} on-screen notes "
-              f"(visual_notes.json)", flush=True)
+              f"(visual_notes.json) — coverage {len(result)/max(len(times),1)*100:.1f}% "
+              f"({len(result)}/{len(times)})", flush=True)
+        if low_total:
+            print(f"  * Vision confidence: {len(result)-low_total} high, "
+                  f"{low_total} low/fallback ({retried_total} retried) — "
+                  f"those beats will be weighted lower in matching",
+                  flush=True)
+        else:
+            print(f"  * Vision confidence: all {len(result)} high (no degraded captions)",
+                  flush=True)
     return result
+

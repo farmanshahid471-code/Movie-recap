@@ -143,6 +143,14 @@ def cmd_auto(args: argparse.Namespace) -> None:
         print(f"  * Target narration: {secs}s (~{secs / 60:.1f} min) "
               f"-> {words} words ({src})")
 
+    # Spec 1.2 / 2.1: map CLI flags to config so pipeline sees them without env vars
+    if getattr(args, "allow_unhumanized", False):
+        cfg.setdefault("narration", {})["allow_unhumanized"] = True
+        # also expose as llm config for script.generate_segmented_script
+        cfg.setdefault("llm", {})["allow_unhumanized"] = True
+    if getattr(args, "allow_incomplete_captions", False):
+        cfg.setdefault("vision", {})["allow_incomplete"] = True
+
     movie = Path(args.movie)
     if not movie.exists():
         raise SystemExit(f"Movie not found: {movie}")
@@ -276,6 +284,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="comma list, e.g. en,zh,ar,es "
                              "(language of the clips to render)")
     p_auto.add_argument("--name", default=None, help="output name")
+    p_auto.add_argument("--allow-unhumanized", action="store_true", default=False,
+                        help="allow shipping narration that failed the humanizer >10%% (otherwise the build fails loudly)")
+    p_auto.add_argument("--allow-incomplete-captions", action="store_true", default=False,
+                        help="allow scriptwriting when <99%% of vision frames were captioned (otherwise the build fails at the coverage gate)")
     p_auto.set_defaults(func=cmd_auto)
 
     p_scr = sub.add_parser("script", help="write the EN recap script (+ZH)")

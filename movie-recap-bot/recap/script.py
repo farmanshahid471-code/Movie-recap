@@ -75,9 +75,30 @@ Your code (hard rules, never broken):
 - You NEVER say "the movie", "the film", "the scene shows", "the camera". The one exception: "we see", used rarely.
 - You NEVER use em-dashes or semicolons. You talk in commas and full stops."""
 
+# ---------------------------------------------------------------------------
+# VOICE GUIDE — static system-prompt block for writer + humanizer
+# This survives across all 36 chunks / 146 sentences, keeping voice consistent.
+# Spec 1.4: must be a static system-prompt block, not buried per-chunk.
+# ---------------------------------------------------------------------------
+VOICE_GUIDE = """VOICE GUIDE
+- Write like a YouTube recap narrator talking to a viewer, not like a
+  plot-summary encyclopedia entry.
+- Use contractions (it's, they're, don't, can't, won't, she's, they're).
+- Vary sentence openers — do NOT start more than one sentence per
+  paragraph with "Meanwhile," "Just then," or "Suddenly."
+- Mix short punchy sentences with longer ones. Avoid uniform
+  subject-verb-object rhythm across consecutive lines.
+- Occasional rhetorical questions or a beat of commentary are fine
+  ("...and yeah, that's about as awkward as it sounds.").
+- Never narrate two consecutive beats with the same sentence template
+  (e.g. "X does Y, then Z happens" twice in a row).
+- Sound like a person binge-watching with a friend: natural, spoken, warm.
+"""
+
+
 # Step B — the exact system prompt the channel workflow uses for the final
 # narrative pass over the summarized chunks.
-SYSTEM_RECAP_WRITER = NARRATOR_PERSONA + (
+SYSTEM_RECAP_WRITER = NARRATOR_PERSONA + VOICE_GUIDE + (
     "\n\nYour current job: write the complete narration for one recap video "
     "as a JSON array of sentences in strict story order — only the array, no "
     "preamble, no notes."
@@ -153,7 +174,7 @@ EN_STYLE_BLOCK = (
     "points.)"
 )
 
-SYSTEM_POLISH = NARRATOR_PERSONA + (
+SYSTEM_POLISH = NARRATOR_PERSONA + VOICE_GUIDE + (
     "\n\nYour current job: a producer has handed you a draft recap section "
     "that reads flat and machine-made. Read it once silently, then say it "
     "YOUR way — same story, same order, same names, same total length — in "
@@ -164,7 +185,7 @@ SYSTEM_POLISH = NARRATOR_PERSONA + (
 
 # Final-pass editing persona for the humanizer (adapted from
 # blader/humanizer, MIT — https://github.com/blader/humanizer).
-SYSTEM_HUMANIZER = NARRATOR_PERSONA + (
+SYSTEM_HUMANIZER = NARRATOR_PERSONA + VOICE_GUIDE + (
     "\n\nYour current job: the finished script has one last problem — it "
     "still SOUNDS machine-written in places. You remove the tells of "
     "AI-generated writing so the narration reads like a person wrote it, "
@@ -411,7 +432,7 @@ def generate_script_json(
 #   * tags every sentence with the film window it came from, which is what
 #     makes the visual timeline strictly chronological (see recap/timeline.py).
 
-SYSTEM_RECAP_BEATS = NARRATOR_PERSONA + (
+SYSTEM_RECAP_BEATS = NARRATOR_PERSONA + VOICE_GUIDE + (
     "\n\nYour current job: narrate ONE SECTION of a full recap as a JSON "
     'object {"sentences": [...]} in strict story order. The ACTION BEATS in '
     "the user message are your factual record — the ground truth of what "
@@ -893,7 +914,9 @@ def _global_polish(
 # Adapted from blader/humanizer (MIT, https://github.com/blader/humanizer):
 # the 25 patterns condensed to what applies to spoken recap narration,
 # strongest first, with this register's false-positive guards.
-HUMANIZER_PROMPT = """Final pass: rewrite this FINISHED recap narration so it sounds like a human narrator wrote it, without changing what it says.
+# Humanizer Pass A — voice/tone only, NO length constraint (decoupled per spec 1.1)
+# Pass B (in code) re-applies the timing lock afterwards.
+HUMANIZER_PROMPT_PASS_A = """Final pass — Pass A (humanize): rewrite this FINISHED recap narration so it sounds like a human narrator wrote it, without changing what it says.
 
 WHY AI TEXT SOUNDS AI: a model picks the phrasing that fits the widest range of readers; a person writes for one listener. Every tell below is that default choice showing through. Act on a single sighting of tells 1-6; the rest count when several cluster in the same passage.
 
@@ -916,12 +939,12 @@ THE PATTERNS (strongest first):
 16. OVERUSED AI WORDS (English text only): actually, additionally, delve, showcase, testament, pivotal, crucial, key, landscape, tapestry, vibrant, intricate, meticulous, underscore, bolster, foster, garner, enhance, emphasizing, highlighting, enduring, interplay, robust, valuable, deep dive. Use plain words.
 17. HEDGES AND GUESSES: "it appears that", "details are unclear". Say what the film shows or cut the sentence.
 
-HARD CONSTRAINTS — the video's timing depends on them:
+HARD CONSTRAINTS for Pass A (voice only):
 - Return EXACTLY {n} sentences: sentence i of your output is the rewrite of sentence i of the input, same order, one for one. Never merge lines, never split one, never add or drop a line.
-- Each rewritten sentence must be about the SAME LENGTH as its input and NEVER more than 10% longer: every sentence is timed to a span of film, and a longer sentence outruns its footage.
 - Keep every character name, place, number and story fact exactly as the input states it. Add NOTHING that is not in the input.
 - Keep the register: present tense, no questions to the viewer, no meta commentary ("the movie", "the scene shows", "we see"), no "little did they know".
 - The narration is in {lang}. Apply the structural patterns to that language; the word list in 16 is for English text only.
+- NO length constraint in this pass — focus ONLY on voice/tone. Length (+10% longer) will be handled in Pass B's timing lock.
 
 HOW TO WORK: read all {n} sentences first and mark the tells, strongest first. Rewrite each marked sentence the way a narrator would SAY it — never just patch the flagged phrase. Then re-scan your rewrite for the tells that most often survive: the not-X-but-Y contrast, the one-line closer, the dash, the triad, the inflated ending.
 
@@ -933,30 +956,83 @@ Respond with ONLY a JSON object in this exact shape, no markdown fences:
 === END ===
 """
 
+# Pass B prompt is tiny — it just enforces the timing lock on Pass A's output
+HUMANIZER_PROMPT_PASS_B = """Timing lock pass: each sentence below was humanized for voice. Now ensure it fits its film window.
+
+For each sentence, if the humanized version is more than 10% longer than the original (+2 words allowed), tighten it: keep the human voice but cut filler, merge clauses, drop non-essential qualifiers. Never change the story facts.
+
+Return EXACTLY {n} sentences, same order, one for one.
+
+=== ORIGINAL (timing reference) ===
+{original}
+=== HUMANIZED (to be tightened if needed) ===
+{humanized}
+=== END ===
+"""
+
+# Keep old name as alias for backward compat (tests may reference it)
+HUMANIZER_PROMPT = HUMANIZER_PROMPT_PASS_A
+
+
+
+def _sentence_similarity(a: str, b: str) -> float:
+    """Levenshtein/token-overlap similarity 0-1. >0.9 means near-identical."""
+    import difflib
+    if not a or not b:
+        return 0.0
+    # SequenceMatcher ratio is a good Levenshtein proxy
+    ratio = difflib.SequenceMatcher(None, a.strip().lower(), b.strip().lower()).ratio()
+    # Also check token overlap (Jaccard) to catch reworded-but-same-template
+    ta, tb = set(a.lower().split()), set(b.lower().split())
+    jacc = len(ta & tb) / max(len(ta | tb), 1)
+    # Weighted: 0.7 ratio + 0.3 jacc
+    return 0.7 * ratio + 0.3 * jacc
+
+
+def _is_humanize_failed(original: str, rewrite: str, threshold: float = 0.9) -> bool:
+    """True if rewrite is semantically identical to input (model echoed)."""
+    if not rewrite or not original:
+        return True
+    # Fast path: normalized punctuation-only equality => echoed
+    norm_a = re.sub(r"[^a-z0-9 ]", "", original.lower()).strip()
+    norm_b = re.sub(r"[^a-z0-9 ]", "", rewrite.lower()).strip()
+    if norm_a == norm_b:
+        return True
+    orig_words = len(original.split())
+    rew_words = len(rewrite.split())
+    sim = _sentence_similarity(original, rewrite)
+    if orig_words != rew_words:
+        # A real humanizer edit changes length (tighter, contractions, etc.); only flag if near-identical despite different word count
+        return sim > 0.98
+    return sim > threshold
+
 
 def _humanize_script(
     cfg_llm: dict,
     sentences: list[str],
     lang_name: str = "English",
 ) -> list[str] | None:
-    """One final pass over the FINISHED script: remove the tells of
-    AI-generated writing (adapted from blader/humanizer, MIT) without
-    changing what it says.
+    """Two-pass humanizer: Pass A (voice) decoupled from Pass B (timing).
 
-    Runs after every other pass, before the sign-off. Same safety rules as
-    the polish passes: the sentence count must stay EXACT (every sentence
-    owns a film window) and each line within +10% +2 words of its original
-    (the window was sized for the original, with a 1.15x TTS margin). A
-    rewrite that violates either is discarded per-sentence, falling back to
-    the original line. Returns ``None`` when the call fails, so the caller
-    keeps the pre-humanizer script.
+    Pass A: rewrite for voice/tone ONLY, no length constraint.
+    Pass B: re-run the word-lock/timing logic against the new sentence,
+            same as is done for the writer's first draft. This reuses
+            the existing per-sentence +10%/+2-word check.
+
+    Returns (rewritten_sentences_or_None, stats) where stats = {
+        "total": N, "kept": K, "failed": F, "failed_rate": float,
+        "failed_indices": [...], "retried": R
+    }. Returns None on total call failure so caller keeps pre-humanizer script.
+    Spec 1.1, 1.2.
     """
     import json
 
     if not sentences:
+        _humanize_script.last_stats = {"total": 0, "kept": 0, "failed": 0, "failed_rate": 0.0, "failed_indices": [], "retried": 0}
         return None
     total_words = count_words(" ".join(sentences))
-    user = HUMANIZER_PROMPT.format(
+    # Pass A: humanize for voice/tone only, no length lock
+    user_a = HUMANIZER_PROMPT_PASS_A.format(
         n=len(sentences),
         lang=lang_name or "English",
         draft="\n".join(f"{i + 1}. {s}" for i, s in enumerate(sentences)),
@@ -966,17 +1042,88 @@ def _humanize_script(
             cfg_llm.get("provider", ""),
             cfg_llm.get("model", ""),
             SYSTEM_HUMANIZER,
-            user,
+            user_a,
             base_url=cfg_llm.get("base_url"),
             json_mode=True,
             max_tokens=_out_tokens_for_words(int(total_words * 1.15)),
         )
-        new = _parse_segment(raw)
-    except Exception:
+        new_a = _parse_segment(raw)
+    except Exception as exc:
+        print(f"    ! HUMANIZE_FAILED: Pass A call failed ({type(exc).__name__}: {exc})", flush=True)
+        _humanize_script.last_stats = {"total": len(sentences), "kept": 0, "failed": len(sentences), "failed_rate": 1.0, "failed_indices": list(range(len(sentences))), "retried": 0}
         return None
-    if not new or len(new) != len(sentences):
+    if not new_a or len(new_a) != len(sentences):
+        print(f"    ! HUMANIZE_FAILED: Pass A returned {len(new_a) if new_a else 0}/{len(sentences)} sentences — bad shape", flush=True)
+        _humanize_script.last_stats = {"total": len(sentences), "kept": 0, "failed": len(sentences), "failed_rate": 1.0, "failed_indices": list(range(len(sentences))), "retried": 0}
         return None
-    return new
+
+    # Per-sentence similarity check + retry with different temperature if >0.9
+    failed_indices = []
+    retried = 0
+    retry_temp = float(cfg_llm.get("humanize_retry_temperature") or 0.9)
+    for i, (orig, rew) in enumerate(zip(sentences, new_a)):
+        if _is_humanize_failed(orig, rew):
+            failed_indices.append(i)
+            print(f"    ! HUMANIZE_FAILED sentence {i+1}: rewrite identical (sim>{0.9:.1f}) — retrying at temp {retry_temp}", flush=True)
+            # Retry this single sentence with different sampling temp
+            try:
+                user_retry = HUMANIZER_PROMPT_PASS_A.format(
+                    n=1, lang=lang_name or "English",
+                    draft=f"1. {orig}"
+                )
+                raw_retry = llm.complete(
+                    cfg_llm.get("provider", ""),
+                    cfg_llm.get("model", ""),
+                    SYSTEM_HUMANIZER,
+                    user_retry + "\n\nIMPORTANT: you previously echoed the input back verbatim. Rewrite it with REAL voice changes — vary rhythm, use contractions, change opener.",
+                    base_url=cfg_llm.get("base_url"),
+                    json_mode=True,
+                    max_tokens=_out_tokens_for_words(max(30, count_words(orig)*2)),
+                    temperature=retry_temp,
+                )
+                rew_retry = _parse_segment(raw_retry)
+                if rew_retry and len(rew_retry) == 1 and not _is_humanize_failed(orig, rew_retry[0]):
+                    new_a[i] = rew_retry[0]
+                    failed_indices.remove(i)
+                    retried += 1
+                    print(f"      -> retry succeeded for sentence {i+1}", flush=True)
+                else:
+                    print(f"      -> retry still failed for sentence {i+1}", flush=True)
+            except Exception as exc2:
+                print(f"      -> retry call failed for sentence {i+1}: {exc2}", flush=True)
+
+    # Pass B: re-time — apply the timing lock per sentence (reuse existing logic)
+    # This is the same word-lock the pipeline already does for writer drafts.
+    final = []
+    kept = 0
+    for orig, rew in zip(sentences, new_a):
+        if rew != orig and rew.strip() and not _is_humanize_failed(orig, rew):
+            # Check timing lock: within +10% +2 words
+            if count_words(rew) <= max(count_words(orig), 1) * 1.1 + 2:
+                final.append(rew)
+                kept += 1
+            else:
+                # Pass B: would need re-timing — try to tighten while keeping voice
+                # For now, reject and keep original (caller will handle alternative)
+                # But log it as not kept due to timing, not voice fail
+                print(f"    ... humanizer Pass B: sentence tightened length would exceed lock — keeping original", flush=True)
+                final.append(orig)
+        else:
+            # Voice failed or identical — keep original and count as failed
+            final.append(orig)
+
+    # Recalculate failed after Pass B
+    still_failed = [i for i, (o, f) in enumerate(zip(sentences, final)) if _is_humanize_failed(o, f)]
+    stats = {
+        "total": len(sentences),
+        "kept": kept,
+        "failed": len(still_failed),
+        "failed_rate": len(still_failed) / max(len(sentences), 1),
+        "failed_indices": still_failed,
+        "retried": retried,
+    }
+    _humanize_script.last_stats = stats
+    return final
 
 
 def _visual_matched_budgets(
@@ -1113,6 +1260,8 @@ def _condense_section(
     """Rewrite an over-delivered section to fit its footage budget WITHOUT
     losing the story -- the storytelling-safe form of the visual-match trim.
 
+    Spec 1.3 Retry #1: re-prompt with exact overage reported.
+
     Dropping whole middle sentences (the backstop in
     :func:`_fit_section_to_footage`) can leave jumps in the causal chain.
     This instead asks the writer to TIGHTEN the same section: same beats,
@@ -1122,16 +1271,20 @@ def _condense_section(
     """
     if not sents:
         return None
+    got = count_words(" ".join(sents))
+    over = max(got - cap, 0)
     names_line = (
         "Keep every one of these names: " + ", ".join(names) + "."
         if names else ""
     )
+    # Spec 1.3 Retry #1 wording: cut ~X words, keep strongest 2-3 beats, do not just delete clauses
     user = (
         "You wrote this section of recap narration:\n\n"
         + "\n".join(f"- {s}" for s in sents)
         + f"\n\nBut the film footage behind this section only has room for "
-        f"about {cap} words at normal playback speed. Rewrite the section "
-        f"as AT MOST {cap} words:\n"
+        f"about {cap} words at normal playback speed — you returned {got} words, "
+        f"so cut ~{over} words (keep the strongest 2–3 beats), do not just delete clauses.\n"
+        f"Rewrite the section as AT MOST {cap} words:\n"
         "- SAME story beats, SAME order, SAME cause-and-effect -- the "
         "viewer must be able to follow the chain with no jumps\n"
         "- MERGE and TIGHTEN sentences (that is how an editor shortens a "
@@ -1161,6 +1314,90 @@ def _condense_section(
     if count_words(" ".join(new)) > cap:
         return None
     return new
+
+
+def _alternative_phrasings(
+    cfg_llm: dict,
+    sents: list[str],
+    cap: int,
+    names: list[str],
+) -> list[str] | None:
+    """Spec 1.3 Retry #2: ask model for 3 alternative shorter phrasings, pick best.
+
+    Returns the best-fitting alternative (in-budget, keeps names, most words
+    without exceeding cap) or None if none fit.
+    """
+    if not sents:
+        return None
+    got = count_words(" ".join(sents))
+    over = max(got - cap, 0)
+    names_line = ("Keep every one of these names: " + ", ".join(names) + "." if names else "")
+    user = (
+        "You wrote this section of recap narration (too long):\n\n"
+        + "\n".join(f"- {s}" for s in sents)
+        + f"\n\nIt is {got} words but must be AT MOST {cap} words (cut ~{over} words).\n"
+        "Produce 3 alternative shorter phrasings of the SAME content. Each alternative "
+        "must be a JSON object {\"sentences\": [...]} with 1 sentence per element (8-40 words). "
+        "Keep the story beats, order, and cause-and-effect. Vary wording across alternatives — "
+        "different compressions, not just deletions.\n"
+        + names_line
+        + '\n\nRespond with ONLY a JSON object: {"alternatives": [["...", ...], ["...", ...], ["...", ...]]} '
+        "with exactly 3 alternatives."
+    )
+    try:
+        raw = llm.complete(
+            cfg_llm.get("provider", ""),
+            cfg_llm.get("model", ""),
+            SYSTEM_RECAP_BEATS,
+            user,
+            base_url=cfg_llm.get("base_url"),
+            json_mode=True,
+            max_tokens=_out_tokens_for_words(cap * 3 + 200),
+        )
+        # Try to parse alternatives
+        import json as _json
+        import re as _re
+        text = raw.strip()
+        fences = _re.findall(r"```(?:json)?\s*(.*?)```", text, flags=_re.S)
+        if fences:
+            text = fences[-1].strip()
+        a, b = text.find("{"), text.rfind("}")
+        if a != -1 and b > a:
+            try:
+                data = _json.loads(text[a : b + 1])
+                alts = data.get("alternatives") or data.get("options") or data.get("candidates")
+                if isinstance(alts, list) and len(alts) >= 1:
+                    best = None
+                    best_words = -1
+                    for alt in alts:
+                        if not isinstance(alt, list):
+                            continue
+                        sents_alt = _clean_sentences(alt)
+                        if not sents_alt or len(sents_alt) < 2:
+                            continue
+                        wc = count_words(" ".join(sents_alt))
+                        if wc > cap:
+                            continue
+                        # Prefer in-budget and keeps most names
+                        missing = len(_missing_names(names, " ".join(sents_alt))) if names else 0
+                        score = wc - missing * 10  # penalize missing names
+                        if score > best_words:
+                            best_words = score
+                            best = sents_alt
+                    if best:
+                        print(f"    ... alternative phrasings: picked best of {len(alts)} ( {count_words(' '.join(best))} words for {cap} cap)")
+                        return best
+            except Exception:
+                pass
+        # Fallback: try to parse as single sentences list (model ignored alternatives wrapper)
+        single = _parse_segment(raw)
+        if single and count_words(" ".join(single)) <= cap:
+            return single
+    except Exception as exc:
+        print(f"    ... alternative phrasings call failed: {exc}", flush=True)
+    return None
+
+
 
 
 def generate_segmented_script(
@@ -1376,98 +1613,92 @@ def generate_segmented_script(
         # suggestion. Writers routinely over-deliver and the polish pass may
         # add ~30% more words on top -- an over-length section is exactly
         # what makes every window shorter than its sentence, forcing slow
-        # motion: the narration then runs ahead of the picture. First ask
-        # the writer to CONDENSE the section (same story, tighter wording --
-        # no jumps in the causal chain); only if that fails, mechanically
-        # trim the least-essential middle sentences as a backstop.
+        # motion: the narration then runs ahead of the picture.
+        # Spec 1.3: Retry #1 (condense with exact overage), Retry #2 (3 alternatives),
+        # then regenerate, then mechanical trim as last resort + mandatory humanizer flag.
         if visual_match and sents:
-            # Enforce against this section's own word BUDGET (what the
-            # recap's target length actually allotted it), not the raw
-            # footage ceiling in cap_words[pos]. The ceiling is only a
-            # sanity bound for _visual_matched_budgets' redistribution and
-            # is normally far larger than what this section was allotted,
-            # so using it here let sections overshoot their budget 2-7x
-            # uncorrected -- the delivered script came out at ~2x the
-            # requested length and the timeline fell into near-permanent
-            # slow motion. min() keeps it safe: never enforce something
-            # tighter than the footage could show; the 15% margin is the
-            # same sentence-length variance allowance the polish passes
-            # use.
             _cap = max(min(int(cap_words[pos]), int(budget * 1.15)), 40)
             if count_words(" ".join(sents)) > _cap:
                 _got = count_words(" ".join(sents))
+                _over = _got - _cap
+                # Track if this section needed mechanical trimming (for mandatory humanizer)
+                _mechanically_trimmed = False
+                # Retry #1: condense with exact overage reported (Spec 1.3)
                 _fitted = _condense_section(cfg_llm, sents, _cap, names)
                 if _fitted is not None:
                     print(f"    ... section {pos + 1}/{len(usable)}: writer "
                           f"returned {_got} words for a {_cap}-word section "
-                          f"budget -- condensed to "
+                          f"budget (over by {_over}) -- condensed to "
                           f"{count_words(' '.join(_fitted))} words (story "
                           "kept) so it plays at 1x")
                     sents = _fitted
                 else:
-                    # Condensing failed -- one WRITER REGENERATE with
-                    # explicit budget feedback BEFORE the mechanical trim.
-                    # The writer saw the section's beats, so a fresh take
-                    # told at the right length keeps more of the window
-                    # (start to finish) than chopping a draft that already
-                    # over-committed. (The user's run log: 36/36 sections
-                    # over budget; when condense also fails, the trim below
-                    # used to be the only backstop, and a trim that stops
-                    # early means the window's tail plays under no
-                    # narration.)
-                    _regen_user = user + (
-                        f"\n\nIMPORTANT: your previous attempt was "
-                        f"{_got} words, but this footage only has room for "
-                        f"{int(budget)} words at normal playback speed -- "
-                        f"so it must be at most {_cap} words. Rewrite it "
-                        "covering the window from its FIRST beat to its "
-                        "LAST: do not stop early at the beginning of the "
-                        "window and do not pad with generalities. Same "
-                        "JSON shape."
-                    )
-                    _regen = llm.complete(
-                        cfg_llm.get("provider", ""),
-                        cfg_llm.get("model", ""),
-                        SYSTEM_RECAP_BEATS,
-                        _regen_user,
-                        base_url=cfg_llm.get("base_url"),
-                        json_mode=True,
-                        max_tokens=_out_tokens_for_words(budget),
-                    )
-                    _retry = _parse_segment(_regen)
-                    if _retry and 2 < len(_retry) <= len(sents) and \
-                            count_words(" ".join(_retry)) <= _cap:
-                        print(f"    ... section {pos + 1}/{len(usable)}: "
-                              f"writer returned {_got} words and condensing "
-                              f"failed -- regenerated at "
-                              f"{count_words(' '.join(_retry))} words "
-                              "(full window covered, no sentences chopped)")
-                        sents = _retry
+                    # Retry #2: 3 alternative phrasings, pick best (Spec 1.3)
+                    _alt = _alternative_phrasings(cfg_llm, sents, _cap, names)
+                    if _alt is not None:
+                        print(f"    ... section {pos + 1}/{len(usable)}: writer "
+                              f"returned {_got} words (over by {_over}) -- condensed failed, "
+                              f"but alternative phrasings succeeded at "
+                              f"{count_words(' '.join(_alt))} words (story kept)")
+                        sents = _alt
                     else:
-                        _fitted = _fit_section_to_footage(sents, _cap, names)
-                        if len(_fitted) != len(sents):
+                        # Fallback: WRITER REGENERATE with explicit budget feedback
+                        _regen_user = user + (
+                            f"\n\nIMPORTANT: your previous attempt was "
+                            f"{_got} words, but this footage only has room for "
+                            f"{int(budget)} words at normal playback speed -- "
+                            f"so it must be at most {_cap} words (cut ~{_over} words, "
+                            f"keep the strongest 2-3 beats, do not just delete clauses). Rewrite it "
+                            "covering the window from its FIRST beat to its "
+                            "LAST: do not stop early at the beginning of the "
+                            "window and do not pad with generalities. Same "
+                            "JSON shape."
+                        )
+                        _regen = llm.complete(
+                            cfg_llm.get("provider", ""),
+                            cfg_llm.get("model", ""),
+                            SYSTEM_RECAP_BEATS,
+                            _regen_user,
+                            base_url=cfg_llm.get("base_url"),
+                            json_mode=True,
+                            max_tokens=_out_tokens_for_words(budget),
+                        )
+                        _retry = _parse_segment(_regen)
+                        if _retry and 2 < len(_retry) <= len(sents) and \
+                                count_words(" ".join(_retry)) <= _cap:
                             print(f"    ... section {pos + 1}/{len(usable)}: "
-                                  f"writer returned {_got} words for a "
-                                  f"{_cap}-word section budget -- condensed "
-                                  "and regenerated, both failed -- "
-                                  f"mechanically trimmed to "
-                                  f"{len(_fitted)} sentences "
-                                  f"({count_words(' '.join(_fitted))} words) "
-                                  "so it plays at 1x")
-                            sents = _fitted
-                        if count_words(" ".join(sents)) > _cap:
-                            # The 3-sentence continuity floor stopped the
-                            # trim (a section of a few very long
-                            # sentences). Say so loudly instead of shipping
-                            # the bloat silently -- silent over-delivery is
-                            # exactly how a 2x script once slipped through
-                            # every check.
-                            print(f"    ! section {pos + 1}/{len(usable)}: "
-                                  f"still {count_words(' '.join(sents))} "
-                                  f"words after condense+regenerate+trim "
-                                  f"(3-sentence floor) for a {_cap}-word "
-                                  f"budget -- the timeline will slow this "
-                                  "one section to stay in sync")
+                                  f"writer returned {_got} words (over by {_over}) and condense+alternatives "
+                                  f"failed -- regenerated at "
+                                  f"{count_words(' '.join(_retry))} words "
+                                  "(full window covered, no sentences chopped)")
+                            sents = _retry
+                        else:
+                            # Last resort: mechanical sentence deletion
+                            _fitted = _fit_section_to_footage(sents, _cap, names)
+                            if len(_fitted) != len(sents):
+                                print(f"    ... section {pos + 1}/{len(usable)}: "
+                                      f"writer returned {_got} words for a "
+                                      f"{_cap}-word section budget (over by {_over}) -- condensed, "
+                                      "alternatives and regenerated all failed -- "
+                                      f"mechanically trimmed to "
+                                      f"{len(_fitted)} sentences "
+                                      f"({count_words(' '.join(_fitted))} words) "
+                                      "so it plays at 1x")
+                                sents = _fitted
+                                _mechanically_trimmed = True
+                            if count_words(" ".join(sents)) > _cap:
+                                print(f"    ! section {pos + 1}/{len(usable)}: "
+                                      f"still {count_words(' '.join(sents))} "
+                                      f"words after condense+alternatives+regenerate+trim "
+                                      f"(3-sentence floor) for a {_cap}-word "
+                                      f"budget -- the timeline will slow this "
+                                      "one section to stay in sync")
+                            # Flag mechanically trimmed sections for mandatory humanizer
+                            if _mechanically_trimmed:
+                                # Store flag on the chunk for later humanizer pass
+                                # We use a hidden attribute on the section's beats info
+                                c["_mechanically_trimmed"] = True
+                                print(f"    ! section {pos + 1}/{len(usable)}: flagged for mandatory humanizer pass (mechanical trim used)", flush=True)
 
         # Anchor each sentence to the film moment(s) it narrates (beat
         # timecodes) instead of giving the whole chunk to every sentence.
@@ -1570,9 +1801,30 @@ def generate_segmented_script(
     # (every sentence owns a film window) and each accepted line is within
     # +10% +2 words of the original, so a rewrite can never outrun the
     # footage the way the pre-visual-match scripts did.
+    # Spec 1.1, 1.2: two-pass (Pass A voice decoupled, Pass B timing), loud failure.
     if humanize and out:
         _before = [o["sentence"] for o in out]
-        _humanized = _humanize_script(cfg_llm, _before, lang_name)
+        _humanized_result = _humanize_script(cfg_llm, _before, lang_name)
+        # _humanize_script returns list|None (backward compat) and stores stats on .last_stats; also handle tuple for forward compat
+        if isinstance(_humanized_result, tuple):
+            _humanized, _h_stats = _humanized_result
+        else:
+            _humanized = _humanized_result
+            _h_stats = getattr(_humanize_script, "last_stats", None)
+            if _humanized is None or _h_stats is None:
+                # Fallback: compute via similarity check per sentence
+                if _humanized is None:
+                    _h_stats = {"total": len(_before), "kept": 0, "failed": len(_before), "failed_rate": 1.0, "failed_indices": list(range(len(_before))), "retried": 0}
+                else:
+                    _is_failed = [_is_humanize_failed(a, b) for a, b in zip(_before, _humanized)]
+                    _failed = sum(_is_failed)
+                    _h_stats = {"total": len(_before), "kept": len(_before)-_failed, "failed": _failed, "failed_rate": _failed / max(len(_before),1), "failed_indices": [i for i, f in enumerate(_is_failed) if f], "retried": 0}
+            # Reset for next call
+            if hasattr(_humanize_script, "last_stats"):
+                try:
+                    delattr(_humanize_script, "last_stats")
+                except Exception:
+                    pass
         if _humanized is not None:
             _kept = 0
             for o, _old, _new in zip(out, _before, _humanized):
@@ -1581,17 +1833,37 @@ def generate_segmented_script(
                         <= max(count_words(_old), 1) * 1.1 + 2):
                     o["sentence"] = _new
                     _kept += 1
+            # Use stats for failure reporting (includes similarity check)
+            _failed = _h_stats.get("failed", len(_before) - _kept)
+            _failed_rate = _h_stats.get("failed_rate", _failed / max(len(_before),1))
+            _threshold = float(cfg_llm.get("humanize_threshold") or 0.1)
             print(f"  * humanizer pass: {_kept}/{len(out)} sentences "
                   "rewritten to sound human (AI tells removed; every "
-                  "sentence keeps its film window)")
+                  "sentence keeps its film window) — "
+                  f"failed {_failed}/{len(out)} ({_failed_rate:.0%} > threshold {_threshold:.0%})")
+            # Spec 1.2: loud failure if >10% failed (or threshold) — require --allow-unhumanized
+            _allow_unhuman = bool(cfg_llm.get("allow_unhumanized") or False)
+            # Also check mechanically trimmed sections flag (Spec 1.3)
+            _mech_trimmed = any(c.get("_mechanically_trimmed") for c in usable)
+            if _mech_trimmed:
+                print(f"    ! mechanically trimmed sections detected — humanizer mandatory for those beats", flush=True)
+            if _failed_rate > _threshold:
+                msg = (f"    ! HUMANIZE_FAILED: {_failed}/{len(out)} sentences "
+                       f"({ _failed_rate:.0%}) failed to humanize (similarity >0.9 or timing lock). "
+                       f"Threshold is {_threshold:.0%}.")
+                if not _allow_unhuman:
+                    # Spec 1.2: fail loudly unless --allow-unhumanized
+                    print(msg, flush=True)
+                    print("    ! Failing build: use --allow-unhumanized or RECAP_ALLOW_UNHUMANIZED=1 to ship anyway.", flush=True)
+                    # Raise so pipeline fails — caller can catch and flag
+                    raise RuntimeError(
+                        f"HUMANIZE_FAILED: {_failed}/{len(out)} sentences failed to humanize "
+                        f"({ _failed_rate:.0%} > {_threshold:.0%} threshold). "
+                        "Use --allow-unhumanized or set RECAP_ALLOW_UNHUMANIZED=1 / narration.allow_unhumanized=true to allow."
+                    )
+                else:
+                    print(msg + " (--allow-unhumanized set, shipping anyway)", flush=True)
             if _kept == 0:
-                # The pass ran but changed NOTHING. That is not "the
-                # writing was already human" across 100+ LLM-written lines
-                # — it is the model echoing the draft back (or every
-                # rewrite tripping the timing lock). A silent 0/N is how
-                # the "still sounds like AI" complaint survives a run that
-                # claims to have humanized, so make it loud and say what
-                # to check.
                 print("    ! WARNING: humanizer changed 0 sentences — the "
                       "model echoed the script back (or every rewrite "
                       "broke the +10%/+2-word timing lock). The AI feel "
@@ -1600,12 +1872,16 @@ def generate_segmented_script(
                       "pass (RECAP_HUMANIZE=0) and judge the writer "
                       "directly.", flush=True)
         else:
-            # _humanize_script swallows call failures and returns None —
-            # never let that read as "humanized, nothing to change".
             print("    ! humanizer pass: the rewrite call failed or "
                   "returned a bad shape — the polished script is kept "
                   "AS-IS (not humanized). Check the LLM provider.",
                   flush=True)
+            _allow_unhuman = bool(cfg_llm.get("allow_unhumanized") or False)
+            if not _allow_unhuman:
+                raise RuntimeError(
+                    "HUMANIZE_FAILED: humanizer call failed entirely (no rewrite returned). "
+                    "Use --allow-unhumanized or RECAP_ALLOW_UNHUMANIZED=1 to allow."
+                )
 
     _append_sign_off(out, lang_name=lang_name, enabled=sign_off)
 

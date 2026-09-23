@@ -66,6 +66,9 @@ _DEFAULTS: dict[str, Any] = {
         # exact and each line within +10% +2 words, so a rewrite can
         # never outrun its footage. RECAP_HUMANIZE=0 disables.
         "humanize": True,
+        "allow_unhumanized": False,  # if humanizer fails >10%, fail build unless this is true
+        "humanize_threshold": 0.1,  # failure rate >10% triggers hard failure
+        "humanize_retry_temperature": 0.9,  # retry temp for HUMANIZE_FAILED sentences
     },
     # Step D — chronological timeline (replaces semantic vector matching).
     # Beats advance monotonically through the film and every beat's visual is
@@ -136,13 +139,20 @@ _DEFAULTS: dict[str, Any] = {
         "provider": "gemini",      # gemini (free, multimodal) | openai | groq
         "model": "gemini-3.6-flash",  # Gemini Flash models are multimodal
         "base_url": None,          # None = provider default (Gemini OpenAI-compat)
+        "fallback_provider": "",   # e.g. "openai" — used when primary 503s persist
+        "fallback_model": "",      # e.g. "gpt-4o-mini" (auto-picks if empty + key exists)
+        "fallback_base_url": None,
         "cadence_seconds": 20.0,   # sample ~every 20s of film
         "scene_threshold": 0.35,   # also caption real shot changes above this
-        "max_frames": 400,         # hard cap per movie (API-quota friendly)
+        "max_frames": 600,         # hard cap per movie (stratified sampling, full coverage)
         "width": 512,              # JPEG width sent to the vision model
-        "frames_per_request": 4,   # frames per API call (free-tier economy)
+        "frames_per_request": 6,   # frames per API call: 6 => 100 req for 600 frames (was 4=>150, less hammering)
         "sweep_pause_seconds": 60.0,  # pause before the final sweep that
                                       # re-captures frames a 503 storm killed
+        "coverage_threshold": 0.99,  # hard gate: scriptwriting needs ≥99% captions
+        "allow_incomplete": False,  # set true / VISION_ALLOW_INCOMPLETE=1 to bypass gate
+        "max_consecutive_failures": 3,  # circuit breaker: after N failed batches, cooldown
+        "circuit_breaker_pause": 180.0,  # seconds to pause whole vision pass (3-5 min)
     },
     # LEGACY semantic vector matcher (retired from beat selection — the
     # chronological timeline in recap/timeline.py maps narration lines to film
@@ -290,6 +300,8 @@ def load_config(path: str | Path | None = None) -> dict:
         cfg["narration"]["humanize"] = os.environ[
             "RECAP_HUMANIZE"
         ].strip().lower() not in ("0", "false", "no", "off")
+    if os.environ.get("RECAP_ALLOW_UNHUMANIZED", "").strip().lower() in ("1", "true", "yes", "on"):
+        cfg["narration"]["allow_unhumanized"] = True
     # Vision pass toggles (see recap/vision.py). Keys come from the provider's
     # env var (gemini -> GEMINI_API_KEY), which _load_dotenv already imported.
     if "VISION_ENABLED" in os.environ:
@@ -302,6 +314,19 @@ def load_config(path: str | Path | None = None) -> dict:
         cfg["vision"]["model"] = os.environ["VISION_MODEL"].strip()
     if os.environ.get("VISION_BASE_URL"):
         cfg["vision"]["base_url"] = os.environ["VISION_BASE_URL"].strip()
+    if os.environ.get("VISION_FALLBACK_PROVIDER"):
+        cfg["vision"]["fallback_provider"] = os.environ["VISION_FALLBACK_PROVIDER"].strip().lower()
+    if os.environ.get("VISION_FALLBACK_MODEL"):
+        cfg["vision"]["fallback_model"] = os.environ["VISION_FALLBACK_MODEL"].strip()
+    if os.environ.get("VISION_FALLBACK_BASE_URL"):
+        cfg["vision"]["fallback_base_url"] = os.environ["VISION_FALLBACK_BASE_URL"].strip()
+    if os.environ.get("VISION_ALLOW_INCOMPLETE", "").strip().lower() in ("1", "true", "yes", "on"):
+        cfg["vision"]["allow_incomplete"] = True
+    if os.environ.get("VISION_COVERAGE_THRESHOLD"):
+        try:
+            cfg["vision"]["coverage_threshold"] = float(os.environ["VISION_COVERAGE_THRESHOLD"])
+        except ValueError:
+            pass
 
     # Language tags: zh -> configured zh_variant
     langs = []
@@ -336,6 +361,16 @@ def load_config(path: str | Path | None = None) -> dict:
     storage.bootstrap(cfg["project"]["_cache"])
 
     cfg["project"]["name"] = cfg["project"].get("name", "recap-project")
+    # Sync humanizer flags from narration into llm config so script module sees them via cfg_llm (Spec 1.2)
+    nar = cfg.get("narration", {})
+    llm_cfg = cfg.setdefault("llm", {})
+    if nar.get("allow_unhumanized") and not llm_cfg.get("allow_unhumanized"):
+        llm_cfg["allow_unhumanized"] = True
+    if "humanize_threshold" in nar and "humanize_threshold" not in llm_cfg:
+        llm_cfg["humanize_threshold"] = nar["humanize_threshold"]
+    if "humanize_retry_temperature" in nar and "humanize_retry_temperature" not in llm_cfg:
+        llm_cfg["humanize_retry_temperature"] = nar["humanize_retry_temperature"]
+
     return cfg
 
 

@@ -716,7 +716,7 @@ def test_humanizer_full_loop_keeps_timing() -> None:
     script_mod.llm.complete = fake_complete
     try:
         out = script_mod.generate_segmented_script(
-            [chunk], {"provider": "deepseek", "model": "x"}, 200,
+            [chunk], {"provider": "deepseek", "model": "x", "allow_unhumanized": True, "humanize_threshold": 0.5}, 200,
             words_per_minute=150, lang_name="Spanish",
             sign_off=False, visual_match=True, humanize=True,
         )
@@ -1039,7 +1039,7 @@ def test_humanizer_zero_changes_warns() -> None:
     try:
         with redirect_stdout(buf):
             script_mod.generate_segmented_script(
-                [chunk], {"provider": "deepseek", "model": "x"}, 150,
+                [chunk], {"provider": "deepseek", "model": "x", "allow_unhumanized": True, "humanize_threshold": 0.5}, 150,
                 words_per_minute=150, lang_name="Spanish",
                 sign_off=False, visual_match=True, humanize=True,
             )
@@ -1055,7 +1055,7 @@ def test_humanizer_zero_changes_warns() -> None:
     try:
         with redirect_stdout(buf2):
             script_mod.generate_segmented_script(
-                [chunk], {"provider": "deepseek", "model": "x"}, 150,
+                [chunk], {"provider": "deepseek", "model": "x", "allow_unhumanized": True}, 150,
                 words_per_minute=150, lang_name="Spanish",
                 sign_off=False, visual_match=True, humanize=True,
             )
