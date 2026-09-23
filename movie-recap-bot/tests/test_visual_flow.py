@@ -880,6 +880,193 @@ def test_rewindow_legacy_segments_fall_back_to_midpoint() -> None:
     print("ok: legacy (anchor-less) segments fall back to midpoint anchoring")
 
 
+def test_vision_pick_times_covers_full_film() -> None:
+    """THE USER'S LOG: the vision pass sampled 400 frames but the last one
+    sat at 3515s of a 6207s film -- the old "keep EVERY scene change, then
+    truncate the sorted list" logic ate its frame budget on the film's
+    early scenes (cuts cluster early), leaving the final 43% with ZERO
+    visual notes for the timeline to anchor on. Stratified bins must cover
+    the whole runtime."""
+    from recap import vision as vision_mod
+
+    # 740 scene changes, denser in the first half (fast intro)
+    scenes = [10.0 + i * (3500.0 / 500) for i in range(500)]
+    scenes += [3510.0 + i * (2690.0 / 240) for i in range(240)]
+
+    times = vision_mod.pick_times(6207.0, cadence=20.0, scenes=scenes,
+                                  max_frames=600)
+    assert times and len(times) <= 600
+    assert times == sorted(set(times)), "sorted + unique"
+    assert all(0 <= t <= 6206 for t in times)
+    # full-runtime coverage: the last frame is near the film's end, not
+    # truncated at ~57% like the old logic
+    assert times[-1] > 6207.0 * 0.95, f"last frame {times[-1]}s of 6207s"
+    # stratified: every 5% time-slice of the film gets at least one frame
+    for slice_idx in range(20):
+        lo = slice_idx * 6207.0 / 20
+        hi = (slice_idx + 1) * 6207.0 / 20
+        assert any(lo <= t < hi for t in times), \
+            f"time slice {slice_idx * 5}%-{(slice_idx + 1) * 5}% uncovered"
+    # real cuts are still preferred: most frames sit on a scene change
+    scene_set = {int(round(s)) for s in scenes}
+    on_cut = sum(1 for t in times if t in scene_set)
+    assert on_cut >= len(times) // 2, \
+        f"only {on_cut}/{len(times)} frames on real cuts"
+
+    # short film: the 5s-bin floor (18 bins for 90s), covered to the end
+    short = vision_mod.pick_times(90.0, cadence=20.0, scenes=[],
+                                  max_frames=600)
+    assert 18 <= len(short) <= 600
+    assert short[-1] > 80, "short film covered to its end"
+    print(f"ok: stratified vision sampling covers the whole film "
+          f"({len(times)} frames, last at {times[-1]}s of 6207s; "
+          f"{on_cut} on real cuts; 90s clip -> {len(short)} frames)")
+
+
+def test_shot_split_caps_long_shots() -> None:
+    """Sparse clause boundaries must not leave a 10s+ final shot (the
+    'longest shot is 10.1s -- one visual outlasting several sentences'
+    warning): _shot_split forces an extra mid-shot cut at max_shot."""
+    # 12s beat, single early clause break -> the old split gave shots of
+    # 1.2s + 10.8s; the cap must split the long one
+    shots = timeline._shot_split(12.0, [0.1], micro_target=2.4,
+                                 max_cuts=4, min_cut=1.2, max_shot=7.0)
+    assert abs(sum(d for d, _ in shots) - 12.0) < 1e-6, "A/V lock"
+    assert all(d <= 7.0 + 1e-6 for d, _ in shots), \
+        f"shot over the cap: {[round(d, 2) for d, _ in shots]}"
+    fr = [f for _, f in shots]
+    assert all(fr[i] < fr[i + 1] for i in range(len(fr) - 1)), \
+        "footage order must hold"
+
+    # even split of a long beat: no shot over the cap
+    shots2 = timeline._shot_split(20.0, None, micro_target=2.4,
+                                  max_cuts=4, min_cut=1.2, max_shot=7.0)
+    assert abs(sum(d for d, _ in shots2) - 20.0) < 1e-6
+    assert all(d <= 7.0 + 1e-6 for d, _ in shots2)
+
+    # cap disabled -> old behaviour (the long shot survives)
+    shots3 = timeline._shot_split(12.0, [0.1], micro_target=2.4,
+                                  max_cuts=4, min_cut=1.2, max_shot=0.0)
+    assert abs(sum(d for d, _ in shots3) - 12.0) < 1e-6
+    assert max(d for d, _ in shots3) > 7.0, "cap off = no forced re-cut"
+    print(f"ok: shot cap forces mid-shot cuts (12s beat -> max "
+          f"{max(d for d, _ in shots):.1f}s; cap-off -> "
+          f"{max(d for d, _ in shots3):.1f}s)")
+
+
+def test_overdelivery_regenerates_before_trimming() -> None:
+    """Writer over-delivers, condensing FAILS (returns over again) -- the
+    pipeline must issue ONE writer regenerate with explicit budget
+    feedback, and that in-budget full-window rewrite is what reaches the
+    timeline. The mechanical trim is the last resort only."""
+    import io
+    import json
+    from contextlib import redirect_stdout
+    from recap import script as script_mod
+
+    s = "The pilot wakes up in a forest full of tall dark trees."
+    over = [s] * 16                  # 192 words for a ~90-word cap
+    good = [                          # in-budget, covers the whole window
+        "The pilot wakes up hurt in a dark forest.",
+        "His burning plane crashes behind him.",
+        "A stranger with a gun inspects the wreck.",
+        "The pilot grabs the barrel and falls hard.",
+        "By morning the army is tracking his trail.",
+        "He crosses a frozen river to lose the dogs.",
+    ]
+
+    def fake_complete(provider, model, system, user, **kw):
+        if "AT MOST" in user:                 # the condense call: still over
+            return json.dumps({"sentences": over})
+        if "previous attempt was" in user:    # the regenerate call: in budget
+            return json.dumps({"sentences": good})
+        return json.dumps({"sentences": over})  # the section writer
+
+    chunk = {"index": 0, "start": 1000.0, "end": 1150.0,
+             "summary": "A pilot is shot down and hunted.",
+             "beats": [{"t": 1000.0 + i * 6.0, "text": f"beat {i}"}
+                       for i in range(25)]}
+    orig = script_mod.llm.complete
+    script_mod.llm.complete = fake_complete
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            out = script_mod.generate_segmented_script(
+                [chunk], {"provider": "deepseek", "model": "x"}, 80,
+                words_per_minute=150, lang_name="Spanish",
+                sign_off=False, visual_match=True, humanize=False,
+            )
+    finally:
+        script_mod.llm.complete = orig
+
+    log = buf.getvalue()
+    assert [o["sentence"] for o in out] == good, \
+        "the in-budget regenerate (not the chopped draft) is the script"
+    assert "regenerated at" in log and "full window covered" in log, log
+    assert "mechanically trimmed" not in log, \
+        "the trim is the last resort and must not fire here"
+    print("ok: over-delivery + failed condense -> one regenerate with "
+          "budget feedback; trim only as last resort")
+
+
+def test_humanizer_zero_changes_warns() -> None:
+    """The humanizer pass ran but the model echoed the script back: 0/N
+    kept must be LOUD (a silent 0/N is how the 'still sounds like AI'
+    complaint survives a run that claims to have humanized). A failed
+    rewrite call must be visible too, never read as 'nothing to change'."""
+    import io
+    import json
+    from contextlib import redirect_stdout
+    from recap import script as script_mod
+
+    sents = ["The pilot wakes up in a forest full of tall dark trees."] * 8
+    chunk = {"index": 0, "start": 1000.0, "end": 1150.0,
+             "summary": "A pilot is shot down.",
+             "beats": [{"t": 1000.0 + i * 6.0, "text": f"beat {i}"}
+                       for i in range(25)]}
+
+    def echo(provider, model, system, user, **kw):
+        return json.dumps({"sentences": sents})   # writer/condense/humanizer
+
+    def boom_humanizer(provider, model, system, user, **kw):
+        if "FINISHED SCRIPT" in user:
+            raise RuntimeError("api down")
+        return json.dumps({"sentences": sents})
+
+    orig = script_mod.llm.complete
+    script_mod.llm.complete = echo
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            script_mod.generate_segmented_script(
+                [chunk], {"provider": "deepseek", "model": "x"}, 150,
+                words_per_minute=150, lang_name="Spanish",
+                sign_off=False, visual_match=True, humanize=True,
+            )
+    finally:
+        script_mod.llm.complete = orig
+    log = buf.getvalue()
+    assert "humanizer pass: 0/8" in log, log
+    assert "WARNING" in log and "echoed" in log, \
+        "a 0-kept humanizer run must warn loudly"
+
+    script_mod.llm.complete = boom_humanizer
+    buf2 = io.StringIO()
+    try:
+        with redirect_stdout(buf2):
+            script_mod.generate_segmented_script(
+                [chunk], {"provider": "deepseek", "model": "x"}, 150,
+                words_per_minute=150, lang_name="Spanish",
+                sign_off=False, visual_match=True, humanize=True,
+            )
+    finally:
+        script_mod.llm.complete = orig
+    log2 = buf2.getvalue()
+    assert "humanizer pass" in log2 and "failed" in log2, \
+        "a failed humanizer call must be visible, not silent"
+    print("ok: humanizer 0-kept run warns loudly; a failed call is logged")
+
+
 def test_rewindow_overbudget_walks_contiguously() -> None:
     """A section whose measured narration genuinely exceeds its film zone
     keeps a contiguous, monotone walk (the slow-mo net then handles it --
@@ -1541,6 +1728,10 @@ if __name__ == "__main__":
     test_rewindow_legacy_segments_fall_back_to_midpoint()
     test_rewindow_overbudget_walks_contiguously()
     test_rewindow_preserves_unzoned_sentences()
+    test_vision_pick_times_covers_full_film()
+    test_shot_split_caps_long_shots()
+    test_overdelivery_regenerates_before_trimming()
+    test_humanizer_zero_changes_warns()
     test_enforcement_uses_section_budget_not_ceiling()
     test_measured_wpm_cache_roundtrip()
     test_narration_voice_one_resolution()

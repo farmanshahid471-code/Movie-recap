@@ -60,9 +60,14 @@ movie.mp4
 > **Vision cost:** it never bills DeepSeek. Image tokens are consumed on the
 > vision provider — free on the Gemini free tier (rate-limited); a paid key
 > bills ~cents per movie at 512px. The captions add a few thousand text tokens
-> to the DeepSeek summary prompts per movie. Frames ≈ movie length / 20 s
-> (≈300 for a 100-min film ≈ 75 API calls at 4 frames/request), cached per
-> movie so re-runs reuse them.
+> to the DeepSeek summary prompts per movie. Frames are chosen by
+> STRATIFIED sampling — the film is divided into time bins and each bin gets
+> one frame (the real shot change nearest the bin's middle when one exists,
+> else the bin's middle), so the WHOLE runtime is captioned: ≈600 frames for
+> a 100-min film (≈1 caption per 10 s, ≈150 API calls at 4 frames/request),
+> cached per movie so re-runs reuse them. (The old logic kept every scene
+> change and truncated the list, so cuts clustered early in the film ate the
+> budget and a 2h film's last ~43% had zero frames.)
 
 ### Run it locally (no Docker needed)
 
@@ -447,8 +452,11 @@ actually allotted, not the raw footage ceiling**: if the writer over-delivers
 (LLMs routinely return 1.5–2× their word budget, and the polish pass can add
 ~30% more), the section is first sent back for one **condense pass** —
 rewrite the same story beats, same order, tighter wording, the way an editor
-shortens a paragraph (no jumps in the causal chain) — and only if that fails
-is it mechanically trimmed to fit (least-essential middle sentences;
+shortens a paragraph (no jumps in the causal chain). If condensing fails
+(the model still overshoots), one **writer regenerate** is issued with
+explicit budget feedback ("your previous attempt was N words, this footage
+has room for M — rewrite covering the window first beat to last") and
+only if that also fails is the draft mechanically trimmed to fit (least-essential middle sentences;
 continuity ends and name-bearing lines kept). Every adjustment is
 logged (`writer returned 260 words for a 88-word section budget — condensed
 to 84 words (story kept)`), and a delivered script more than 35% over the
@@ -496,7 +504,9 @@ false` to go back to the old beat-count budgeting.
 **Motion guarantee — the picture never stops.** When a section's narration is
 longer than the film behind it (a dialogue-dense stretch), the timeline paces
 that window — `speed = window / narration`, clamped to `timeline.min_speed`
-(0.35x) — so the footage plays as gentle slow motion that stays locked to the
+(0.6x — a mild, barely-perceptible slow-down; starved sections are rare
+after the budget + anchor fixes, so this floor mostly never binds) — so the
+footage plays as gentle slow motion that stays locked to the
 moment being narrated. Exactly what a human editor does. Mid-film the picture
 is therefore ALWAYS moving: new footage at 1x, or the same moment in slow
 motion. A frozen frame can now occur only if the narration outlasts the
@@ -801,10 +811,15 @@ After a run, inspect `output/_work/beats_<lang>.json`: every beat carries its
   gives the old even split.
 * `snap_to_scenes` / `snap_tolerance` — land cuts on the film's real shot
   changes (PySceneDetect, cached; `pip install scenedetect[opencv]`).
-* `min_speed` (default 0.35) — the slow-motion floor for dialogue-dense
-  sections. Lower (0.25) = tighter narration sync but heavier slow-mo; higher
-  (0.6) = milder slow-mo with a slightly larger visual lead; 1.0 = never slow
-  down (sections then run ahead of the narration instead).
+* `min_speed` (default 0.6) — the slow-motion floor for dialogue-dense
+  sections. Lower (0.35/0.25) = tighter narration sync but heavier slow-mo;
+  higher (1.0) = never slow down (sections then run ahead of the narration
+  instead).
+* `max_shot_seconds` (default 7.0) — a single shot may never hold for more
+  than this many seconds of screen time; sparse clause boundaries used to
+  leave 10s+ final shots ("longest shot is 10.1s — one visual outlasting
+  several sentences"), so an extra mid-shot cut is forced when a segment
+  would exceed the cap. 0 disables.
 * `min_new_footage` (default 0.8) — minimum of genuinely new film a cut must
   show before it counts as a cut; smaller steps continue the shot seamlessly.
 * `max_lead_seconds` (default 3.0) — safety valve on how far the visuals may

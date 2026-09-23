@@ -361,3 +361,151 @@ The remaining sub-6 s drifts in the anchor audit are the honest case: several
 sentences narrating one busy beat share its zone and are walked forward so
 the film never rewinds. If a future run ever shows `visual sync: footage
 within >10s` in the log, `tests/repro_anchor.py` is the way to reproduce it.
+
+---
+---
+
+# Round 3 — full-film vision coverage, no more chopped sections, louder QC
+
+You reported the picture still did not stay with the voice, with four more
+concrete complaints. Two of the four were exactly as diagnosed; one was
+already handled by the engine (documented below so it can be trusted); the
+last was a real gap, now closed.
+
+---
+
+## 1. Vision frames stopped at ~57% of the film — CONFIRMED, FIXED
+
+`vision.pick_times()` kept **every** detected scene change ("they are
+story-critical") and then truncated the sorted list to `max_frames`. Scene
+changes cluster in the early scenes (fast intros, more cuts), so the frame
+budget was eaten before reaching the back half: your 2h film (740 cuts,
+400-frame cap) got its **last frame at 3515s** — the final 43% had zero
+visual notes, and the timeline had nothing to anchor on there.
+
+**Fix:** stratified sampling. The film is divided into time bins (one frame
+per bin, never finer than every 5s); each bin contributes the real shot
+change nearest the bin's middle when one exists, else the bin's middle.
+Every stretch of the film is captioned no matter how the cuts are
+distributed. `vision.max_frames` default raised 400 -> 600 (~1 caption per
+10s of a 100-min film, ~150 Gemini calls at 4 frames/request).
+
+Verified (`test_vision_pick_times_covers_full_film`): 6207s film with 740
+cuts denser in the first half -> 600 frames, **last at 6202s**, every 5%
+time-slice covered, 579/600 on real cuts; a 90s clip -> 18 frames covering
+it end to end.
+
+## 2. "Step A invents plot without a subtitle" — ALREADY FALSE, by design
+
+No code change needed: when no `.srt` is provided, Step A **already runs
+faster-whisper on the movie's own audio track** (`dialogue.extract_dialogue`
+with `srt=None`; the run log says `(Whisper)` vs `(subtitle ...)`), then
+chunks + summarizes exactly as with a subtitle. Your run was already on this
+path — that is also why removing the `.srt` changed nothing.
+
+The one valid knob in your note: the ASR model. `dialogue.whisper_model`
+(default `"small"`) is the accuracy/speed trade-off for Step A — set it to
+`"medium"` or `"large-v3"` in `config.yaml` if dialogue accuracy matters
+more than extraction time on your machine (`--whisper-model` on the CLI).
+
+## 3. Every section over budget and chopped — REAL, FIXED (mostly)
+
+Your log: 36/36 sections 2-5x over budget. The prompt already states the
+budget as a hard ceiling ("This is a HARD CEILING ... Never exceed it") and
+the first enforcement pass (condense) handles most of it — but when
+condense *also* failed, the only backstop was the mechanical trim, which
+drops middle sentences (a section that trims hard has its tail under no
+narration). The trim was doing too much work.
+
+**Fix:** between condense and trim there is now one **writer regenerate
+with explicit budget feedback** — the writer that saw the section's beats is
+asked again: "your previous attempt was N words, this footage only has room
+for M — rewrite covering the window from its FIRST beat to its LAST; do not
+stop early, do not pad." That in-budget full-window rewrite is what reaches
+the timeline; the mechanical trim is the absolute last resort only (and a
+section that still cannot fit after all three passes ships with a loud
+`!` warning, as before). Verified by
+`test_overdelivery_regenerates_before_trimming`: over-delivery + failed
+condense -> one regenerate -> in-budget rewrite shipped, trim never fired.
+
+On the budget math: the per-section ceiling is 0.4x the section's film time
+by design (the 1x pacing constraint — narration longer than the footage is
+exactly the slow-motion disease). 3600 words across a 104-min film is
+already ~40% of the film's narration capacity; for a denser recap raise
+`narration.words_target` (the budgets scale with it), don't expect more out
+of the same footage at 1x.
+
+## 4. Humanizer "0/143 rewritten" — the pass was never detection-gated, but
+    the no-op was SILENT — NOW LOUD
+
+For the record: `_humanize_script` already sends ALL sentences to the model
+in one call (no phrase-detection gate), and keeps every rewrite that passes
+the timing lock (exact count, +10%/+2 words per line). A 0/N result means
+the model echoed the draft back (or every rewrite tripped the lock) — and a
+failed call returned `None` with **no log line at all**, which reads as
+"humanized, nothing to change". That silence is fixed:
+
+* `humanizer pass: 0/N` now raises
+  `! WARNING: humanizer changed 0 sentences — the model echoed the script
+  back ... the AI feel you are hearing is the WRITER's voice: try a stronger
+  LLM model for narration, or disable the pass (RECAP_HUMANIZE=0)`.
+* A failed rewrite call now prints
+  `! humanizer pass: the rewrite call failed ... the polished script is
+  kept AS-IS (not humanized)`.
+
+Verified by `test_humanizer_zero_changes_warns`. The structural fix for the
+"AI feel" is upstream of the humanizer anyway: the section writer carries
+the in-prompt voice exemplars, the strict narrator persona, the names
+enforcement and the global read-through — if the writer's voice is the
+problem, a stronger model (deepseek-chat over a small local one) is the
+lever.
+
+## 5. Longest shot 10.1s + min_speed 0.35 — TUNED
+
+* **`timeline.max_shot_seconds: 7.0` (new).** Word-locked splits can leave a
+  long final shot when clause boundaries are sparse (one 10.8s hold under a
+  12s sentence). `_shot_split` now forces an extra midpoint cut whenever a
+  segment would exceed the cap (a few extra cuts at most). Verified by
+  `test_shot_split_caps_long_shots`: 12s beat -> max shot 5.4s (cap off:
+  10.8s); repro runs now report `longest shot 2.6s` in every scenario.
+* **`timeline.min_speed: 0.6` (was 0.35).** With anchor-true re-windowing
+  and enforced section budgets, genuinely starved sections are rare, so the
+  slow-motion floor is now a mild, barely-perceptible 0.6x instead of an
+  obvious 0.35x crawl when it does fire.
+
+| File | Change |
+|---|---|
+| `recap/vision.py` | `pick_times`: stratified bin sampling with full-runtime coverage (replaces keep-all-cuts-then-truncate); `max_frames` default 400 -> 600. |
+| `recap/script.py` | over-budget sections: writer regenerate with budget feedback between condense and the mechanical trim (trim = last resort); humanizer 0-kept WARNING and failed-call log line (no more silent no-ops). |
+| `recap/timeline.py` | `_shot_split`: `max_shot` cap forces mid-shot re-cuts; `min_speed` default 0.6. |
+| `recap/config.py`, `config.yaml` | new defaults: `vision.max_frames: 600`, `timeline.min_speed: 0.6`, `timeline.max_shot_seconds: 7.0`. |
+| `tests/test_visual_flow.py` | new: `test_vision_pick_times_covers_full_film`, `test_shot_split_caps_long_shots`, `test_overdelivery_regenerates_before_trimming`, `test_humanizer_zero_changes_warns`. |
+
+---
+
+## Verification
+
+All seven suites pass, plus the runtime audits:
+
+```
+tests/repro_anchor.py   (2 h film, clustered beats)
+  windows >10 s off their anchor beat:   0/146   median |drift| 2.6 s
+  on-screen footage >30 s off the beat:  0/146   frozen 0.0 s
+
+tests/repro_sync.py     (4 scenarios, all drift 0ms, chronological=yes)
+  full 2 h         0/145 zone violations   0.0 s frozen   100% consumed
+  90 s clip        0/7   zone violations   0.0 s frozen   96% consumed
+  240 s clip       0/18  zone violations   0.0 s frozen   98% consumed
+  2 h + 10-min srt 0/47  zone violations   0.0 s frozen
+  longest shot 2.6s in every scenario (was 10.1s+ in your run)
+```
+
+**On your manual spot-check:** with the vision fix, `visual_notes.json`
+now reaches the film's end (confirm: the last `t` in the file is within a
+bin of the movie's duration). For the 5 random sentences from the back
+third: their footage is anchored to the Whisper transcript beats (Step A
+always transcribes the full film's audio when no `.srt` is given), with the
+vision notes added on top — if any spot-check still shows >10s of
+off-beat footage, the new run-log line
+`visual sync: footage within Xs (median) / Ys (90th pct) of the beat each
+sentence narrates` will show it, and `tests/repro_anchor.py` reproduces it.

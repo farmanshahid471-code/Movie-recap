@@ -45,7 +45,7 @@ Two further properties the old code lacked:
   be LONGER than the footage behind it; blindly playing on made the visuals
   run tens of seconds AHEAD of the story. The fix is what a human editor
   does: pace each window — ``speed = window / narration`` clamped to
-  ``min_speed`` (0.35x) — so a starved stretch plays as gentle slow motion
+  ``min_speed`` (0.6x) — so a starved stretch plays as gentle slow motion
   that stays locked to the narrated moment. The picture therefore always
   MOVES (new footage at 1x, or the same moment in slow motion); a frozen
   frame happens only when the narration outlasts the entire movie. And a
@@ -226,6 +226,7 @@ def _shot_split(
     micro_target: float,
     max_cuts: int,
     min_cut: float,
+    max_shot: float = 7.0,
 ) -> list[tuple[float, float]]:
     """Split one narration beat into shots: ``[(seconds, film_fraction), ...]``.
 
@@ -234,10 +235,25 @@ def _shot_split(
     footage comes from (0.0 = window start, 1.0 = window end). With
     ``fracs`` (measured word-boundary fractions) the split lands on clause
     boundaries; otherwise it is even.
+
+    ``max_shot`` — a shot may never hold for more than this many seconds of
+    screen time. Word-locked splits can leave a long final shot when clause
+    boundaries are sparse (one 10s+ hold under a fast sentence is what the
+    "longest shot is 10.1s -- one visual outlasting several sentences"
+    warning was about), so any segment over the cap gets an extra midpoint
+    cut. 0 disables the cap.
     """
+    import math
+
     duration = max(float(duration), 0.05)
     n = int(round(duration / max(micro_target, 0.5))) or 1
     n = max(1, min(n, int(max_cuts)))
+    # The shot cap can demand MORE cuts than the recap pace does (a 20s
+    # sentence with max_shot=7 needs 3+, which the pace already gives — but
+    # a 30s one needs 5 against max_cuts=4): honour the cap.
+    if max_shot > 0:
+        n = max(n, min(max(1, math.ceil(duration / max(max_shot, min_cut, 0.1))),
+                       max(int(max_cuts), 1) + 4))
     # never create shots shorter than min_cut
     while n > 1 and duration / n < min_cut:
         n -= 1
@@ -249,6 +265,19 @@ def _shot_split(
             bounds = [0.0] + picked + [1.0]
     if bounds is None:
         bounds = [k / n for k in range(n + 1)]
+    # Word-locked picks can still leave a segment over the cap (the greedy
+    # picker may drop candidates that are too close to the neighbours). Cap
+    # the longest offender at its midpoint, a few extra cuts at most.
+    if max_shot > 0:
+        n_hard = max(int(max_cuts), n) + 4
+        changed = True
+        while changed and (len(bounds) - 1) < n_hard:
+            changed = False
+            for k in range(len(bounds) - 1):
+                if (bounds[k + 1] - bounds[k]) * duration > max_shot + 1e-9:
+                    bounds.insert(k + 1, (bounds[k] + bounds[k + 1]) / 2.0)
+                    changed = True
+                    break
 
     return [
         ((bounds[k + 1] - bounds[k]) * duration, bounds[k])
@@ -323,8 +352,9 @@ def build_timeline(
     cut_on_words = bool(cfg.get("cut_on_words", True))
     snap_tol = float(cfg.get("snap_tolerance", 0.8))
     max_lead = max(float(cfg.get("max_lead_seconds", 3.0)), 0.0)
-    min_speed = min(max(float(cfg.get("min_speed", 0.35)), 0.1), 1.0)
+    min_speed = min(max(float(cfg.get("min_speed", 0.6)), 0.1), 1.0)
     min_new = float(cfg.get("min_new_footage", 0.8))
+    max_shot = max(float(cfg.get("max_shot_seconds", 7.0)), 0.0)
     scene_bounds = sorted(scene_bounds or [])
 
     n = min(len(sentences), len(durations))
@@ -387,9 +417,11 @@ def build_timeline(
         # ahead of the story or force a frozen frame. A human editor plays
         # that stretch in slow motion instead: the footage keeps MOVING at a
         # reduced speed and stays locked to the moment being narrated. The
-        # speed is clamped at min_speed (0.35x default = still smooth at
-        # 30fps) and is 1.0 whenever the window has enough film, so normal
-        # sections are untouched.
+        # speed is clamped at min_speed (0.6x default = a mild, barely
+        # perceptible slow-down; starved sections are rare after the anchor
+        # fix and budget enforcement, so the floor mostly never binds) and
+        # is 1.0 whenever the window has enough film, so normal sections
+        # are untouched.
         entry = max(f0, film_playhead)
         room = f1 - entry
         if total_nar > 0 and room > 0:
@@ -424,7 +456,7 @@ def build_timeline(
 
             shots = _shot_split(
                 d, fracs, micro_target=micro_target, max_cuts=max_cuts,
-                min_cut=min_cut,
+                min_cut=min_cut, max_shot=max_shot,
             )
 
             cuts: list[list[float]] = []

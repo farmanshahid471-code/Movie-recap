@@ -36,7 +36,8 @@ CFG_TL = {  # config.yaml defaults
     "snap_to_scenes": True,
     "snap_tolerance": 0.8,
     "max_lead_seconds": 3.0,
-    "min_speed": 0.35,
+    "min_speed": 0.6,
+    "max_shot_seconds": 7.0,
     "min_new_footage": 0.8,
 }
 WPM = 180

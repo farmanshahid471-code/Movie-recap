@@ -15,8 +15,9 @@ Quota / cost notes (see README "Vision pass" for exact numbers)
 * Vision: image tokens are billed/limited by the VISION provider, never by
   DeepSeek. Gemini's free tier does not charge for images (rate-limited).
   A paid OpenAI/Gemini key bills per image — cents, at 512px.
-* Requests per movie ~= (frames / frames_per_request): a 100-min film at a
-  20s cadence is ~300 frames ≈ 75 requests at 4 frames/request.
+* Requests per movie ~= (frames / frames_per_request): a 100-min film gets
+  ~600 stratified frames (one per ~10s of film, full runtime) ≈ 150
+  requests at 4 frames/request.
 """
 
 from __future__ import annotations
@@ -96,40 +97,70 @@ def pick_times(
     movie_duration: float,
     cadence: float = 20.0,
     scenes: list[float] | None = None,
-    max_frames: int = 400,
+    max_frames: int = 600,
 ) -> list[int]:
-    """Choose which seconds of the film to caption.
+    """Choose which seconds of the film to caption — with FULL-RUNTIME
+    coverage.
 
-    Guarantees real shot changes are kept (they are where a visible story
-    beat starts) and fills the gaps on a ``cadence`` grid so a quiet stretch
-    never goes uncaptioned. Deterministic; returns whole-second ints, sorted.
+    STRATIFIED SAMPLING: the film is divided into time bins and each bin
+    contributes exactly one frame — the real shot change nearest the bin's
+    middle when one exists (cuts are where visible beats start), else the
+    bin's middle. Every stretch of the film is captioned, including the
+    back third, and the spacing is uniform no matter how the scene changes
+    are distributed.
+
+    Why this replaced the old logic: it kept ALL scene changes ("they are
+    story-critical") and then truncated the sorted list to ``max_frames``.
+    Since scene changes cluster in the early scenes (fast intros, more
+    cuts), the frame budget was eaten before reaching the back half — a
+    2h film with 740 cuts and a 400-frame cap got its LAST frame at
+    ~3515s: the final 43% of the film had ZERO visual notes, and the
+    timeline had nothing to anchor on there. Deterministic; returns
+    whole-second ints, sorted.
+
+    ``cadence`` is kept for config compatibility; the bins (5s floor
+    spacing) subsume the old cadence grid.
     """
     dur = max(float(movie_duration), 0.0)
     if dur <= 0:
         return []
-    cadence = max(float(cadence), 5.0)
     max_frames = max(int(max_frames), 10)
 
-    scene_set = {int(round(s)) for s in (scenes or []) if 0.5 < s < dur}
-    grid = set()
-    t = cadence
-    while t < dur:
-        grid.add(int(round(t)))
-        t += cadence
-    # Scene changes are story-critical: always keep them.
-    keep = sorted(scene_set | {int(round(dur / 2))})
-    # Interior grid samples fill between them.
-    rest = sorted(grid - scene_set)
-    n_rest = max(0, max_frames - len(keep))
-    if len(rest) > n_rest and n_rest > 0:
-        step = len(rest) / float(n_rest)
-        rest = [rest[int(i * step)] for i in range(n_rest)]
-    elif len(rest) > n_rest and n_rest <= 0:
-        rest = []
-    out = sorted(set(keep) | set(rest))
-    # Clamp to the film (and never caption the very first frame of a 2h movie
-    # if it is studio logos/black).
-    out = [t for t in out if 0 <= t <= max(dur - 1.0, 0.0)]
+    scene_list = sorted(int(round(s)) for s in (scenes or []) if 0.5 < s < dur)
+
+    # Number of time bins: one frame per bin, never finer than every 5s
+    # (short film -> fewer bins, e.g. a 90s clip gets 18 frames).
+    n_bins = min(max_frames, max(int(dur // 5), 1))
+    width = dur / n_bins
+
+    # Scene changes per bin, ordered by closeness to the bin's middle.
+    per_bin: list[list[int]] = [[] for _ in range(n_bins)]
+    for s in scene_list:
+        per_bin[min(n_bins - 1, int(s / width))].append(s)
+    for k in range(n_bins):
+        mid = (k + 0.5) * width
+        per_bin[k].sort(key=lambda s: (abs(s - mid), s))
+
+    out: set[int] = set()
+    for k in range(n_bins):
+        if per_bin[k]:
+            out.add(per_bin[k][0])            # nearest real cut in the bin
+        else:
+            out.add(int(round((k + 0.5) * width)))  # quiet stretch: the middle
+
+    # Short films: the 5s-bin floor uses fewer frames than the cap. Spend
+    # the remaining budget on the NEXT-closest real cuts, round-robin over
+    # bins, so the extra density stays spread across the film.
+    budget = max_frames - len(out)
+    while budget > 0 and any(per_bin):
+        for k in range(n_bins):
+            if budget <= 0:
+                break
+            if per_bin[k]:
+                out.add(per_bin[k].pop(0))
+                budget -= 1
+
+    out = sorted(t for t in out if 0 <= t <= max(dur - 1.0, 0.0))
     return out[:max_frames]
 
 
@@ -359,7 +390,7 @@ def _movie_sig(movie: Path, cfg: dict) -> str:
             "movie": ident,
             "cadence": cfg.get("cadence_seconds", 20.0),
             "scene_threshold": cfg.get("scene_threshold", 0.35),
-            "max_frames": cfg.get("max_frames", 400),
+            "max_frames": cfg.get("max_frames", 600),
             "width": cfg.get("width", 512),
             "provider": cfg.get("provider", "gemini"),
             "model": cfg.get("model") or os.environ.get("VISION_MODEL") or "",
@@ -414,7 +445,7 @@ def capture(
         duration,
         cadence=float(cfg.get("cadence_seconds", 20.0)),
         scenes=scenes,
-        max_frames=int(cfg.get("max_frames", 400)),
+        max_frames=int(cfg.get("max_frames", 600)),
     )
     if not times:
         return []

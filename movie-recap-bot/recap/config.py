@@ -91,11 +91,21 @@ _DEFAULTS: dict[str, Any] = {
         # MOTION GUARANTEE: in dialogue-dense sections the narration can be
         # longer than the footage behind it. Instead of freezing the picture
         # or running ahead, the footage plays in slow motion down to this
-        # speed (0.35x still looks smooth at 30fps). 1.0 disables slow-mo.
-        "min_speed": 0.35,
+        # speed. With anchor-true re-windowing and the enforced section
+        # budgets, genuinely starved sections are RARE, so 0.6x (a mild,
+        # barely-perceptible slow-down) is the right floor: a starved
+        # section now reads as slightly slower footage instead of an
+        # obvious 0.35x crawl. 1.0 disables slow motion entirely.
+        "min_speed": 0.6,
         # A cut must show at least this much NEW film, otherwise it continues
         # the current footage seamlessly (micro-jumps read as stutters).
         "min_new_footage": 0.8,
+        # A single shot must not hold for more than this many seconds of
+        # screen time. Word-locked splits can leave a long final shot when
+        # clause boundaries are sparse (the "longest shot is 10.1s -- one
+        # visual outlasting several sentences" warning); _shot_split forces
+        # an extra mid-shot cut whenever a segment would exceed this.
+        "max_shot_seconds": 7.0,
     },
     # Whisper ASR tuning (auto-recap from the movie's own audio).
     "dialogue": {

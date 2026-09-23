@@ -1405,26 +1405,69 @@ def generate_segmented_script(
                           "kept) so it plays at 1x")
                     sents = _fitted
                 else:
-                    _fitted = _fit_section_to_footage(sents, _cap, names)
-                    if len(_fitted) != len(sents):
+                    # Condensing failed -- one WRITER REGENERATE with
+                    # explicit budget feedback BEFORE the mechanical trim.
+                    # The writer saw the section's beats, so a fresh take
+                    # told at the right length keeps more of the window
+                    # (start to finish) than chopping a draft that already
+                    # over-committed. (The user's run log: 36/36 sections
+                    # over budget; when condense also fails, the trim below
+                    # used to be the only backstop, and a trim that stops
+                    # early means the window's tail plays under no
+                    # narration.)
+                    _regen_user = user + (
+                        f"\n\nIMPORTANT: your previous attempt was "
+                        f"{_got} words, but this footage only has room for "
+                        f"{int(budget)} words at normal playback speed -- "
+                        f"so it must be at most {_cap} words. Rewrite it "
+                        "covering the window from its FIRST beat to its "
+                        "LAST: do not stop early at the beginning of the "
+                        "window and do not pad with generalities. Same "
+                        "JSON shape."
+                    )
+                    _regen = llm.complete(
+                        cfg_llm.get("provider", ""),
+                        cfg_llm.get("model", ""),
+                        SYSTEM_RECAP_BEATS,
+                        _regen_user,
+                        base_url=cfg_llm.get("base_url"),
+                        json_mode=True,
+                        max_tokens=_out_tokens_for_words(budget),
+                    )
+                    _retry = _parse_segment(_regen)
+                    if _retry and 2 < len(_retry) <= len(sents) and \
+                            count_words(" ".join(_retry)) <= _cap:
                         print(f"    ... section {pos + 1}/{len(usable)}: "
-                              f"writer returned {_got} words for a "
-                              f"{_cap}-word section budget -- trimmed to "
-                              f"{len(_fitted)} sentences "
-                              f"({count_words(' '.join(_fitted))} words) "
-                              "so it plays at 1x")
-                        sents = _fitted
-                    if count_words(" ".join(sents)) > _cap:
-                        # The 3-sentence continuity floor stopped the trim
-                        # (a section of a few very long sentences). Say so
-                        # loudly instead of shipping the bloat silently --
-                        # silent over-delivery is exactly how a 2x script
-                        # once slipped through every check.
-                        print(f"    ! section {pos + 1}/{len(usable)}: "
-                              f"still {count_words(' '.join(sents))} words "
-                              f"after condense+trim (3-sentence floor) for "
-                              f"a {_cap}-word budget -- the timeline will "
-                              "slow this one section to stay in sync")
+                              f"writer returned {_got} words and condensing "
+                              f"failed -- regenerated at "
+                              f"{count_words(' '.join(_retry))} words "
+                              "(full window covered, no sentences chopped)")
+                        sents = _retry
+                    else:
+                        _fitted = _fit_section_to_footage(sents, _cap, names)
+                        if len(_fitted) != len(sents):
+                            print(f"    ... section {pos + 1}/{len(usable)}: "
+                                  f"writer returned {_got} words for a "
+                                  f"{_cap}-word section budget -- condensed "
+                                  "and regenerated, both failed -- "
+                                  f"mechanically trimmed to "
+                                  f"{len(_fitted)} sentences "
+                                  f"({count_words(' '.join(_fitted))} words) "
+                                  "so it plays at 1x")
+                            sents = _fitted
+                        if count_words(" ".join(sents)) > _cap:
+                            # The 3-sentence continuity floor stopped the
+                            # trim (a section of a few very long
+                            # sentences). Say so loudly instead of shipping
+                            # the bloat silently -- silent over-delivery is
+                            # exactly how a 2x script once slipped through
+                            # every check.
+                            print(f"    ! section {pos + 1}/{len(usable)}: "
+                                  f"still {count_words(' '.join(sents))} "
+                                  f"words after condense+regenerate+trim "
+                                  f"(3-sentence floor) for a {_cap}-word "
+                                  f"budget -- the timeline will slow this "
+                                  "one section to stay in sync")
 
         # Anchor each sentence to the film moment(s) it narrates (beat
         # timecodes) instead of giving the whole chunk to every sentence.
@@ -1541,6 +1584,28 @@ def generate_segmented_script(
             print(f"  * humanizer pass: {_kept}/{len(out)} sentences "
                   "rewritten to sound human (AI tells removed; every "
                   "sentence keeps its film window)")
+            if _kept == 0:
+                # The pass ran but changed NOTHING. That is not "the
+                # writing was already human" across 100+ LLM-written lines
+                # — it is the model echoing the draft back (or every
+                # rewrite tripping the timing lock). A silent 0/N is how
+                # the "still sounds like AI" complaint survives a run that
+                # claims to have humanized, so make it loud and say what
+                # to check.
+                print("    ! WARNING: humanizer changed 0 sentences — the "
+                      "model echoed the script back (or every rewrite "
+                      "broke the +10%/+2-word timing lock). The AI feel "
+                      "you are hearing is the WRITER's voice: try a "
+                      "stronger LLM model for narration, or disable the "
+                      "pass (RECAP_HUMANIZE=0) and judge the writer "
+                      "directly.", flush=True)
+        else:
+            # _humanize_script swallows call failures and returns None —
+            # never let that read as "humanized, nothing to change".
+            print("    ! humanizer pass: the rewrite call failed or "
+                  "returned a bad shape — the polished script is kept "
+                  "AS-IS (not humanized). Check the LLM provider.",
+                  flush=True)
 
     _append_sign_off(out, lang_name=lang_name, enabled=sign_off)
 

@@ -131,9 +131,17 @@ vision:
   provider: "gemini"        # gemini (free) | openai | groq (OpenAI-compatible)
   model: "gemini-3.6-flash" # Gemini Flash models are multimodal; any works
   base_url: null            # null = provider default (Gemini OpenAI-compat)
-  cadence_seconds: 20       # caption a frame roughly every 20s of film
+  cadence_seconds: 20       # legacy key (kept for config compatibility);
+                            # frames are now chosen by STRATIFIED sampling:
+                            # one per ~10s time-bin of the film, preferring
+                            # a real shot change in the bin -- the WHOLE
+                            # runtime is covered (the old logic kept every
+                            # scene change then truncated, so a 2h film's
+                            # last ~43% had zero frames)
   scene_threshold: 0.35     # also caption real shot changes above this delta
-  max_frames: 400           # hard cap per movie (API-quota friendly)
+  max_frames: 600           # hard cap per movie (~1 caption per 10s of a
+                            # 100-min film, full runtime; ~150 API calls at
+                            # 4 frames/request)
   width: 512                # JPEG width sent to the model (smaller = cheaper)
   frames_per_request: 4     # frames per API call (free-tier request economy)
 
@@ -159,11 +167,19 @@ timeline:
   max_lead_seconds: 3.0    # how far the visuals may run AHEAD of the moment
                            # being narrated (safety valve; pacing keeps the
                            # typical lead near zero)
-  min_speed: 0.35          # MOTION GUARANTEE: in dialogue-dense sections the
+  min_speed: 0.6           # MOTION GUARANTEE: in dialogue-dense sections the
                            # narration can outlast the footage behind it. The
                            # picture then plays in SLOW MOTION (down to this
                            # speed) instead of freezing or running ahead.
+                           # 0.6 = a mild, barely-perceptible slow-down
+                           # (starved sections are rare once budgets + the
+                           # anchor fix hold, so the floor rarely binds).
                            # 1.0 disables slow motion.
+  max_shot_seconds: 7.0    # a single shot may never hold for more than this
+                           # many seconds of screen time (sparse clause
+                           # boundaries used to leave 10s+ final shots --
+                           # "one visual outlasting several sentences"); an
+                           # extra mid-shot cut is forced when needed
   min_new_footage: 0.8     # every cut must show at least this much NEW film;
                            # smaller advances continue the current footage
                            # seamlessly (micro-jumps read as stutter)
