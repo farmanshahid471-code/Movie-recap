@@ -141,6 +141,8 @@ _DEFAULTS: dict[str, Any] = {
         "max_frames": 400,         # hard cap per movie (API-quota friendly)
         "width": 512,              # JPEG width sent to the vision model
         "frames_per_request": 4,   # frames per API call (free-tier economy)
+        "sweep_pause_seconds": 60.0,  # pause before the final sweep that
+                                      # re-captures frames a 503 storm killed
     },
     # LEGACY semantic vector matcher (retired from beat selection — the
     # chronological timeline in recap/timeline.py maps narration lines to film

@@ -338,14 +338,16 @@ def _caption_batch(
             "each starting with its label like '" + _fmt_label(frames[0][0]) + " - text'.",
         }
     )
-    # Free tiers throttle aggressively (e.g. Gemini ~15 req/min); a batch
-    # that hits the rate cap should wait and retry, not die or leave a hole in
-    # the caption list. 429 / 5xx / network blips get a few backoff attempts.
-    import time
-
+    # Free tiers throttle aggressively (Gemini ~15 req/min), and the free
+    # tier goes through MULTI-MINUTE 503 "high demand" windows. A batch that
+    # hits one must ride it out with long, escalating waits (~4 minutes
+    # worst case per batch) instead of dying after ~75s and leaving a
+    # permanent hole in the caption list. The caller (capture) then does a
+    # final sweep over whatever still failed.
+    waits = (15.0, 30.0, 60.0, 120.0)
     resp = None
     last: Exception | None = None
-    for attempt in range(5):
+    for attempt, wait in enumerate(waits):
         try:
             resp = client.chat.completions.create(
                 model=model,
@@ -360,12 +362,13 @@ def _caption_batch(
             retryable = any(k in msg for k in (
                 "429", "rate", "quota", "rpm", "too many", "resource exhausted",
                 "502", "503", "504", "500", "timeout", "timed out", "connection",
+                "high demand",
             ))
-            if not retryable or attempt == 4:
+            if not retryable:
                 break
-            wait = 5.0 * (2 ** attempt)          # 5s, 10s, 20s, 40s
-            print(f"    ... vision batch rate-limited ({type(exc).__name__}) — "
-                  f"waiting {wait:.0f}s and retrying ...", flush=True)
+            print(f"    ... vision batch throttled ({type(exc).__name__}) — "
+                  f"waiting {wait:.0f}s (try {attempt + 1}/{len(waits)}) ...",
+                  flush=True)
             time.sleep(wait)
     if resp is None:
         raise VisionError(
@@ -493,39 +496,74 @@ def capture(
     print(f"  * Vision pass: captioning {len(todo)} frames via "
           f"{provider}/{model} in batches of {batch_size} ...", flush=True)
     started = time.time()
-    done_count = len(cached)
-    for i in range(0, len(todo), batch_size):
-        batch = [(t, frames[t]) for t in todo[i : i + batch_size]]
-        try:
-            res = _caption_batch(client, model, batch)
-        except VisionError as exc:
-            print(f"    ! vision batch {i // batch_size + 1} failed: {exc} — "
-                  "keeping what succeeded so far", flush=True)
-            continue
-        for t, text in res.items():
-            if text:
-                cached[t] = text
-                done_count += 1
-        # Persist after every batch: a quota pause resumes without rework.
-        try:
-            cache_path.write_text(
-                json.dumps(
-                    {"sig": sig, "frames": [
-                        {"t": t, "text": cached[t]} for t in sorted(cached)]},
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
-        if progress:
-            progress(min(i + batch_size, len(todo)), len(todo), done_count)
-        elif (i // batch_size) % 5 == 0 or i + batch_size >= len(todo):
-            print(f"    ... {min(i + batch_size, len(todo))}/{len(todo)} frames "
-                  f"({done_count} captioned, {(time.time() - started) / 60:.1f} min)",
-                  flush=True)
+
+    def _caption_pass(times: list[int], tag: str) -> list[int]:
+        """Caption ``times`` in order; return the frames that still failed."""
+        failed: list[int] = []
+        for i in range(0, len(times), batch_size):
+            batch = [(t, frames[t]) for t in times[i : i + batch_size]]
+            try:
+                res = _caption_batch(client, model, batch)
+            except VisionError as exc:
+                print(f"    ! vision batch {i // batch_size + 1} {tag}failed: "
+                      f"{exc} — those frames stay queued for the final "
+                      "sweep / next run", flush=True)
+                failed.extend(t for t, _ in batch)
+                continue
+            for t, text in res.items():
+                if text:
+                    cached[t] = text
+            # Persist after every batch: a quota pause resumes without
+            # rework (and the next run re-captures only what is missing).
+            try:
+                cache_path.write_text(
+                    json.dumps(
+                        {"sig": sig, "frames": [
+                            {"t": t, "text": cached[t]}
+                            for t in sorted(cached)]},
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+            if progress:
+                progress(min(i + batch_size, len(times)), len(times),
+                         len(cached))
+            elif (i // batch_size) % 5 == 0 or i + batch_size >= len(times):
+                print(f"    ... {min(i + batch_size, len(times))}/{len(times)} "
+                      f"frames ({len(cached)} captioned, "
+                      f"{(time.time() - started) / 60:.1f} min)", flush=True)
+        return failed
+
+    failed = _caption_pass(todo, "")
+    # Free-tier demand spikes (503 "high demand") are usually temporary but
+    # can outlive one batch's patient retries: one final sweep over the
+    # frames that failed, after a short pause, before giving up.
+    if failed:
+        pause = max(float(cfg.get("sweep_pause_seconds", 60.0)), 0.0)
+        print(f"  * Vision pass: {len(failed)} frames hit the provider's "
+              f"demand cap — final sweep after a {pause:.0f}s pause ...",
+              flush=True)
+        if pause:
+            time.sleep(pause)
+        failed = _caption_pass(failed, "(sweep) ")
 
     result = [{"t": t, "text": cached[t]} for t in sorted(cached)]
-    print(f"  * Vision pass: {len(result)} on-screen notes "
-          f"(visual_notes.json)", flush=True)
+    if failed:
+        # Never read a demand spike as "the film has no visual notes": say
+        # exactly what is missing and how cheaply to get it (the cache
+        # reuses everything that already succeeded).
+        print(f"  ! Vision pass: {len(failed)}/{len(missing)} frames could "
+              f"NOT be captioned — provider {provider} is under high demand "
+              f"('{model}' returned 503). The run continues with "
+              f"{len(result)} notes. Re-run the SAME movie: cached frames "
+              "are reused and only the missing ones are re-captured. If "
+              "this keeps happening, try the default flash model "
+              "(vision.model in config.yaml) — the -lite free tier is the "
+              "most throttled — or set vision.enabled: false for a "
+              "text-only run.", flush=True)
+    else:
+        print(f"  * Vision pass: {len(result)} on-screen notes "
+              f"(visual_notes.json)", flush=True)
     return result

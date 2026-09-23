@@ -67,7 +67,14 @@ movie.mp4
 > a 100-min film (≈1 caption per 10 s, ≈150 API calls at 4 frames/request),
 > cached per movie so re-runs reuse them. (The old logic kept every scene
 > change and truncated the list, so cuts clustered early in the film ate the
-> budget and a 2h film's last ~43% had zero frames.)
+> budget and a 2h film's last ~43% had zero frames.) Free-tier throttling is
+> expected, not fatal: a 503 "high demand" batch is retried patiently
+> (15s → 30s → 60s → 120s), and if the storm outlasts that, the pass does one
+> final sweep over just the failed frames after a pause, then reports exactly
+> how many frames are missing. Re-running the SAME movie re-captures only the
+> missing frames (the per-batch cache does the rest) — and the run never
+> ships silently text-only: a gap is printed loud with the re-run
+> instructions (or `vision.enabled: false` for a deliberate text-only run).
 
 ### Run it locally (no Docker needed)
 

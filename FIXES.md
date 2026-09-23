@@ -509,3 +509,45 @@ vision notes added on top — if any spot-check still shows >10s of
 off-beat footage, the new run-log line
 `visual sync: footage within Xs (median) / Ys (90th pct) of the beat each
 sentence narrates` will show it, and `tests/repro_anchor.py` reproduces it.
+
+---
+
+## Round 4 (2026-09-23): surviving a Gemini "503 high demand" storm
+
+**Symptom (your Toy Story 5 log, after the round-3 fix):** frame extraction now ran to the
+real end (last frame 6202 s — the round-3 sampling fix is working), but EVERY vision batch
+returned `Error code: 503 — the model is under high demand` on `gemini-3.1-flash-lite`.
+The old retry policy (5/10/20/40 s, ~75 s total per batch) gave each batch up, logged one
+line, and moved on — the run finished with zero on-screen notes and no loud signal, so you
+had to stop it by hand.
+
+**Root cause:** free-tier demand throttling is a minutes-long condition, not a sub-minute
+one. A retry ladder that gives up in ~75 s loses every batch inside a demand window; the
+per-batch cache then made a "successful" run that was actually a silent text-only pass.
+
+**Fixes:**
+1. **Patient per-batch retries** (`recap/vision.py`): waits are now 15s → 30s → 60s → 120s
+   (~4 min of patience per batch instead of 75 s), and "high demand" is an explicit
+   retryable keyword. Progress is logged (`waiting 120s (try 4/4)`) so the Studio log shows
+   the bot waiting, not hanging.
+2. **Final sweep** (`recap/vision.py`): after the main pass, any frames still failed are
+   re-captured in one more pass after a configurable pause (`vision.sweep_pause_seconds`,
+   default 60 — the storm usually cools by then). The sweep reuses the same cache.
+3. **Loud gap accounting** (`recap/vision.py`): the pass now ends with either
+   `Vision pass: N on-screen notes` or a `!` line stating exactly how many of how many
+   frames could NOT be captioned, with the exact cheap recovery: *re-run the SAME movie —
+   cached frames are reused and only the missing ones are re-captured* — plus the two
+   escape hatches (switch to the default `gemini-3.6-flash` model, which has more
+   free-tier headroom than the `-lite` tier, or `vision.enabled: false` for a deliberate
+   text-only run). No more silent text-only passes.
+4. **`vision.sweep_pause_seconds`** (config.yaml + defaults): the pre-sweep pause.
+
+**Why re-running is cheap:** every successful batch already persisted its frames to
+`workdir/visual_notes.json` during the run, and re-capture skips frames with a cached note
+— so after a storm, one re-run of the same movie re-captures only the frames the storm
+actually killed.
+
+**Verification:** new regression `test_vision_capture_survives_a_503_storm`:
+(a) first 3 batch calls 503 → the sweep recovers all 12/12 frames, log shows "final
+sweep", `visual_notes.json` written; (b) storm never ends → notes empty, log contains the
+loud "could NOT be captioned" + "Re-run the SAME movie" guidance. All 7 suites green.

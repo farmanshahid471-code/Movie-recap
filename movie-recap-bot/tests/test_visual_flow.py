@@ -1067,6 +1067,97 @@ def test_humanizer_zero_changes_warns() -> None:
     print("ok: humanizer 0-kept run warns loudly; a failed call is logged")
 
 
+def test_vision_capture_survives_a_503_storm() -> None:
+    """THE USER'S LOG: the whole first caption pass died on Gemini's 503
+    'high demand' storm (every batch failed after ~75s of short retries)
+    and the run was about to ship with ZERO visual notes. Failed frames
+    must get a final sweep; if that also fails, the run continues with a
+    LOUD gap summary (never a silent text-only pass)."""
+    import io
+    import tempfile
+    from contextlib import redirect_stdout
+    from recap import vision as vision_mod
+
+    # --- case 1: first pass 503s, sweep succeeds -> all frames captioned
+    with tempfile.TemporaryDirectory() as td:
+        workdir = Path(td)
+        movie = Path(td) / "movie.mp4"
+        movie.write_bytes(b"stub")
+        seen: dict = {}
+
+        def fake_extract(mv, times_, outdir, width=512):
+            seen["times"] = list(times_)
+            return {t: Path(td) / f"f{t}.jpg" for t in times_}
+
+        calls = {"n": 0}
+
+        def storm_then_ok(client, model, frames_):
+            calls["n"] += 1
+            if calls["n"] <= 3:      # first pass: 12 frames / 4 = 3 batches
+                raise vision_mod.VisionError("Error code: 503 high demand")
+            return {t: f"caption {t}" for t, _ in frames_}
+
+        orig = (vision_mod.probe_duration, vision_mod.provider_configured,
+                vision_mod._scene_times, vision_mod.extract_frames,
+                vision_mod._client, vision_mod._caption_batch)
+        vision_mod.probe_duration = lambda p: 6207.0
+        vision_mod.provider_configured = lambda p: True
+        vision_mod._scene_times = lambda *a, **k: []
+        vision_mod.extract_frames = fake_extract
+        vision_mod._client = lambda cfg: (None, "fake-model")
+        vision_mod._caption_batch = storm_then_ok
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                notes = vision_mod.capture(
+                    movie, {"max_frames": 12, "frames_per_request": 4,
+                            "sweep_pause_seconds": 0.0}, workdir)
+        finally:
+            (vision_mod.probe_duration, vision_mod.provider_configured,
+             vision_mod._scene_times, vision_mod.extract_frames,
+             vision_mod._client, vision_mod._caption_batch) = orig
+
+        assert len(notes) == 12, \
+            f"the sweep must recover every failed frame, got {len(notes)}"
+        assert all(n["text"].startswith("caption") for n in notes)
+        log = buf.getvalue()
+        assert "final sweep" in log, log
+        assert (workdir / "visual_notes.json").exists(), \
+            "the cache must persist so a next run only re-captures gaps"
+
+    # --- case 2: sweep ALSO fails -> loud gap summary, graceful continue
+    with tempfile.TemporaryDirectory() as td:
+        movie2 = Path(td) / "movie2.mp4"
+        movie2.write_bytes(b"stub")
+        vision_mod.probe_duration = lambda p: 6207.0
+        vision_mod.provider_configured = lambda p: True
+        vision_mod._scene_times = lambda *a, **k: []
+        vision_mod.extract_frames = fake_extract
+        vision_mod._client = lambda cfg: (None, "fake-model")
+        vision_mod._caption_batch = (
+            lambda client, model, frames_: (_ for _ in ()).throw(
+                vision_mod.VisionError("Error code: 503 high demand")))
+        buf2 = io.StringIO()
+        try:
+            with redirect_stdout(buf2):
+                notes2 = vision_mod.capture(
+                    movie2, {"max_frames": 12, "frames_per_request": 4,
+                             "sweep_pause_seconds": 0.0}, Path(td))
+        finally:
+            (vision_mod.probe_duration, vision_mod.provider_configured,
+             vision_mod._scene_times, vision_mod.extract_frames,
+             vision_mod._client, vision_mod._caption_batch) = orig
+
+        assert notes2 == [], "nothing captioned -> empty note list"
+        log2 = buf2.getvalue()
+        assert "could NOT be captioned" in log2, log2
+        assert "Re-run the SAME movie" in log2, \
+            "the gap summary must say how cheaply to fill it"
+        assert "503" in log2 or "high demand" in log2
+    print("ok: 503 storm -> patient retries + final sweep; total failure "
+          "ships with a loud gap summary, never silently text-only")
+
+
 def test_rewindow_overbudget_walks_contiguously() -> None:
     """A section whose measured narration genuinely exceeds its film zone
     keeps a contiguous, monotone walk (the slow-mo net then handles it --
@@ -1732,6 +1823,7 @@ if __name__ == "__main__":
     test_shot_split_caps_long_shots()
     test_overdelivery_regenerates_before_trimming()
     test_humanizer_zero_changes_warns()
+    test_vision_capture_survives_a_503_storm()
     test_enforcement_uses_section_budget_not_ceiling()
     test_measured_wpm_cache_roundtrip()
     test_narration_voice_one_resolution()
