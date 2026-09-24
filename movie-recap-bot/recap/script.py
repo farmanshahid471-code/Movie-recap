@@ -1030,6 +1030,36 @@ def _humanize_script(
     if not sentences:
         _humanize_script.last_stats = {"total": 0, "kept": 0, "failed": 0, "failed_rate": 0.0, "failed_indices": [], "retried": 0}
         return None
+
+    # Chunk large scripts: a 155-sentence single JSON is where deepseek starts to split/merge lines.
+    # Process in 30-sentence windows (spec 1.1: Pass A voice only, but shape must be exact per window).
+    CHUNK = 30
+    if len(sentences) > 50:
+        print(f"    ... humanizer: {len(sentences)} sentences -> chunked into { (len(sentences)+CHUNK-1)//CHUNK } windows of ≤{CHUNK}", flush=True)
+        combined = []
+        all_stats = {"total": len(sentences), "kept": 0, "failed": 0, "failed_indices": [], "retried": 0}
+        for start in range(0, len(sentences), CHUNK):
+            window = sentences[start:start+CHUNK]
+            sub = _humanize_script(cfg_llm, window, lang_name)
+            sub_stats = getattr(_humanize_script, "last_stats", None)
+            if sub is None:
+                # Window failed -> keep original window and count as failed
+                combined.extend(window)
+                all_stats["failed"] += len(window)
+                all_stats["failed_indices"].extend(range(start, start+len(window)))
+            else:
+                combined.extend(sub)
+                # sub_stats may be from chunked inner call; aggregate
+                all_stats["kept"] += sub_stats.get("kept", 0)
+                all_stats["failed"] += sub_stats.get("failed", 0)
+                all_stats["failed_indices"].extend([i+start for i in sub_stats.get("failed_indices", [])])
+                all_stats["retried"] += sub_stats.get("retried", 0)
+        all_stats["failed_rate"] = all_stats["failed"] / max(all_stats["total"], 1)
+        all_stats["total"] = len(sentences)
+        _humanize_script.last_stats = all_stats
+        # Apply Pass B timing lock already done per-window; just return combined
+        return combined
+
     total_words = count_words(" ".join(sentences))
     # Pass A: humanize for voice/tone only, no length lock
     user_a = HUMANIZER_PROMPT_PASS_A.format(
@@ -1053,9 +1083,32 @@ def _humanize_script(
         _humanize_script.last_stats = {"total": len(sentences), "kept": 0, "failed": len(sentences), "failed_rate": 1.0, "failed_indices": list(range(len(sentences))), "retried": 0}
         return None
     if not new_a or len(new_a) != len(sentences):
-        print(f"    ! HUMANIZE_FAILED: Pass A returned {len(new_a) if new_a else 0}/{len(sentences)} sentences — bad shape", flush=True)
-        _humanize_script.last_stats = {"total": len(sentences), "kept": 0, "failed": len(sentences), "failed_rate": 1.0, "failed_indices": list(range(len(sentences))), "retried": 0}
-        return None
+        got = len(new_a) if new_a else 0
+        print(f"    ! HUMANIZE_FAILED: Pass A returned {got}/{len(sentences)} sentences — bad shape, retrying with shape correction ...", flush=True)
+        # Retry once with explicit shape correction
+        try:
+            retry_user = user_a + f"\n\nIMPORTANT: you returned {got} sentences but EXACTLY {len(sentences)} are required (one per input line). Return EXACTLY {len(sentences)} strings, same order, one for one. Never merge, never split."
+            raw2 = llm.complete(
+                cfg_llm.get("provider", ""),
+                cfg_llm.get("model", ""),
+                SYSTEM_HUMANIZER,
+                retry_user,
+                base_url=cfg_llm.get("base_url"),
+                json_mode=True,
+                max_tokens=_out_tokens_for_words(int(total_words * 1.15)),
+            )
+            new_a2 = _parse_segment(raw2)
+            if new_a2 and len(new_a2) == len(sentences):
+                print(f"      -> shape retry succeeded ({len(new_a2)}/{len(sentences)})", flush=True)
+                new_a = new_a2
+            else:
+                print(f"      -> shape retry still bad ({len(new_a2) if new_a2 else 0}/{len(sentences)}) — keeping original window", flush=True)
+                _humanize_script.last_stats = {"total": len(sentences), "kept": 0, "failed": len(sentences), "failed_rate": 1.0, "failed_indices": list(range(len(sentences))), "retried": 0}
+                return None
+        except Exception as exc2:
+            print(f"      -> shape retry failed: {exc2}", flush=True)
+            _humanize_script.last_stats = {"total": len(sentences), "kept": 0, "failed": len(sentences), "failed_rate": 1.0, "failed_indices": list(range(len(sentences))), "retried": 0}
+            return None
 
     # Per-sentence similarity check + retry with different temperature if >0.9
     failed_indices = []
