@@ -206,7 +206,16 @@ def test_prompts_are_language_aware() -> None:
         calls.append(user)
         return "[00:00:01] Beat line.\n[00:00:05] Another beat."
 
+    _orig_complete = rllm.complete
     rllm.complete = fake_complete
+    try:
+        _run_language_prompt_checks(script, summarize, calls)
+    finally:
+        rllm.complete = _orig_complete
+    print("  language-aware summarize + script prompts OK")
+
+
+def _run_language_prompt_checks(script, summarize, calls) -> None:
     summarize.summarize_chunks(
         [{"index": 0, "text": "some dialogue", "start": 0.0, "end": 30.0}],
         {"provider": "x", "model": "y"}, lang="ar",
@@ -236,7 +245,6 @@ def test_prompts_are_language_aware() -> None:
     )
     assert "entirely in Spanish" in calls[n1]
     assert "in Spanish" in calls[-1]
-    print("  language-aware summarize + script prompts OK")
 
 
 def _write_srt(path: Path) -> None:
@@ -288,6 +296,7 @@ def test_zh_only_translates_forced_en_master() -> None:
     def fake_translate(provider, model, system, user, **kw):
         return "这是翻译后的第一句台词。\n这是第二句。"
 
+    _orig_complete = rllm.complete
     rllm.complete = fake_translate
 
     restore = _install_stubs()
@@ -295,6 +304,7 @@ def test_zh_only_translates_forced_en_master() -> None:
         outs = pipeline.auto_recap(cfg, movie)
     finally:
         restore()
+        rllm.complete = _orig_complete
 
     names = sorted(p.name for p in outs)
     assert names == ["langs_zh.mp4"], names

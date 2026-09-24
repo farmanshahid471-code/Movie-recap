@@ -77,10 +77,28 @@ narration:
   # HUMANIZER: one final pass over the finished script removes the tells of
   # AI-generated writing (not-X-but-Y, one-line closers, staged run-ups,
   # forced triads, stock AI words, ...) so the narration reads like a person
-  # wrote it. Adapted from blader/humanizer (MIT). The timing locks hold:
-  # sentence count exact, each line within +10% of its original length.
+  # wrote it. Adapted from blader/humanizer (MIT). Two stages: Pass A rewrites
+  # for voice with NO length constraint, Pass B tightens any rewrite that grew
+  # past its film window back into it (model call, then a local shrinker)
+  # instead of throwing it away. The timing locks hold: sentence count exact,
+  # each line within +10% +2 words of its original length.
   # RECAP_HUMANIZE=0 (or false here) disables it.
   humanize: true
+  # The gate: a line counts as FAILED only when the local tell scan proved it
+  # was AI-ish and it still came back unchanged. Clean lines returned untouched
+  # are correct, not failures. Build fails when that rate is exceeded AND at
+  # least humanize_min_failures lines failed.
+  #   env: RECAP_HUMANIZE_THRESHOLD=25   CLI: --humanize-threshold 0.25
+  humanize_threshold: 0.1
+  humanize_min_failures: 3
+  # Retry budget per 30-sentence window (one batched retry is always free).
+  humanize_retry_temperature: 0.9
+  humanize_max_single_retries: 8
+  # Ship the script even if the gate trips (CLI --allow-unhumanized,
+  # env RECAP_ALLOW_UNHUMANIZED=1). When it trips, the finished script is saved
+  # to _work/script/humanizer_report_<lang>.json + script_<lang>.unhumanized.txt
+  # first, so no run is ever lost.
+  allow_unhumanized: false
   # English naturalness knobs (set in .env): RECAP_POLISH=1 spoken-style
   # rewrite per section; RECAP_ALIGN=1 sentence->beat footage alignment;
   # RECAP_ANCHOR_LEAD=0.8 / RECAP_ANCHOR_TAIL=6.0 film window per line.

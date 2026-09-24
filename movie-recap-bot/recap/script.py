@@ -191,9 +191,11 @@ SYSTEM_HUMANIZER = NARRATOR_PERSONA + VOICE_GUIDE + (
     "AI-generated writing so the narration reads like a person wrote it, "
     "without changing what it says. You invent nothing: every name, number "
     "and story fact must come from the script you are given. The video's "
-    "timing lock depends on the sentence count staying EXACTLY the same "
-    "and each sentence staying near its original length, so never merge "
-    "two lines, never split one, and never let a line grow."
+    "timing lock depends on the sentence count staying EXACTLY the same, so "
+    "never merge two lines and never split one. Length is handled by a "
+    "separate tightening pass, so write the line the way it should SOUND "
+    "first; keep it close to the original length, and prefer the shortest "
+    "phrasing that still sounds spoken."
 )
 
 
@@ -915,7 +917,9 @@ def _global_polish(
 # the 25 patterns condensed to what applies to spoken recap narration,
 # strongest first, with this register's false-positive guards.
 # Humanizer Pass A — voice/tone only, NO length constraint (decoupled per spec 1.1)
-# Pass B (in code) re-applies the timing lock afterwards.
+# Pass B (in code, see _humanize_script) re-applies the timing lock afterwards
+# by ASKING THE MODEL TO TIGHTEN the line, and only keeps the original when
+# even a mechanical tighten cannot make the rewrite fit its film window.
 HUMANIZER_PROMPT_PASS_A = """Final pass — Pass A (humanize): rewrite this FINISHED recap narration so it sounds like a human narrator wrote it, without changing what it says.
 
 WHY AI TEXT SOUNDS AI: a model picks the phrasing that fits the widest range of readers; a person writes for one listener. Every tell below is that default choice showing through. Act on a single sighting of tells 1-6; the rest count when several cluster in the same passage.
@@ -944,7 +948,8 @@ HARD CONSTRAINTS for Pass A (voice only):
 - Keep every character name, place, number and story fact exactly as the input states it. Add NOTHING that is not in the input.
 - Keep the register: present tense, no questions to the viewer, no meta commentary ("the movie", "the scene shows", "we see"), no "little did they know".
 - The narration is in {lang}. Apply the structural patterns to that language; the word list in 16 is for English text only.
-- NO length constraint in this pass — focus ONLY on voice/tone. Length (+10% longer) will be handled in Pass B's timing lock.
+- NO length constraint in this pass — focus ONLY on voice/tone. Length (+10% longer) will be handled in Pass B's timing lock. Even so, do not pad: the shortest phrasing that sounds spoken is always the best one.
+- A line that is already clean may come back unchanged. Lines listed in the TELL SCAN below are NOT clean: those must come back genuinely rewritten, never echoed.
 
 HOW TO WORK: read all {n} sentences first and mark the tells, strongest first. Rewrite each marked sentence the way a narrator would SAY it — never just patch the flagged phrase. Then re-scan your rewrite for the tells that most often survive: the not-X-but-Y contrast, the one-line closer, the dash, the triad, the inflated ending.
 
@@ -953,26 +958,221 @@ Respond with ONLY a JSON object in this exact shape, no markdown fences:
 
 === FINISHED SCRIPT, ONE SENTENCE PER LINE ===
 {draft}
-=== END ===
+=== END ==={scan}
 """
 
-# Pass B prompt is tiny — it just enforces the timing lock on Pass A's output
+# Pass B prompt — this is REALLY SENT now (it used to be dead code, which is
+# why every voice rewrite that came back a few words longer was silently
+# thrown away and then counted as a humanizer failure).
 HUMANIZER_PROMPT_PASS_B = """Timing lock pass: each sentence below was humanized for voice. Now ensure it fits its film window.
 
-For each sentence, if the humanized version is more than 10% longer than the original (+2 words allowed), tighten it: keep the human voice but cut filler, merge clauses, drop non-essential qualifiers. Never change the story facts.
+Each line is a pair: the ORIGINAL (which sets the timing) and the HUMANIZED rewrite that came back too long. Tighten the rewrite so it is AT MOST {cap_pct} of the original's word count: keep the human voice and every story fact, cut filler, merge clauses, drop non-essential qualifiers, use contractions. Never restore the AI tells that were just removed, and never go back to the original wording.
 
-Return EXACTLY {n} sentences, same order, one for one.
+The narration is in {lang}. Keep every character name, place and number exactly as written.
 
-=== ORIGINAL (timing reference) ===
-{original}
-=== HUMANIZED (to be tightened if needed) ===
-{humanized}
+Return EXACTLY {n} sentences, same order, one for one, as JSON:
+{{"sentences": ["First tightened sentence.", "Second tightened sentence."]}}
+
+=== PAIRS (original -> humanized, tighten the humanized one) ===
+{pairs}
 === END ===
 """
 
 # Keep old name as alias for backward compat (tests may reference it)
 HUMANIZER_PROMPT = HUMANIZER_PROMPT_PASS_A
 
+
+# ---------------------------------------------------------------------------
+# Local (free, deterministic) AI-tell detector.
+#
+# WHY: the old humanizer scored a sentence as FAILED whenever the model handed
+# it back unchanged. But a sentence with no AI tell in it has nothing to fix,
+# so "unchanged" is the correct answer — and on a clean script that scored a
+# 100% failure rate and killed the whole run at the very last step. The
+# detector below decides which lines actually NEED the pass, so:
+#   * the prompt can name the exact problem per line (models stop echoing),
+#   * "unchanged and clean" counts as a pass, not a failure,
+#   * the retry budget is spent only on lines that really are still AI-ish.
+# Patterns are English-first; the structural ones (dash, semicolon) apply to
+# every language.
+# ---------------------------------------------------------------------------
+_TELL_PATTERNS: tuple[tuple[str, str], ...] = (
+    # structural / language agnostic
+    ("em-dash-or-semicolon", r"—|–|(?:\s--\s)|;"),
+    # 1. not X but Y
+    ("not-X-but-Y",
+     r"\b(?:is|it's|its|was|are|they're|that's|he's|she's)\s+not\s+(?:just|only|merely|simply)\b"
+     r"|\bnot\s+(?:just|only|merely|simply)\s+[^.,;]{2,40},\s*(?:it|he|she|they|but)\b"
+     r"|\brather than\b"),
+    # 3. sayings that sound deep
+    ("deep-saying",
+     r"\bat its core\b|\bthe real question\b|\bwhat really matters\b"
+     r"|\bat the end of the day\b|\bthe truth is\b"),
+    # 4. staged run-up
+    ("staged-run-up",
+     r"\bhere's the thing\b|\blet's dive in\b|\bhere's what\b|\bmake no mistake\b"
+     r"|\bneedless to say\b|^\s*honestly\b"),
+    # 5. arguing with no one
+    ("arguing-with-no-one",
+     r"\bthis isn't about\b|\bsome might say\b|\bto be clear\b"
+     r"|\bit's worth noting\b|\bthat said\b"),
+    # 9/17. hedges and stacked qualifiers
+    ("hedge",
+     r"\bcould potentially\b|\bit seems (?:possible|likely)\b|\bit appears that\b"
+     r"|\bdetails are unclear\b|\bseemingly\b|\bsomewhat\b|\bpresumably\b"),
+    # 11. inflated significance
+    ("inflated-significance",
+     r"\bpivotal\b|\bchanges everything\b|\bmarking (?:a|an|the)\b"
+     r"|\bforever alter\w*\b|\bin a world where\b|\bnothing will ever be the same\b"),
+    # 13. shallow -ing riders
+    ("ing-rider",
+     r",\s+(?:symboliz|showcas|highlight|underscor|emphasiz|signal|solidif|cement|represent)\w*\s"),
+    # 14. sales language
+    ("sales-language",
+     r"\bbreathtaking\b|\bstunning\b|\bunforgettable\b|\bnestled\b"
+     r"|\bheart-?pounding\b|\bspine-?chilling\b|\bjaw-?dropping\b"),
+    # 16. stock AI vocabulary
+    ("ai-vocabulary",
+     r"\b(?:delve|delves|delving|showcase|showcases|testament|tapestry|vibrant"
+     r"|intricate|meticulous|underscore|underscores|bolster|bolsters|foster|fosters"
+     r"|garner|garners|robust|myriad|plethora|additionally|furthermore|moreover"
+     r"|utilize|utilizes|leverage|leverages|crucial|interplay)\b|\bdeep dive\b"),
+    # 15. avoided copulas
+    ("weak-copula", r"\bserves as\b|\bboasts\b|\bis a testament\b|\bacts as a\b"),
+    # 12. vague connections
+    ("vague-connection", r"\bis tied to\b|\bin connection with\b|\bin terms of\b"),
+    # register breaks the narrator persona forbids outright
+    ("meta-commentary",
+     r"\bthe movie\b|\bthe film\b|\bthe scene shows\b|\bthe camera\b"
+     r"|\blittle did (?:he|she|they)\b|\bthe audience\b|\bviewers\b|\bthis scene\b"),
+    # 10. missing actor (agentless passive with a by-phrase is fine; this is the
+    # actorless form the writer keeps producing)
+    ("missing-actor",
+     r"\b(?:is|are|was|were)\s+(?:being\s+)?(?:opened|taken|shown|revealed|forced"
+     r"|given|told|left|carried|dragged|thrown)\b(?!\s+by\b)"),
+)
+
+_TELL_RE: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
+    (name, re.compile(pat, re.I)) for name, pat in _TELL_PATTERNS
+)
+
+
+def _ai_tells(sentence: str) -> list[str]:
+    """Names of the AI-writing tells detected in ``sentence`` (may be empty).
+
+    Cheap, deterministic and offline: no model call. Used to decide which
+    lines the humanizer MUST change, and therefore which "unchanged" answers
+    are real failures.
+    """
+    s = (sentence or "").strip()
+    if not s:
+        return []
+    return [name for name, rx in _TELL_RE if rx.search(s)]
+
+
+_ENUM_PREFIX = re.compile(r"^\s*(?:\d{1,3}[.)]|[-*•])\s+")
+
+
+def _strip_enum_prefix(s: str) -> str:
+    """Drop a leading '12. ' / '- ' the model copied from the numbered draft.
+
+    Without this a pure echo comes back as a *different* string ("12. Woody
+    ..." vs "Woody ...") and is scored as a successful rewrite.
+    """
+    out = _ENUM_PREFIX.sub("", s or "", count=1).strip()
+    return out or (s or "").strip()
+
+
+def _fits_timing_lock(original: str, rewrite: str) -> bool:
+    """The +10% +2-word window a sentence may grow into without outrunning
+    the footage it was anchored to."""
+    return count_words(rewrite) <= max(count_words(original), 1) * 1.1 + 2
+
+
+# Deterministic last-resort shrinker used by Pass B when the model's tightened
+# line is still too long. Only safe, meaning-preserving edits: contractions,
+# filler adverbs, wordy connectives. Never touches names, numbers or clauses.
+_TIGHTEN_CONTRACTIONS: tuple[tuple[str, str], ...] = (
+    (r"\bit is\b", "it's"), (r"\bthat is\b", "that's"), (r"\bthere is\b", "there's"),
+    (r"\bhe is\b", "he's"), (r"\bshe is\b", "she's"), (r"\bthey are\b", "they're"),
+    (r"\bwe are\b", "we're"), (r"\byou are\b", "you're"), (r"\bwho is\b", "who's"),
+    (r"\bis not\b", "isn't"), (r"\bare not\b", "aren't"), (r"\bwas not\b", "wasn't"),
+    (r"\bwere not\b", "weren't"), (r"\bdoes not\b", "doesn't"),
+    (r"\bdo not\b", "don't"), (r"\bdid not\b", "didn't"),
+    (r"\bcannot\b", "can't"), (r"\bcan not\b", "can't"),
+    (r"\bwill not\b", "won't"), (r"\bwould not\b", "wouldn't"),
+    (r"\bcould not\b", "couldn't"), (r"\bshould not\b", "shouldn't"),
+    (r"\bhas not\b", "hasn't"), (r"\bhave not\b", "haven't"),
+    (r"\bhad not\b", "hadn't"), (r"\bwould have\b", "would've"),
+)
+_TIGHTEN_PHRASES: tuple[tuple[str, str], ...] = (
+    (r"\bin order to\b", "to"),
+    (r"\bdue to the fact that\b", "because"),
+    (r"\bfor the purpose of\b", "to"),
+    (r"\bat this point in time\b", "now"),
+    (r"\bat this point\b", "now"),
+    (r"\bin the process of\s+", ""),
+    (r"\bis able to\b", "can"),
+    (r"\bare able to\b", "can"),
+    (r"\bmanages to\s+", ""),
+    (r"\bbegins to\s+", ""),
+    (r"\bstarts to\s+", ""),
+    (r"\bproceeds to\s+", ""),
+    (r"\bin spite of\b", "despite"),
+    (r"\ba number of\b", "several"),
+    (r"\bthe fact that\b", "that"),
+)
+_TIGHTEN_FILLERS: tuple[str, ...] = (
+    r"\bvery\b", r"\breally\b", r"\bactually\b", r"\bsimply\b", r"\bquite\b",
+    r"\bbasically\b", r"\bliterally\b", r"\bindeed\b", r"\bcertainly\b",
+    r"\bclearly\b", r"\bobviously\b", r"\bsomehow\b", r"\btruly\b",
+    r"\bof course,?\b", r"\bin fact,?\b", r"\bso to speak\b",
+)
+
+
+def _polish_spacing(s: str) -> str:
+    s = re.sub(r"\s{2,}", " ", s).strip()
+    s = re.sub(r"\s+([,.!?;:])", r"\1", s)
+    s = re.sub(r",\s*,", ",", s)
+    s = re.sub(r"^[,;:]\s*", "", s)
+    if s and s[0].islower():
+        s = s[0].upper() + s[1:]
+    return s
+
+
+def _tighten_sentence(text: str, target_words: float) -> str:
+    """Shrink ``text`` toward ``target_words`` with safe, local edits only.
+
+    Applied in escalating order and stopped as soon as the line fits, so a
+    sentence that only needed one contraction keeps all of its other words.
+    """
+    s = (text or "").strip()
+    if not s or count_words(s) <= target_words:
+        return s
+    for pat, rep in _TIGHTEN_CONTRACTIONS:
+        s = re.sub(pat, rep, s, flags=re.I)
+        if count_words(s) <= target_words:
+            return _polish_spacing(s)
+    for pat, rep in _TIGHTEN_PHRASES:
+        s = re.sub(pat, rep, s, flags=re.I)
+        if count_words(_polish_spacing(s)) <= target_words:
+            return _polish_spacing(s)
+    for pat in _TIGHTEN_FILLERS:
+        s = re.sub(pat + r"\s*", "", s, flags=re.I)
+        if count_words(_polish_spacing(s)) <= target_words:
+            return _polish_spacing(s)
+    return _polish_spacing(s)
+
+
+def _tells_regressed(before: str, after: str) -> bool:
+    """True if ``after`` carries an AI tell that ``before`` had already lost.
+
+    Pass B tightens a rewrite that came back too long. A model that tightens by
+    reverting to the draft's phrasing would silently undo Pass A's voice work
+    and still look like a win (shorter, different from the original), so the
+    tightened line is rejected when it brings a tell back.
+    """
+    return bool(set(_ai_tells(after)) - set(_ai_tells(before)))
 
 
 def _sentence_similarity(a: str, b: str) -> float:
@@ -990,7 +1190,12 @@ def _sentence_similarity(a: str, b: str) -> float:
 
 
 def _is_humanize_failed(original: str, rewrite: str, threshold: float = 0.9) -> bool:
-    """True if rewrite is semantically identical to input (model echoed)."""
+    """True if rewrite is semantically identical to input (model echoed).
+
+    NOTE: echoing is only a *failure* when the line actually had an AI tell to
+    remove — see ``_ai_tells``. This helper answers the narrower question
+    "did the model change anything?".
+    """
     if not rewrite or not original:
         return True
     # Fast path: normalized punctuation-only equality => echoed
@@ -1007,176 +1212,443 @@ def _is_humanize_failed(original: str, rewrite: str, threshold: float = 0.9) -> 
     return sim > threshold
 
 
+def _format_tell_scan(sentences: list[str], tells: list[list[str]],
+                      mandatory: set[int]) -> str:
+    """The '=== TELL SCAN ===' block appended to the Pass A prompt."""
+    rows = []
+    for i, names in enumerate(tells):
+        why = list(names)
+        if i in mandatory and "mechanically-trimmed" not in why:
+            why.append("mechanically-trimmed")
+        if why:
+            rows.append(f"{i + 1}: {', '.join(why)}")
+    if not rows:
+        return ""
+    return (
+        "\n=== TELL SCAN (automatic) — these line numbers MUST come back "
+        "genuinely rewritten ===\n" + "\n".join(rows) + "\n=== END SCAN ==="
+    )
+
+
+def _empty_humanize_stats(n: int, failed: bool = False) -> dict:
+    return {
+        "total": n,
+        "needed": n if failed else 0,
+        "kept": 0,
+        "failed": n if failed else 0,
+        "failed_rate": 1.0 if failed and n else 0.0,
+        "failed_indices": list(range(n)) if failed else [],
+        "retried": 0,
+        "residual_tells": 0,
+        "timing_rescued": 0,
+        # lines from mechanically trimmed sections: worked on, reported, but
+        # NEVER counted as build-breaking failures (they may be clean already)
+        "mandatory": 0,
+        "mandatory_unchanged": 0,
+    }
+
+
+def _humanize_call(cfg_llm: dict, system: str, user: str, words: int,
+                   temperature: float | None = None) -> list[str]:
+    raw = llm.complete(
+        cfg_llm.get("provider", ""),
+        cfg_llm.get("model", ""),
+        system,
+        user,
+        base_url=cfg_llm.get("base_url"),
+        json_mode=True,
+        max_tokens=_out_tokens_for_words(words),
+        temperature=temperature,
+    )
+    return [_strip_enum_prefix(s) for s in _parse_segment(raw)]
+
+
 def _humanize_script(
     cfg_llm: dict,
     sentences: list[str],
     lang_name: str = "English",
+    mandatory: "set[int] | list[int] | None" = None,
 ) -> list[str] | None:
     """Two-pass humanizer: Pass A (voice) decoupled from Pass B (timing).
 
-    Pass A: rewrite for voice/tone ONLY, no length constraint.
-    Pass B: re-run the word-lock/timing logic against the new sentence,
-            same as is done for the writer's first draft. This reuses
-            the existing per-sentence +10%/+2-word check.
+    Pass A: rewrite for voice/tone ONLY, no length constraint. Lines that the
+            local tell scan flagged are named in the prompt, so the model
+            knows exactly what must change instead of echoing the draft back.
+    Pass B: the rewrites that came back longer than the +10%/+2-word film
+            window are TIGHTENED (one batched model call, then a deterministic
+            local shrink) instead of being thrown away. Only a line that is
+            still too long after both falls back to the original.
 
-    Returns (rewritten_sentences_or_None, stats) where stats = {
-        "total": N, "kept": K, "failed": F, "failed_rate": float,
-        "failed_indices": [...], "retried": R
-    }. Returns None on total call failure so caller keeps pre-humanizer script.
-    Spec 1.1, 1.2.
+    Scoring: a line is a FAILURE only when it needed humanizing (the tell scan
+    found something, or the section was mechanically trimmed) and came back
+    unchanged / with none of its tells fixed. A clean line that the model
+    returned untouched is a PASS — that is the correct answer for it.
+
+    Stats are stored on ``_humanize_script.last_stats``::
+
+        {"total", "needed", "kept", "failed", "failed_rate", "failed_indices",
+         "retried", "residual_tells", "timing_rescued"}
+
+    ``failed_rate`` is measured over the lines that NEEDED the pass. Returns
+    None on total call failure so the caller keeps the pre-humanizer script.
+    Spec 1.1, 1.2, 1.3.
     """
-    import json
-
     if not sentences:
-        _humanize_script.last_stats = {"total": 0, "kept": 0, "failed": 0, "failed_rate": 0.0, "failed_indices": [], "retried": 0}
+        _humanize_script.last_stats = _empty_humanize_stats(0)
         return None
 
-    # Chunk large scripts: a 155-sentence single JSON is where deepseek starts to split/merge lines.
-    # Process in 30-sentence windows (spec 1.1: Pass A voice only, but shape must be exact per window).
+    mandatory = {int(i) for i in (mandatory or ())}
+
+    # Chunk large scripts: a 155-sentence single JSON is where deepseek starts
+    # to split/merge lines. Process in 30-sentence windows (spec 1.1: Pass A
+    # voice only, but shape must be exact per window).
     CHUNK = 30
     if len(sentences) > 50:
-        print(f"    ... humanizer: {len(sentences)} sentences -> chunked into { (len(sentences)+CHUNK-1)//CHUNK } windows of ≤{CHUNK}", flush=True)
-        combined = []
-        all_stats = {"total": len(sentences), "kept": 0, "failed": 0, "failed_indices": [], "retried": 0}
+        print(f"    ... humanizer: {len(sentences)} sentences -> chunked into "
+              f"{(len(sentences) + CHUNK - 1) // CHUNK} windows of ≤{CHUNK}",
+              flush=True)
+        combined: list[str] = []
+        all_stats = _empty_humanize_stats(0)
+        all_stats["total"] = len(sentences)
         for start in range(0, len(sentences), CHUNK):
-            window = sentences[start:start+CHUNK]
-            sub = _humanize_script(cfg_llm, window, lang_name)
-            sub_stats = getattr(_humanize_script, "last_stats", None)
+            window = sentences[start:start + CHUNK]
+            win_mandatory = {i - start for i in mandatory
+                             if start <= i < start + len(window)}
+            sub = _humanize_script(cfg_llm, window, lang_name, win_mandatory)
+            sub_stats = getattr(_humanize_script, "last_stats", None) or \
+                _empty_humanize_stats(len(window), failed=True)
             if sub is None:
-                # Window failed -> keep original window and count as failed
+                # Window failed -> keep the original window, count only the
+                # lines that actually needed the pass as failures.
                 combined.extend(window)
-                all_stats["failed"] += len(window)
-                all_stats["failed_indices"].extend(range(start, start+len(window)))
+                all_stats["needed"] += sub_stats.get("needed", len(window))
+                all_stats["failed"] += sub_stats.get("failed", len(window))
+                all_stats["failed_indices"].extend(
+                    i + start for i in sub_stats.get("failed_indices", range(len(window)))
+                )
             else:
                 combined.extend(sub)
-                # sub_stats may be from chunked inner call; aggregate
+                all_stats["needed"] += sub_stats.get("needed", 0)
                 all_stats["kept"] += sub_stats.get("kept", 0)
                 all_stats["failed"] += sub_stats.get("failed", 0)
-                all_stats["failed_indices"].extend([i+start for i in sub_stats.get("failed_indices", [])])
+                all_stats["failed_indices"].extend(
+                    i + start for i in sub_stats.get("failed_indices", [])
+                )
                 all_stats["retried"] += sub_stats.get("retried", 0)
-        all_stats["failed_rate"] = all_stats["failed"] / max(all_stats["total"], 1)
-        all_stats["total"] = len(sentences)
+                all_stats["residual_tells"] += sub_stats.get("residual_tells", 0)
+                all_stats["timing_rescued"] += sub_stats.get("timing_rescued", 0)
+            all_stats["mandatory"] += sub_stats.get("mandatory", 0)
+            all_stats["mandatory_unchanged"] += sub_stats.get("mandatory_unchanged", 0)
+        all_stats["failed_rate"] = (
+            all_stats["failed"] / max(all_stats["needed"], 1)
+            if all_stats["needed"] else 0.0
+        )
         _humanize_script.last_stats = all_stats
-        # Apply Pass B timing lock already done per-window; just return combined
         return combined
 
+    n = len(sentences)
+    tells = [_ai_tells(s) for s in sentences]
+    # NEEDED = lines the local scan proves are AI-ish. These are the only lines
+    # a failure rate may be measured over, so a clean script can never fail the
+    # build by being returned unchanged (that was the reported crash).
+    needed = {i for i in range(n) if tells[i]}
+    # MANDATORY = lines from a mechanically trimmed section. The trim chopped
+    # whole sentences out of the writer's draft, so these beats read clipped:
+    # they get the model's attention and the retry budget, but if the model
+    # judges them fine as-is that is an opinion, not a build failure.
+    mand = {i for i in mandatory if 0 <= i < n} - needed
+    attention = needed | mand
     total_words = count_words(" ".join(sentences))
-    # Pass A: humanize for voice/tone only, no length lock
+    lang = lang_name or "English"
+
+    # ---- Pass A: voice -----------------------------------------------------
     user_a = HUMANIZER_PROMPT_PASS_A.format(
-        n=len(sentences),
-        lang=lang_name or "English",
+        n=n,
+        lang=lang,
         draft="\n".join(f"{i + 1}. {s}" for i, s in enumerate(sentences)),
+        scan=_format_tell_scan(sentences, tells, mand),
     )
     try:
-        raw = llm.complete(
-            cfg_llm.get("provider", ""),
-            cfg_llm.get("model", ""),
-            SYSTEM_HUMANIZER,
-            user_a,
-            base_url=cfg_llm.get("base_url"),
-            json_mode=True,
-            max_tokens=_out_tokens_for_words(int(total_words * 1.15)),
-        )
-        new_a = _parse_segment(raw)
+        new_a = _humanize_call(cfg_llm, SYSTEM_HUMANIZER, user_a,
+                               int(total_words * 1.15))
     except Exception as exc:
-        print(f"    ! HUMANIZE_FAILED: Pass A call failed ({type(exc).__name__}: {exc})", flush=True)
-        _humanize_script.last_stats = {"total": len(sentences), "kept": 0, "failed": len(sentences), "failed_rate": 1.0, "failed_indices": list(range(len(sentences))), "retried": 0}
+        print(f"    ! HUMANIZE_FAILED: Pass A call failed "
+              f"({type(exc).__name__}: {exc})", flush=True)
+        st = _empty_humanize_stats(n, failed=True)
+        st["needed"] = len(needed)
+        st["failed"] = len(needed)
+        st["failed_indices"] = sorted(needed)
+        st["failed_rate"] = 1.0 if needed else 0.0
+        st["mandatory"] = len(mand)
+        st["mandatory_unchanged"] = len(mand)
+        _humanize_script.last_stats = st
         return None
-    if not new_a or len(new_a) != len(sentences):
+    if not new_a or len(new_a) != n:
         got = len(new_a) if new_a else 0
-        print(f"    ! HUMANIZE_FAILED: Pass A returned {got}/{len(sentences)} sentences — bad shape, retrying with shape correction ...", flush=True)
-        # Retry once with explicit shape correction
+        print(f"    ! HUMANIZE_FAILED: Pass A returned {got}/{n} sentences — "
+              "bad shape, retrying with shape correction ...", flush=True)
         try:
-            retry_user = user_a + f"\n\nIMPORTANT: you returned {got} sentences but EXACTLY {len(sentences)} are required (one per input line). Return EXACTLY {len(sentences)} strings, same order, one for one. Never merge, never split."
-            raw2 = llm.complete(
-                cfg_llm.get("provider", ""),
-                cfg_llm.get("model", ""),
-                SYSTEM_HUMANIZER,
-                retry_user,
-                base_url=cfg_llm.get("base_url"),
-                json_mode=True,
-                max_tokens=_out_tokens_for_words(int(total_words * 1.15)),
+            retry_user = user_a + (
+                f"\n\nIMPORTANT: you returned {got} sentences but EXACTLY {n} "
+                "are required (one per input line). Return EXACTLY "
+                f"{n} strings, same order, one for one. Never merge, never split."
             )
-            new_a2 = _parse_segment(raw2)
-            if new_a2 and len(new_a2) == len(sentences):
-                print(f"      -> shape retry succeeded ({len(new_a2)}/{len(sentences)})", flush=True)
+            new_a2 = _humanize_call(cfg_llm, SYSTEM_HUMANIZER, retry_user,
+                                    int(total_words * 1.15))
+            if new_a2 and len(new_a2) == n:
+                print(f"      -> shape retry succeeded ({len(new_a2)}/{n})", flush=True)
                 new_a = new_a2
             else:
-                print(f"      -> shape retry still bad ({len(new_a2) if new_a2 else 0}/{len(sentences)}) — keeping original window", flush=True)
-                _humanize_script.last_stats = {"total": len(sentences), "kept": 0, "failed": len(sentences), "failed_rate": 1.0, "failed_indices": list(range(len(sentences))), "retried": 0}
+                print(f"      -> shape retry still bad "
+                      f"({len(new_a2) if new_a2 else 0}/{n}) — keeping original window",
+                      flush=True)
+                st = _empty_humanize_stats(n, failed=True)
+                st["needed"] = len(needed)
+                st["failed"] = len(needed)
+                st["failed_indices"] = sorted(needed)
+                st["failed_rate"] = 1.0 if needed else 0.0
+                _humanize_script.last_stats = st
                 return None
         except Exception as exc2:
             print(f"      -> shape retry failed: {exc2}", flush=True)
-            _humanize_script.last_stats = {"total": len(sentences), "kept": 0, "failed": len(sentences), "failed_rate": 1.0, "failed_indices": list(range(len(sentences))), "retried": 0}
+            st = _empty_humanize_stats(n, failed=True)
+            st["needed"] = len(needed)
+            st["failed"] = len(needed)
+            st["failed_indices"] = sorted(needed)
+            st["failed_rate"] = 1.0 if needed else 0.0
+            _humanize_script.last_stats = st
             return None
 
-    # Per-sentence similarity check + retry with different temperature if >0.9
-    failed_indices = []
-    retried = 0
+    # ---- Echo repair: ONE batched retry for the lines that had to change ---
+    # (the old code fired one serial API call per echoed sentence — 180 extra
+    # round trips on the reported run, and it still counted them as failures.)
     retry_temp = float(cfg_llm.get("humanize_retry_temperature") or 0.9)
-    for i, (orig, rew) in enumerate(zip(sentences, new_a)):
-        if _is_humanize_failed(orig, rew):
-            failed_indices.append(i)
-            print(f"    ! HUMANIZE_FAILED sentence {i+1}: rewrite identical (sim>{0.9:.1f}) — retrying at temp {retry_temp}", flush=True)
-            # Retry this single sentence with different sampling temp
-            try:
-                user_retry = HUMANIZER_PROMPT_PASS_A.format(
-                    n=1, lang=lang_name or "English",
-                    draft=f"1. {orig}"
-                )
-                raw_retry = llm.complete(
-                    cfg_llm.get("provider", ""),
-                    cfg_llm.get("model", ""),
-                    SYSTEM_HUMANIZER,
-                    user_retry + "\n\nIMPORTANT: you previously echoed the input back verbatim. Rewrite it with REAL voice changes — vary rhythm, use contractions, change opener.",
-                    base_url=cfg_llm.get("base_url"),
-                    json_mode=True,
-                    max_tokens=_out_tokens_for_words(max(30, count_words(orig)*2)),
-                    temperature=retry_temp,
-                )
-                rew_retry = _parse_segment(raw_retry)
-                if rew_retry and len(rew_retry) == 1 and not _is_humanize_failed(orig, rew_retry[0]):
-                    new_a[i] = rew_retry[0]
-                    failed_indices.remove(i)
-                    retried += 1
-                    print(f"      -> retry succeeded for sentence {i+1}", flush=True)
-                else:
-                    print(f"      -> retry still failed for sentence {i+1}", flush=True)
-            except Exception as exc2:
-                print(f"      -> retry call failed for sentence {i+1}: {exc2}", flush=True)
+    retried = 0
+    echoed = [i for i in sorted(attention) if _is_humanize_failed(sentences[i], new_a[i])]
+    if echoed:
+        print(f"    ... humanizer: {len(echoed)}/{len(attention)} flagged lines came "
+              f"back unchanged — one batched retry at temp {retry_temp}", flush=True)
+        try:
+            sub_sents = [sentences[i] for i in echoed]
+            sub_tells = [tells[i] for i in echoed]
+            user_r = HUMANIZER_PROMPT_PASS_A.format(
+                n=len(sub_sents),
+                lang=lang,
+                draft="\n".join(f"{k + 1}. {s}" for k, s in enumerate(sub_sents)),
+                scan=_format_tell_scan(
+                    sub_sents, sub_tells,
+                    {k for k, i in enumerate(echoed) if i in mand}),
+            ) + (
+                "\n\nIMPORTANT: you already saw these lines and echoed them back "
+                "verbatim. Every one of them still contains the tell listed in the "
+                "scan. Rewrite each with REAL changes: different opener, different "
+                "rhythm, contractions where a person would use them, the flagged "
+                "phrase gone. Same facts, same order, same count."
+            )
+            rew = _humanize_call(cfg_llm, SYSTEM_HUMANIZER, user_r,
+                                 int(count_words(" ".join(sub_sents)) * 1.3),
+                                 temperature=retry_temp)
+            if rew and len(rew) == len(echoed):
+                for k, i in enumerate(echoed):
+                    if rew[k].strip() and not _is_humanize_failed(sentences[i], rew[k]):
+                        new_a[i] = rew[k]
+                        retried += 1
+        except Exception as exc:
+            print(f"      -> batched retry failed: {type(exc).__name__}: {exc}",
+                  flush=True)
 
-    # Pass B: re-time — apply the timing lock per sentence (reuse existing logic)
-    # This is the same word-lock the pipeline already does for writer drafts.
-    final = []
+        # Final escalation, one call per stubborn line, hard-capped so a bad
+        # provider day can never turn into hundreds of round trips.
+        still = [i for i in echoed if _is_humanize_failed(sentences[i], new_a[i])]
+        try:
+            cap_single = int(cfg_llm.get("humanize_max_single_retries", 8))
+        except (TypeError, ValueError):
+            cap_single = 8
+        for i in still[:max(0, cap_single)]:
+            try:
+                user_one = HUMANIZER_PROMPT_PASS_A.format(
+                    n=1, lang=lang, draft=f"1. {sentences[i]}",
+                    scan=_format_tell_scan([sentences[i]], [tells[i]],
+                                           {0} if i in mand else set()),
+                ) + (
+                    "\n\nIMPORTANT: you echoed this line twice already. It MUST come "
+                    "back rewritten — new opener, new rhythm, the flagged phrase gone."
+                )
+                one = _humanize_call(cfg_llm, SYSTEM_HUMANIZER, user_one,
+                                     max(30, count_words(sentences[i]) * 3),
+                                     temperature=min(1.0, retry_temp + 0.1))
+                if one and len(one) == 1 and not _is_humanize_failed(sentences[i], one[0]):
+                    new_a[i] = one[0]
+                    retried += 1
+            except Exception as exc:
+                print(f"      -> retry call failed for sentence {i + 1}: "
+                      f"{type(exc).__name__}: {exc}", flush=True)
+
+    # ---- Pass B: the timing lock (REALLY RUNS NOW) -------------------------
+    # Any rewrite that grew past its film window is tightened rather than
+    # discarded: first by the model (one batched call), then by a local,
+    # deterministic shrinker. Only then do we fall back to the original.
+    over = [i for i in range(n)
+            if new_a[i].strip()
+            and new_a[i] != sentences[i]
+            and not _fits_timing_lock(sentences[i], new_a[i])]
+    timing_rescued = 0
+    pass_b_cand: dict[int, str] = {}
+    if over:
+        print(f"    ... humanizer Pass B: {len(over)} rewrite(s) are longer than "
+              "their film window — tightening to fit", flush=True)
+        try:
+            pairs = "\n".join(
+                f"{k + 1}. ORIGINAL ({count_words(sentences[i])} words): {sentences[i]}\n"
+                f"   HUMANIZED ({count_words(new_a[i])} words): {new_a[i]}"
+                for k, i in enumerate(over)
+            )
+            user_b = HUMANIZER_PROMPT_PASS_B.format(
+                n=len(over), lang=lang, cap_pct="110%", pairs=pairs,
+            )
+            tightened = _humanize_call(
+                cfg_llm, SYSTEM_HUMANIZER, user_b,
+                int(count_words(" ".join(sentences[i] for i in over)) * 1.4) + 40,
+            )
+            if tightened and len(tightened) == len(over):
+                for k, i in enumerate(over):
+                    cand = tightened[k].strip()
+                    # Remember it even if it is still a word or two too long:
+                    # the local shrinker gets a shot at it below, and starting
+                    # from the model's tightened line beats starting from the
+                    # bloated one.
+                    if cand and not _is_humanize_failed(sentences[i], cand):
+                        pass_b_cand[i] = cand
+                    if (cand and _fits_timing_lock(sentences[i], cand)
+                            and not _is_humanize_failed(sentences[i], cand)
+                            # a "tighter" line that chops the rewrite back into
+                            # its AI phrasing is not a rescue — Pass B must not
+                            # undo Pass A's work
+                            and not _tells_regressed(new_a[i], cand)):
+                        new_a[i] = cand
+                        timing_rescued += 1
+        except Exception as exc:
+            print(f"      -> Pass B call failed: {type(exc).__name__}: {exc}",
+                  flush=True)
+        # Deterministic fallback for whatever the model could not shrink:
+        # try the model's tightened line first, then the Pass A rewrite.
+        for i in over:
+            if _fits_timing_lock(sentences[i], new_a[i]):
+                continue
+            cap = max(count_words(sentences[i]), 1) * 1.1 + 2
+            for source in (pass_b_cand.get(i), new_a[i]):
+                if not source:
+                    continue
+                cand = _tighten_sentence(source, cap)
+                if (cand and count_words(cand) <= cap
+                        and not _is_humanize_failed(sentences[i], cand)
+                        and not _tells_regressed(new_a[i], cand)):
+                    new_a[i] = cand
+                    timing_rescued += 1
+                    break
+
+    # ---- assemble + score --------------------------------------------------
+    final: list[str] = []
     kept = 0
-    for orig, rew in zip(sentences, new_a):
-        if rew != orig and rew.strip() and not _is_humanize_failed(orig, rew):
-            # Check timing lock: within +10% +2 words
-            if count_words(rew) <= max(count_words(orig), 1) * 1.1 + 2:
+    timing_lost = 0
+    for i, (orig, rew) in enumerate(zip(sentences, new_a)):
+        if rew.strip() and rew != orig and not _is_humanize_failed(orig, rew):
+            if _fits_timing_lock(orig, rew):
                 final.append(rew)
                 kept += 1
-            else:
-                # Pass B: would need re-timing — try to tighten while keeping voice
-                # For now, reject and keep original (caller will handle alternative)
-                # But log it as not kept due to timing, not voice fail
-                print(f"    ... humanizer Pass B: sentence tightened length would exceed lock — keeping original", flush=True)
-                final.append(orig)
-        else:
-            # Voice failed or identical — keep original and count as failed
-            final.append(orig)
+                continue
+            timing_lost += 1
+        final.append(orig)
+    if timing_lost:
+        print(f"    ... humanizer Pass B: {timing_lost} line(s) could not be "
+              "tightened into their film window — original kept (the picture "
+              "stays in sync)", flush=True)
 
-    # Recalculate failed after Pass B
-    still_failed = [i for i, (o, f) in enumerate(zip(sentences, final)) if _is_humanize_failed(o, f)]
+    failed_indices = []
+    residual = 0
+    for i in sorted(needed):
+        after = _ai_tells(final[i])
+        if final[i] == sentences[i]:
+            failed_indices.append(i)          # nothing changed on a line that had to
+        elif tells[i] and set(tells[i]).issubset(set(after)):
+            failed_indices.append(i)          # rewritten, but not one tell was fixed
+        elif after:
+            residual += 1                     # improved, some tell survived
+
     stats = {
-        "total": len(sentences),
+        "total": n,
+        "needed": len(needed),
         "kept": kept,
-        "failed": len(still_failed),
-        "failed_rate": len(still_failed) / max(len(sentences), 1),
-        "failed_indices": still_failed,
+        "failed": len(failed_indices),
+        "failed_rate": len(failed_indices) / max(len(needed), 1) if needed else 0.0,
+        "failed_indices": failed_indices,
         "retried": retried,
+        "residual_tells": residual,
+        "timing_rescued": timing_rescued,
+        "mandatory": len(mand),
+        "mandatory_unchanged": sum(1 for i in mand if final[i] == sentences[i]),
     }
     _humanize_script.last_stats = stats
     return final
+
+
+def _write_humanize_report(
+    report_dir: "str | Path | None",
+    lang_name: str,
+    out: list[dict],
+    before: list[str],
+    stats: dict | None,
+    mandatory: list[int] | None = None,
+) -> "Path | None":
+    """Persist the finished script + humanizer diagnostics before failing.
+
+    The humanizer gate is the LAST step of a run that may have cost an hour of
+    transcription, vision captioning and writing. Raising without leaving the
+    script on disk means all of that work is gone. This drops a JSON report
+    (script, per-sentence verdicts, the tells the scan found) so the operator
+    can inspect it, or re-run with --allow-unhumanized and keep the text.
+    """
+    if not report_dir:
+        return None
+    try:
+        import json
+
+        d = Path(report_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        code = re.sub(r"[^a-z0-9]+", "_", (lang_name or "en").lower()).strip("_") or "en"
+        path = d / f"humanizer_report_{code}.json"
+        failed = set((stats or {}).get("failed_indices", []) or [])
+        mand = set(mandatory or ())
+        rows = []
+        for i, o in enumerate(out):
+            src = before[i] if i < len(before) else o.get("sentence", "")
+            now = o.get("sentence", "")
+            rows.append({
+                "index": i,
+                "film_start": o.get("film_start"),
+                "film_end": o.get("film_end"),
+                "before": src,
+                "after": now,
+                "changed": now != src,
+                "tells_before": _ai_tells(src),
+                "tells_after": _ai_tells(now),
+                "mandatory": i in mand,
+                "failed": i in failed,
+            })
+        path.write_text(
+            json.dumps({"language": lang_name, "stats": stats or {},
+                        "sentences": rows}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        # ... and the readable script itself, so the run is never lost: rerun
+        # with --allow-unhumanized to ship it, or edit this file by hand.
+        (d / f"script_{code}.unhumanized.txt").write_text(
+            "\n".join(r["after"] for r in rows) + "\n", encoding="utf-8")
+        return path
+    except Exception as exc:          # a report must never mask the real error
+        print(f"    ... (could not write the humanizer report: "
+              f"{type(exc).__name__}: {exc})", flush=True)
+        return None
 
 
 def _visual_matched_budgets(
@@ -1464,6 +1936,7 @@ def generate_segmented_script(
     sign_off: bool = True,
     visual_match: bool = True,
     humanize: bool = True,
+    report_dir: "str | Path | None" = None,
 ) -> list[dict]:
     """Write the recap chunk-by-chunk, in film order, hitting the word target.
 
@@ -1479,6 +1952,11 @@ def generate_segmented_script(
     ``sign_off`` — append the channel outro line ("If you enjoyed the video,
     don't forget to leave a like...") after the story ends, the way real recap
     channels close every video. Skipped when the writer already ended with one.
+
+    ``report_dir`` — where to drop ``humanizer_report_<lang>.json`` when the
+    humanizer gate trips. The finished script is written there BEFORE the
+    build fails, so an hour of transcription, vision and writing is never
+    thrown away by the last step of the pipeline.
 
     Returns ``[{"sentence", "film_start", "film_end"}]``: every sentence knows
     which moment of film it describes (see ``_anchor_windows``), so the visual
@@ -1542,6 +2020,11 @@ def generate_segmented_script(
                    for w in weights]
 
     out: list[dict] = []
+    # Sentences that came out of a MECHANICALLY TRIMMED section (spec 1.3):
+    # the trim chopped whole sentences off the writer's draft, so those beats
+    # read clipped and MUST go through the humanizer. Collected here as flat
+    # indices into ``out`` and handed to _humanize_script as mandatory work.
+    mandatory_humanize: list[int] = []
     tail = ""  # last sentences of the previous section, for continuity
     for pos, c in enumerate(usable):
         budget = int(budgets[pos])
@@ -1800,6 +2283,7 @@ def generate_segmented_script(
         else:
             wins = []
             anchors = []
+        _sec_first_index = len(out)
         for k, (s, (lo, hi)) in enumerate(zip(sents, wins)):
             out.append({
                 "sentence": s, "film_start": lo, "film_end": hi,
@@ -1821,6 +2305,8 @@ def generate_segmented_script(
                 "zone_lo": t0,
                 "zone_hi": min(t1, zone_hi[pos]),
             })
+        if c.get("_mechanically_trimmed"):
+            mandatory_humanize.extend(range(_sec_first_index, len(out)))
         if sents:
             tail = " ".join(sents[-2:])   # two sentences of carry-over context
 
@@ -1852,27 +2338,42 @@ def generate_segmented_script(
     # AI words, ...) from the finished script. Adapted from
     # blader/humanizer (MIT). Guardrails: the sentence count stays EXACT
     # (every sentence owns a film window) and each accepted line is within
-    # +10% +2 words of the original, so a rewrite can never outrun the
-    # footage the way the pre-visual-match scripts did.
-    # Spec 1.1, 1.2: two-pass (Pass A voice decoupled, Pass B timing), loud failure.
+    # +10% +2 words of the original -- but a rewrite that came back longer
+    # is now TIGHTENED back into that window (Pass B) instead of being
+    # dropped and then blamed on the humanizer.
+    # Spec 1.1, 1.2, 1.3: two-pass (Pass A voice, Pass B timing), loud failure
+    # measured over the lines that actually needed humanizing.
     if humanize and out:
         _before = [o["sentence"] for o in out]
-        _humanized_result = _humanize_script(cfg_llm, _before, lang_name)
-        # _humanize_script returns list|None (backward compat) and stores stats on .last_stats; also handle tuple for forward compat
+        _mandatory = sorted({i for i in mandatory_humanize if 0 <= i < len(_before)})
+        if _mandatory:
+            print(f"    ! {len(_mandatory)} sentence(s) come from mechanically "
+                  "trimmed sections — humanizer is mandatory for those beats",
+                  flush=True)
+        _humanized_result = _humanize_script(cfg_llm, _before, lang_name, _mandatory)
+        # _humanize_script returns list|None and stores stats on .last_stats;
+        # also handle a (list, stats) tuple for forward compat.
         if isinstance(_humanized_result, tuple):
             _humanized, _h_stats = _humanized_result
         else:
             _humanized = _humanized_result
             _h_stats = getattr(_humanize_script, "last_stats", None)
-            if _humanized is None or _h_stats is None:
-                # Fallback: compute via similarity check per sentence
+            if _h_stats is None:
+                # Defensive fallback: score locally with the same rules.
                 if _humanized is None:
-                    _h_stats = {"total": len(_before), "kept": 0, "failed": len(_before), "failed_rate": 1.0, "failed_indices": list(range(len(_before))), "retried": 0}
+                    _h_stats = _empty_humanize_stats(len(_before), failed=True)
                 else:
-                    _is_failed = [_is_humanize_failed(a, b) for a, b in zip(_before, _humanized)]
-                    _failed = sum(_is_failed)
-                    _h_stats = {"total": len(_before), "kept": len(_before)-_failed, "failed": _failed, "failed_rate": _failed / max(len(_before),1), "failed_indices": [i for i, f in enumerate(_is_failed) if f], "retried": 0}
-            # Reset for next call
+                    _need = [i for i, s in enumerate(_before) if _ai_tells(s)]
+                    _bad = [i for i in _need
+                            if _is_humanize_failed(_before[i], _humanized[i])]
+                    _h_stats = {
+                        "total": len(_before), "needed": len(_need),
+                        "kept": sum(1 for a, b in zip(_before, _humanized) if a != b),
+                        "failed": len(_bad),
+                        "failed_rate": len(_bad) / max(len(_need), 1) if _need else 0.0,
+                        "failed_indices": _bad, "retried": 0,
+                        "residual_tells": 0, "timing_rescued": 0,
+                    }
             if hasattr(_humanize_script, "last_stats"):
                 try:
                     delattr(_humanize_script, "last_stats")
@@ -1886,37 +2387,68 @@ def generate_segmented_script(
                         <= max(count_words(_old), 1) * 1.1 + 2):
                     o["sentence"] = _new
                     _kept += 1
-            # Use stats for failure reporting (includes similarity check)
-            _failed = _h_stats.get("failed", len(_before) - _kept)
-            _failed_rate = _h_stats.get("failed_rate", _failed / max(len(_before),1))
+            _needed = int(_h_stats.get("needed", 0))
+            _failed = int(_h_stats.get("failed", 0))
+            _failed_rate = float(_h_stats.get(
+                "failed_rate", _failed / max(_needed, 1) if _needed else 0.0))
             _threshold = float(cfg_llm.get("humanize_threshold") or 0.1)
             print(f"  * humanizer pass: {_kept}/{len(out)} sentences "
                   "rewritten to sound human (AI tells removed; every "
                   "sentence keeps its film window) — "
-                  f"failed {_failed}/{len(out)} ({_failed_rate:.0%} > threshold {_threshold:.0%})")
-            # Spec 1.2: loud failure if >10% failed (or threshold) — require --allow-unhumanized
+                  f"{_needed}/{len(out)} needed the pass, "
+                  f"failed {_failed}/{max(_needed, 0)} "
+                  f"({_failed_rate:.0%} of them > threshold {_threshold:.0%})")
+            if _h_stats.get("timing_rescued"):
+                print(f"    ... Pass B tightened {_h_stats['timing_rescued']} "
+                      "rewrite(s) back into their film window (kept, not dropped)")
+            if _h_stats.get("residual_tells"):
+                print(f"    ... {_h_stats['residual_tells']} line(s) improved but "
+                      "still carry a minor tell (not counted as failures)")
+            if not _needed:
+                print("    ... the tell scan found no AI-writing tells in this "
+                      "script, so 'unchanged' lines are correct, not failures")
+            # Mechanically trimmed beats: reported, never build-breaking.
+            if _h_stats.get("mandatory_unchanged"):
+                print(f"    ... {_h_stats['mandatory_unchanged']} of "
+                      f"{_h_stats.get('mandatory', 0)} mechanically trimmed "
+                      "sentence(s) came back unchanged — the model judged them "
+                      "clean; they are NOT counted as humanizer failures")
+            # Spec 1.2: loud failure over the threshold — unless --allow-unhumanized.
+            # A rate alone is not enough to burn a finished run: on a nearly
+            # clean script "1 of 4 flagged lines" is 25% and means nothing.
+            # The gate needs a real number of failures behind the rate.
             _allow_unhuman = bool(cfg_llm.get("allow_unhumanized") or False)
-            # Also check mechanically trimmed sections flag (Spec 1.3)
-            _mech_trimmed = any(c.get("_mechanically_trimmed") for c in usable)
-            if _mech_trimmed:
-                print(f"    ! mechanically trimmed sections detected — humanizer mandatory for those beats", flush=True)
-            if _failed_rate > _threshold:
-                msg = (f"    ! HUMANIZE_FAILED: {_failed}/{len(out)} sentences "
-                       f"({ _failed_rate:.0%}) failed to humanize (similarity >0.9 or timing lock). "
+            try:
+                _min_failures = int(cfg_llm.get("humanize_min_failures", 3))
+            except (TypeError, ValueError):
+                _min_failures = 3
+            if _needed and _failed_rate > _threshold and _failed < _min_failures:
+                print(f"    ... {_failed} failed line(s) is under the "
+                      f"{_min_failures}-line floor for failing a build — "
+                      "shipping (the rest of the script humanized fine)")
+            elif _needed and _failed_rate > _threshold:
+                msg = (f"    ! HUMANIZE_FAILED: {_failed}/{_needed} sentences that "
+                       f"needed humanizing ({_failed_rate:.0%}) came back unchanged. "
                        f"Threshold is {_threshold:.0%}.")
+                _report = _write_humanize_report(
+                    report_dir, lang_name, out, _before, _h_stats, _mandatory)
                 if not _allow_unhuman:
-                    # Spec 1.2: fail loudly unless --allow-unhumanized
                     print(msg, flush=True)
-                    print("    ! Failing build: use --allow-unhumanized or RECAP_ALLOW_UNHUMANIZED=1 to ship anyway.", flush=True)
-                    # Raise so pipeline fails — caller can catch and flag
+                    if _report:
+                        print(f"    ! wrote {_report} — the finished script is "
+                              "saved there, nothing from this run is lost.",
+                              flush=True)
+                    print("    ! Failing build: use --allow-unhumanized or "
+                          "RECAP_ALLOW_UNHUMANIZED=1 to ship anyway.", flush=True)
                     raise RuntimeError(
-                        f"HUMANIZE_FAILED: {_failed}/{len(out)} sentences failed to humanize "
-                        f"({ _failed_rate:.0%} > {_threshold:.0%} threshold). "
-                        "Use --allow-unhumanized or set RECAP_ALLOW_UNHUMANIZED=1 / narration.allow_unhumanized=true to allow."
+                        f"HUMANIZE_FAILED: {_failed}/{_needed} sentences failed to humanize "
+                        f"({_failed_rate:.0%} > {_threshold:.0%} threshold). "
+                        "Use --allow-unhumanized or set RECAP_ALLOW_UNHUMANIZED=1 / "
+                        "narration.allow_unhumanized=true to allow."
                     )
                 else:
                     print(msg + " (--allow-unhumanized set, shipping anyway)", flush=True)
-            if _kept == 0:
+            if _kept == 0 and _needed:
                 print("    ! WARNING: humanizer changed 0 sentences — the "
                       "model echoed the script back (or every rewrite "
                       "broke the +10%/+2-word timing lock). The AI feel "
@@ -1924,17 +2456,28 @@ def generate_segmented_script(
                       "stronger LLM model for narration, or disable the "
                       "pass (RECAP_HUMANIZE=0) and judge the writer "
                       "directly.", flush=True)
+            elif _kept == 0:
+                print("    ! WARNING: humanizer changed 0 sentences — the "
+                      "model echoed the script back, but the tell scan found "
+                      "nothing to fix either, so the script ships as written.",
+                      flush=True)
         else:
             print("    ! humanizer pass: the rewrite call failed or "
                   "returned a bad shape — the polished script is kept "
                   "AS-IS (not humanized). Check the LLM provider.",
                   flush=True)
             _allow_unhuman = bool(cfg_llm.get("allow_unhumanized") or False)
-            if not _allow_unhuman:
+            _needed_n = int(_h_stats.get("needed", 0)) if _h_stats else 0
+            if not _allow_unhuman and _needed_n:
+                _write_humanize_report(report_dir, lang_name, out, _before,
+                                       _h_stats, _mandatory)
                 raise RuntimeError(
                     "HUMANIZE_FAILED: humanizer call failed entirely (no rewrite returned). "
                     "Use --allow-unhumanized or RECAP_ALLOW_UNHUMANIZED=1 to allow."
                 )
+            if not _needed_n:
+                print("    ... no AI-writing tells were detected in the script, "
+                      "so the failed call is not blocking the build.", flush=True)
 
     _append_sign_off(out, lang_name=lang_name, enabled=sign_off)
 

@@ -273,7 +273,38 @@ pass must return the exact same sentence count (every sentence owns a film
 window) and every accepted line stays within +10% +2 words of its original,
 so a rewrite can never outrun its footage. Works for every narration
 language (structural patterns are universal; the word list is
-English-only). One extra LLM call per movie, cached with the script.
+English-only).
+
+The pass runs in **two stages**, because voice and timing are different
+problems:
+
+* **Pass A — voice.** The script is scanned *locally* first (free, offline
+  regex pack) and every line that really does carry a tell is listed in the
+  prompt by number and tell name, so the model knows exactly what must change
+  instead of echoing the draft back. Pass A has **no length constraint**:
+  write the line the way it should sound.
+* **Pass B — the timing lock.** Any rewrite that came back longer than its
+  film window (+10% +2 words) is **tightened back into it** — one batched
+  model call, then a deterministic local shrinker (contractions, filler
+  adverbs, wordy connectives). Only a line that still does not fit after both
+  falls back to the original, and a "tightened" line that smuggles an AI tell
+  back in is rejected.
+
+Scoring follows the same logic: a line is a **failure only if the scan proved
+it was AI-ish and it came back unchanged**. A clean sentence the model returns
+untouched is the correct answer, not a failure — that distinction is what used
+to turn a perfectly good script into `HUMANIZE_FAILED: 69/159 (43%)`. Sentences
+from a mechanically trimmed section get the model's attention and the retry
+budget, but never break the build on their own. Retries are batched (one call
+for all echoed lines) and hard-capped (`narration.humanize_max_single_retries`,
+default 8), so a bad provider day costs a handful of calls instead of 180.
+
+If the gate does trip, the finished script is written to
+`_work/script/humanizer_report_<lang>.json` and
+`_work/script/script_<lang>.unhumanized.txt` **before** the build fails —
+an hour of transcription, vision and writing is never thrown away. Re-run with
+`--allow-unhumanized` (or `RECAP_ALLOW_UNHUMANIZED=1`) to ship it as written,
+or loosen the gate with `--humanize-threshold 0.25` / `RECAP_HUMANIZE_THRESHOLD=25`.
 
 **2. Footage that shows the moment each line talks about.** Every narration
 sentence is anchored to a beat with its own film timecode. For English the
@@ -657,6 +688,10 @@ Edit `config.yaml` (template: `config.example.yaml`). Key knobs:
 | `narration.rate` | speaking rate, e.g. `+5%` |
 | `narration.visual_match` | size each section's script to the film time it covers, and pace sentence anchors so the recap plays at 1x end to end (default `true`; `false` = old beat-count budgets) |
 | `narration.humanize` | final pass that removes AI-writing tells from the finished script (adapted from blader/humanizer, MIT) while keeping every sentence inside its film window (default `true`) |
+| `narration.humanize_threshold` | share of *AI-flagged* lines the humanizer may leave unfixed before the build fails (default `0.1`; CLI `--humanize-threshold`, env `RECAP_HUMANIZE_THRESHOLD`) |
+| `narration.humanize_min_failures` | a percentage alone never fails a run: at least this many lines must have failed (default `3`) |
+| `narration.humanize_max_single_retries` | cap on per-sentence retry calls per 30-line window (default `8`) |
+| `narration.allow_unhumanized` | ship the script even if the humanizer gate trips (default `false`; CLI `--allow-unhumanized`) |
 | `narration.words_target` | desired narration length |
 | `subtitles.font` | must include CJK glyphs for 中文 (default `Noto Serif CJK SC`) |
 | `subtitles.lang_font.ar` | Arabic subtitle font (default `Arial`, shaped) |

@@ -551,3 +551,161 @@ actually killed.
 (a) first 3 batch calls 503 → the sweep recovers all 12/12 frames, log shows "final
 sweep", `visual_notes.json` written; (b) storm never ends → notes empty, log contains the
 loud "could NOT be captioned" + "Re-run the SAME movie" guidance. All 7 suites green.
+
+---
+
+# Round 5 (2026-09-24): `HUMANIZE_FAILED` killed a finished run at the last step
+
+You reported, after ~1h15m on a 6206.8s film (vision 599/600 frames captioned,
+36 chunks summarized, 3584 words written):
+
+```
+  ! HUMANIZE_FAILED: 69/159 sentences (43%) failed to humanize
+ERROR: RuntimeError: HUMANIZE_FAILED: 69/159 sentences failed to humanize (43% > 10% threshold).
+```
+
+and asked for a real fix, not `--allow-unhumanized`.
+
+## The log already contained the whole diagnosis
+
+Your run printed, per window:
+
+* `rewrite identical (sim>0.9)` for nearly **every** sentence of Pass A,
+* **51** × `humanizer Pass B: sentence tightened length would exceed lock — keeping original`,
+* **18** × `retry still failed for sentence N`,
+
+and `51 + 18 = 69` — exactly the reported failure count. The movie was never
+the problem; three code defects were.
+
+### Defect 1 — Pass B was dead code (51 of the 69 failures)
+
+`HUMANIZER_PROMPT_PASS_B` existed in `recap/script.py` and was **never sent to
+the model**. Meanwhile Pass A's prompt says, in capitals, *"NO length
+constraint in this pass — Length will be handled in Pass B's timing lock."*
+So the model was invited to write longer, and the code then silently **threw
+every longer rewrite away** (`count_words(rew) <= words(orig)*1.1 + 2` or
+discard) and reverted to the original — which the scorer immediately counted
+as a humanizer failure. Good rewrites were being produced, paid for, and
+deleted.
+
+**Fix:** Pass B is now really a pass.
+
+1. The over-long rewrites are collected and sent **in one batched call** with
+   the original beside each one ("tighten this to at most 110% of the
+   original's word count, keep the human voice, never restore the tells").
+2. Whatever the model still leaves too long goes through a **deterministic
+   local shrinker** (`_tighten_sentence`): contractions → wordy connectives
+   (`in order to` → `to`, `is able to` → `can`) → filler adverbs, applied in
+   escalating order and stopped the moment the line fits, so a sentence that
+   needed one contraction keeps all its other words.
+3. Only a line that *still* does not fit falls back to the original, and a
+   "tightened" line that smuggles an AI tell back in is rejected
+   (`_tells_regressed`) — Pass B can never undo Pass A's work.
+
+The +10% +2-word film window itself is unchanged: sync is still absolute.
+
+### Defect 2 — "unchanged" was scored as "failed", even with nothing to fix
+
+24 of your 36 sections ended in a mechanical trim, which leaves short, plain,
+already-human prose. The humanizer asked the model to rewrite those lines
+anyway, the model correctly returned them unchanged, and the scorer counted
+every one as a failure. On a clean script that is a 100% failure rate.
+
+**Fix:** a free, offline **tell scan** (`_ai_tells`, the blader pattern pack as
+regexes) now runs first. It decides which lines actually carry AI writing, and:
+
+* those line numbers and their tell names are listed in the prompt
+  (`=== TELL SCAN (automatic) ===`), so the model knows what to change instead
+  of echoing the draft back;
+* **`failed_rate` is measured over the flagged lines only** — a clean line
+  returned untouched is the right answer, not a failure;
+* a line that was rewritten and lost at least one of its tells is a pass; one
+  that improved but kept a minor tell is reported as `residual_tells`, not a
+  failure.
+
+### Defect 3 — the retry storm (18 of the 69) and its cost
+
+The echo retry fired **one serial API call per sentence** with a single
+strategy (same prompt, temp 0.9) and no escalation — ~180 extra round trips on
+your run, each one able to stall like your chunks 15 and 18 did.
+
+**Fix:** retries are now staged — **one batched call** for *all* echoed lines
+("you already saw these lines and echoed them back; the tell is still there"),
+then at most `narration.humanize_max_single_retries` (default **8**) per-line
+escalations at a higher temperature. A stubborn provider now costs ~6 calls
+per window instead of 30+.
+
+### Defect 4 — the prompts contradicted each other
+
+`SYSTEM_HUMANIZER` said *"never let a line grow"* while Pass A said *"NO length
+constraint"*. At `LLM_TEMPERATURE=0.7`, echoing the input is the safest way to
+satisfy both. The system prompt now owns only the sentence-count lock and
+defers length to Pass B.
+
+### Defect 5 — a finished run could be thrown away
+
+The gate raised **after** the script was written and **before**
+`pipeline.py` persisted it, so an hour of transcription, vision and writing
+died with the exception.
+
+**Fix:** `generate_segmented_script(..., report_dir=...)` (wired to
+`_work/script/`) writes, *before* raising:
+
+* `humanizer_report_<lang>.json` — every sentence with its film window,
+  before/after text, tells before/after, and which lines failed;
+* `script_<lang>.unhumanized.txt` — the plain script, one sentence per line.
+
+The error message points at them. Re-running with `--allow-unhumanized` ships
+that text as written.
+
+### Defect 6 — a percentage with no floor
+
+On a nearly clean script "1 of 4 flagged lines" is 25% and would still burn the
+run. The gate now needs a real number behind the rate:
+`narration.humanize_min_failures` (default **3**).
+
+### Mechanically trimmed sections are now actually used
+
+`c["_mechanically_trimmed"]` was set and only ever printed. Those sentences are
+now passed to the humanizer as `mandatory` work: they are named in the prompt
+and get the retry budget — but they are **not** part of the failure rate, since
+a trimmed line is often already plain and human.
+
+## New knobs
+
+| Key | Default | What it does |
+|---|---|---|
+| `narration.humanize_threshold` | `0.1` | share of *flagged* lines that may stay unfixed (CLI `--humanize-threshold`, env `RECAP_HUMANIZE_THRESHOLD`, accepts `0.25` or `25`) |
+| `narration.humanize_min_failures` | `3` | minimum failed lines before a rate can fail the build |
+| `narration.humanize_max_single_retries` | `8` | per-sentence retry cap per 30-line window |
+
+## Verification
+
+New suite `movie-recap-bot/tests/test_humanizer.py` (13 tests), all green with
+the existing 79:
+
+* `test_clean_script_echoed_back_is_not_a_failure` — 160 clean sentences, a
+  provider that echoes everything: **0 failures and 6 LLM calls** (the old code
+  made **165** and failed 100%).
+* `test_the_reported_159_sentence_run_no_longer_fails_the_build` — replay of
+  your run (Pass A echoes every window, repairs come back ~30% too long):
+  **0%** failure rate, was 43% + `RuntimeError`.
+* `test_pass_b_tightens_a_long_rewrite_instead_of_dropping_it` — asserts the
+  Pass B prompt is actually sent and the rewrite survives.
+* `test_pass_b_local_shrinker_rescues_when_the_model_will_not`,
+  `test_a_rewrite_that_cannot_fit_keeps_the_original_and_stays_in_sync` — the
+  local shrinker works and the timing lock is still absolute.
+* `test_echoed_tell_lines_are_retried_in_one_batched_call`,
+  `test_single_sentence_retries_are_capped` — 10 echoed lines cost 1 retry
+  call; a stubborn provider costs 6 calls, not 20+.
+* `test_gate_still_fails_loudly_and_writes_a_report_first` — a script that is
+  genuinely all tells **still fails**, and the report exists on disk first.
+* `test_a_couple_of_stubborn_lines_do_not_burn_a_finished_run`,
+  `test_mechanically_trimmed_sentences_are_mandatory_even_without_tells`,
+  `test_tell_scan_finds_ai_writing_and_leaves_clean_lines_alone`,
+  `test_enumeration_prefix_echo_is_not_mistaken_for_a_rewrite`.
+
+Also fixed while in here: `tests/test_languages.py` replaced `recap.llm.complete`
+globally without restoring it, which made `test_visual_flow.py::test_network_
+failure_never_stalls_for_hours` fail whenever the whole suite ran (it passed in
+isolation). **92 tests, all passing.**

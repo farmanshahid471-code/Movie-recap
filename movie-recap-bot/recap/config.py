@@ -67,8 +67,18 @@ _DEFAULTS: dict[str, Any] = {
         # never outrun its footage. RECAP_HUMANIZE=0 disables.
         "humanize": True,
         "allow_unhumanized": False,  # if humanizer fails >10%, fail build unless this is true
+        # Failure rate is measured over the sentences that actually NEEDED the
+        # pass (the local tell scan flagged them, or their section was
+        # mechanically trimmed) -- a clean line the model returns untouched is
+        # the right answer, not a failure.
         "humanize_threshold": 0.1,  # failure rate >10% triggers hard failure
         "humanize_retry_temperature": 0.9,  # retry temp for HUMANIZE_FAILED sentences
+        # Hard cap on single-sentence retry calls per 30-sentence window, so a
+        # bad provider day cannot turn into hundreds of serial round trips.
+        "humanize_max_single_retries": 8,
+        # A percentage alone never fails a finished run: at least this many
+        # lines must have failed before the build is stopped.
+        "humanize_min_failures": 3,
     },
     # Step D — chronological timeline (replaces semantic vector matching).
     # Beats advance monotonically through the film and every beat's visual is
@@ -302,6 +312,13 @@ def load_config(path: str | Path | None = None) -> dict:
         ].strip().lower() not in ("0", "false", "no", "off")
     if os.environ.get("RECAP_ALLOW_UNHUMANIZED", "").strip().lower() in ("1", "true", "yes", "on"):
         cfg["narration"]["allow_unhumanized"] = True
+    if os.environ.get("RECAP_HUMANIZE_THRESHOLD", "").strip():
+        try:
+            _thr = float(os.environ["RECAP_HUMANIZE_THRESHOLD"])
+            # accept both 0.25 and 25 (percent)
+            cfg["narration"]["humanize_threshold"] = _thr / 100.0 if _thr > 1 else _thr
+        except ValueError:
+            print("  ! RECAP_HUMANIZE_THRESHOLD is not a number — ignoring it")
     # Vision pass toggles (see recap/vision.py). Keys come from the provider's
     # env var (gemini -> GEMINI_API_KEY), which _load_dotenv already imported.
     if "VISION_ENABLED" in os.environ:
@@ -370,6 +387,10 @@ def load_config(path: str | Path | None = None) -> dict:
         llm_cfg["humanize_threshold"] = nar["humanize_threshold"]
     if "humanize_retry_temperature" in nar and "humanize_retry_temperature" not in llm_cfg:
         llm_cfg["humanize_retry_temperature"] = nar["humanize_retry_temperature"]
+    if "humanize_max_single_retries" in nar and "humanize_max_single_retries" not in llm_cfg:
+        llm_cfg["humanize_max_single_retries"] = nar["humanize_max_single_retries"]
+    if "humanize_min_failures" in nar and "humanize_min_failures" not in llm_cfg:
+        llm_cfg["humanize_min_failures"] = nar["humanize_min_failures"]
 
     return cfg
 

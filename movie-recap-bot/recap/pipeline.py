@@ -923,6 +923,10 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                 sign_off=bool(nar.get("sign_off", True)),
                 visual_match=bool(nar.get("visual_match", True)),
                 humanize=bool(nar.get("humanize", True)),
+                # If the humanizer gate trips, the finished script is dumped
+                # here before the build fails -- an hour of transcription,
+                # vision and writing must never die with the last step.
+                report_dir=tdir,
             )
             if len(segments) < 10:
                 raise DialogueError(

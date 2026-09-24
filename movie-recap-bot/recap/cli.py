@@ -148,6 +148,13 @@ def cmd_auto(args: argparse.Namespace) -> None:
         cfg.setdefault("narration", {})["allow_unhumanized"] = True
         # also expose as llm config for script.generate_segmented_script
         cfg.setdefault("llm", {})["allow_unhumanized"] = True
+    _thr = getattr(args, "humanize_threshold", None)
+    if _thr is not None:
+        _thr = float(_thr)
+        _thr = _thr / 100.0 if _thr > 1 else _thr
+        cfg.setdefault("narration", {})["humanize_threshold"] = _thr
+        cfg.setdefault("llm", {})["humanize_threshold"] = _thr
+        print(f"  * humanizer failure threshold: {_thr:.0%}")
     if getattr(args, "allow_incomplete_captions", False):
         cfg.setdefault("vision", {})["allow_incomplete"] = True
 
@@ -286,6 +293,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_auto.add_argument("--name", default=None, help="output name")
     p_auto.add_argument("--allow-unhumanized", action="store_true", default=False,
                         help="allow shipping narration that failed the humanizer >10%% (otherwise the build fails loudly)")
+    p_auto.add_argument("--humanize-threshold", default=None, type=float,
+                        help="failure rate (0-1, or a percent like 25) of AI-tell lines "
+                             "the humanizer may leave behind before the build fails "
+                             "(default 0.1)")
     p_auto.add_argument("--allow-incomplete-captions", action="store_true", default=False,
                         help="allow scriptwriting when <99%% of vision frames were captioned (otherwise the build fails at the coverage gate)")
     p_auto.set_defaults(func=cmd_auto)
