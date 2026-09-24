@@ -69,12 +69,29 @@ movie.mp4
 > change and truncated the list, so cuts clustered early in the film ate the
 > budget and a 2h film's last ~43% had zero frames.) Free-tier throttling is
 > expected, not fatal: a 503 "high demand" batch is retried patiently
-> (15s → 30s → 60s → 120s), and if the storm outlasts that, the pass does one
-> final sweep over just the failed frames after a pause, then reports exactly
-> how many frames are missing. Re-running the SAME movie re-captures only the
-> missing frames (the per-batch cache does the rest) — and the run never
-> ships silently text-only: a gap is printed loud with the re-run
-> instructions (or `vision.enabled: false` for a deliberate text-only run).
+> (15s → 30s → 60s → 120s), and whatever is still uncaptioned afterwards goes
+> through up to `vision.sweep_attempts` (3) sweeps, **each with a smaller batch
+> than the last, ending at one frame per request** — a lone frame can't be lost
+> to label confusion and is the likeliest to get through a saturated endpoint.
+> A frame counts as missing whether the request *failed* or merely came back
+> **without a line for it**: a response that is empty or unparseable used to be
+> scored as a success and silently dropped its frames, which is how a run could
+> end at "97.8% (587/600)" with not one error in the log. Shot detection (a
+> full decode of the film, ~3 min) is cached in `_work/scene_times.json`, so it
+> runs once per movie instead of once per pass. Re-running the SAME movie
+> re-captures only the missing frames — and the run never ships silently
+> text-only: gaps are printed loud, listed by timecode, and written to
+> `_work/vision_gaps.json`.
+>
+> **The coverage gate** (`vision.coverage_threshold`, default 99%) asks the
+> right question when it trips: what degrades the timeline is a *stretch* of
+> film with no captions, not a few scattered holes the beat matcher
+> interpolates across. Under the threshold the build only fails if the longest
+> uncaptioned run of film exceeds `vision.max_blind_seconds` (180) or more than
+> `vision.max_missing_frames` (auto: 3%) frames are missing; otherwise it says
+> so and continues. `vision.allow_incomplete: true` /
+> `VISION_ALLOW_INCOMPLETE=1` bypasses it entirely, and
+> `vision.enabled: false` is the deliberate text-only run.
 
 ### Run it locally (no Docker needed)
 

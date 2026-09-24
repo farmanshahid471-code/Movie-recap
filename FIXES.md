@@ -709,3 +709,152 @@ Also fixed while in here: `tests/test_languages.py` replaced `recap.llm.complete
 globally without restoring it, which made `test_visual_flow.py::test_network_
 failure_never_stalls_for_hours` fail whenever the whole suite ran (it passed in
 isolation). **92 tests, all passing.**
+
+---
+
+# Round 6 (2026-09-24): `VISION_COVERAGE_GATE FAILED` at 97.8% — 13 frames that could never come back
+
+Second run of the same film, everything cached, 14.5 minutes of captioning
+done, and then:
+
+```
+  * Vision pass: 587 on-screen notes (14.5 min) — coverage 97.8% (587/600)
+  ! VISION_COVERAGE_GATE FAILED: Vision caption coverage 97.8% (587/600) is
+    below the required 99% (594/600). 7 more frames needed.
+```
+
+## The log's own arithmetic identifies the bug
+
+```
+    ... 216/594 frames (221 captioned)     <- 222 expected, 1 short
+    ... 336/594 frames (335 captioned)     <- 342 expected, 7 short
+    ... 456/594 frames (449 captioned)     <- 462 expected, 13 short
+    ... 594/594 frames (587 captioned)
+```
+
+Frames leak away mid-pass — and **not one "vision batch N failed" line appears
+in the entire log.** Every request returned HTTP 200. The frames were lost
+*inside* a successful response.
+
+### Defect 1 — a "successful" batch could silently drop frames (the whole bug)
+
+`_caption_pass()` only counted a batch as failed when `_caption_batch_with_
+fallback()` **raised**. When a request succeeded but came back empty or
+unparseable (very common on `-lite` free-tier models right after a 503 retry —
+the 7-frame drop at 16:04:57 lands exactly on one), `_parse_caption_batch()`
+returned `{t: ""}` for those frames and the writer loop was:
+
+```python
+for t, text in res.items():
+    if text:                 # <- empty caption: not cached, not failed...
+        cached[t] = {...}    #    just gone, with no log line
+```
+
+Those frames were never cached, never added to `failed`, so **the final sweep
+never knew about them and never ran**. They were missing on the first run, on
+the second run, and would be missing on the tenth. That is the "7 more frames
+needed" that could never be satisfied.
+
+**Fixed:** after every *successful* batch, the frames that came back without a
+usable caption are detected, logged by timecode, and queued as failed:
+
+```python
+gaps = [t for t, _ in batch if not (res.get(t) or "").strip()]
+if gaps:
+    print(f"    ... batch {bn} returned no caption for {len(gaps)} frame(s): ...")
+    failed.extend(gaps)
+```
+
+### Defect 2 — one sweep, at the same batch size that just failed
+
+The recovery pass re-sent the failed frames in batches of 6 — the exact request
+shape that had just lost them. **Fixed:** up to `vision.sweep_attempts` (3)
+sweeps, each halving the batch (6 → 3 → 1 → 1) so the last rounds ask **one
+frame per request**: a single frame cannot be lost to label confusion, and a
+one-image request is the likeliest to squeeze through a saturated endpoint.
+Each round logs `recovered N/M`, and the loop stops early if a
+one-frame-per-request round recovers nothing (the provider is genuinely down —
+no point burning another twenty minutes). The circuit breaker no longer sits
+through a 3-minute cooldown *during* a sweep either; it ends that sweep and
+leaves the frames queued.
+
+### Defect 3 — the timestamp-stripping regex had a typo
+
+```python
+r"^\[?\d{1,3}:\d{2}(?::\d{2})?\]?\s*[\):.\-]?\\s*"   # <- \\s* is a literal backslash
+```
+
+so a caption returned as `01:05 — Woody hides` kept junk on the front, and a
+bulleted `- 01:05 Woody hides` wasn't recognised as a labelled line at all and
+fell through to positional matching. Both the label matcher and the stripper
+now accept an optional bullet and an en/em dash separator.
+
+### Defect 4 — shot detection ran three times per attempt
+
+`_scene_times()` is a full decode of the film: **3 minutes** on your 103-minute
+file. It ran once inside `capture()` and then **again inside `check_coverage()`
+immediately before the gate** — which is that mysterious second `ffprobe` +
+3-minute pause at the end of your run — and again on every re-run, for a
+deterministic answer. **Fixed:** `_scene_times_cached()` persists the result to
+`_work/scene_times.json`, keyed by movie path/size/mtime + threshold. Six
+minutes per attempt back.
+
+### Defect 5 — the gate asked the wrong question
+
+99% of 600 frames is a proxy. What actually degrades beat-matching is a
+**stretch of film with no captions**, not scattered holes — with a caption 10 s
+before and 10 s after, the timeline has everything it needs. Thirteen
+consecutive missing frames (a 4-minute blind spot) is a real problem; thirteen
+missing frames spread across two hours is not, and it is certainly not worth
+throwing away a finished 20-minute captioning pass.
+
+**Fixed:** below `coverage_threshold` the gate now measures the longest
+uncaptioned run of film (`blind_stretch()`) and only fails when it exceeds
+`vision.max_blind_seconds` (180) or when more than `vision.max_missing_frames`
+(auto = 3% of sampled frames) are missing. Otherwise it prints what is missing,
+by timecode, and lets the run finish:
+
+```
+  * Vision coverage 97.8% (587/600) is under the 99% target, but the 13 missing
+    frame(s) are scattered: the longest stretch of film with no caption is 30s
+    (at 01:04:20), inside the 180s limit. The beat matcher can interpolate
+    across holes that small — continuing.
+```
+
+When it *does* fail, the message now names the reason (blind stretch vs. count)
+and the fixes: cached re-run, more sweeps, or getting off the throttled model.
+Unrecoverable frames are also written to `_work/vision_gaps.json`.
+
+### Also worth knowing: your model is the most throttled one Google ships
+
+`config.yaml` ships `vision.model: "gemini-3.6-flash"`, but both runs used
+`gemini-3.1-flash-lite` — so a local `config.yaml` edit or `VISION_MODEL` is
+overriding it. `-lite` on the free tier is what produced the 45-minute 503
+storm in run 1 and the empty responses in run 2. Dropping the `-lite` suffix
+will do more for wall-clock time than any of the above.
+
+## New knobs
+
+| key | default | meaning |
+| --- | --- | --- |
+| `vision.sweep_attempts` | `3` | recovery sweeps, each with a smaller batch (→ 1 frame/request) |
+| `vision.max_blind_seconds` | `180` | longest run of film with no caption before the gate fails |
+| `vision.max_missing_frames` | `0` (auto: 3%, min 3) | absolute cap on scattered misses |
+
+## Verification
+
+New suite `movie-recap-bot/tests/test_vision_coverage.py` (7 tests), green with
+the existing 92 — **99 tests passing**:
+
+* `test_frames_missing_from_a_successful_batch_are_swept_not_dropped` — the
+  reported pathology exactly (a 200 OK with an empty body): **24/24 captioned**;
+  before the fix those six frames vanished with no log line.
+* `test_sweeps_fall_back_to_one_frame_per_request` — a model that mangles
+  multi-frame labels still yields 100% coverage; asserts a sweep reaches
+  batch size 1.
+* `test_shot_detection_is_cached_across_calls` — three calls, **one** decode.
+* `test_gate_passes_when_the_missing_frames_are_scattered` — 14 holes in 600
+  frames (97.7%) finishes the build, loudly.
+* `test_gate_still_fails_on_a_blind_stretch_of_film` — 10 uncaptioned minutes
+  still fails.
+* `test_blind_stretch_measurement`, `test_caption_lines_parse_with_bullets_and_dashes`.

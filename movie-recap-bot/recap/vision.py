@@ -93,6 +93,48 @@ def _scene_times(movie: Path, threshold: float, movie_duration: float) -> list[f
     return out
 
 
+def _scene_times_cached(
+    movie: Path,
+    threshold: float,
+    duration: float,
+    workdir: "Path | None" = None,
+) -> list[float]:
+    """``_scene_times`` with an on-disk cache.
+
+    Shot detection is a full decode of the film: ~3 minutes for a 100-minute
+    movie. It used to run TWICE per run (once in capture(), once again in
+    check_coverage() right before the gate) and again on every re-run, which
+    is six wasted minutes per attempt on the exact same, deterministic answer.
+    The result is cached next to the frames and keyed by movie identity +
+    threshold, so it is computed once per film.
+    """
+    key = None
+    cache_path = None
+    if workdir is not None:
+        try:
+            st = Path(movie).stat()
+            key = f"{Path(movie).resolve()}|{st.st_size}|{st.st_mtime_ns}|{threshold}"
+        except OSError:
+            key = None
+        cache_path = Path(workdir) / "scene_times.json"
+        if key and cache_path.exists():
+            try:
+                data = json.loads(cache_path.read_text(encoding="utf-8"))
+                if data.get("key") == key and isinstance(data.get("times"), list):
+                    return [float(x) for x in data["times"]]
+            except Exception:
+                pass
+    scenes = _scene_times(movie, threshold, duration)
+    if key and cache_path is not None and scenes:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                json.dumps({"key": key, "times": scenes}), encoding="utf-8")
+        except OSError:
+            pass
+    return scenes
+
+
 def pick_times(
     movie_duration: float,
     cadence: float = 20.0,
@@ -299,8 +341,10 @@ def _parse_caption_batch(
         tl = _label_time(ln)
         body = ""
         if tl is not None:
+            # strip an optional bullet, the label, and its separator
             body = re.sub(
-                r"^\[?\d{1,3}:\d{2}(?::\d{2})?\]?\s*[\):.\-]?\\s*", "", ln, count=1
+                r"^\s*[-*\u2022]?\s*\[?\d{1,3}:\d{2}(?::\d{2})?\]?\s*[\):.\-\u2013\u2014]?\s*",
+                "", ln, count=1,
             ).strip()
         if tl is not None and body and any(abs(tl - ft) <= 1 for ft, _ in frames):
             matched[tl] = body
@@ -332,7 +376,8 @@ def _label_time(line: str) -> int | None:
     and 'HH:MM:SS'. A third colon group means hours; otherwise the label is
     minutes:seconds (never hours:minutes).
     """
-    m = re.match(r"^\[?(\d{1,3}):(\d{2})(?::(\d{2}))?\]?", line.strip())
+    m = re.match(r"^\s*[-*\u2022]?\s*\[?(\d{1,3}):(\d{2})(?::(\d{2}))?\]?",
+                 line.strip())
     if not m:
         return None
     try:
@@ -542,8 +587,8 @@ def check_coverage(
     if duration <= 0:
         return 1.0, 0, 0
     try:
-        scenes = _scene_times(
-            movie, float(cfg.get("scene_threshold", 0.35)), duration
+        scenes = _scene_times_cached(
+            movie, float(cfg.get("scene_threshold", 0.35)), duration, workdir
         )
     except RuntimeError:
         scenes = []
@@ -561,6 +606,51 @@ def check_coverage(
     total = len(times)
     have = len([t for t in times if t in cached])
     return (have / total) if total else 1.0, have, total
+
+
+def missing_times(movie: Path, cfg_vision: dict, workdir: Path) -> list[int]:
+    """The sampled seconds of film that still have no caption."""
+    cfg = dict(cfg_vision or {})
+    duration = probe_duration(movie)
+    if duration <= 0:
+        return []
+    try:
+        scenes = _scene_times_cached(
+            movie, float(cfg.get("scene_threshold", 0.35)), duration, workdir)
+    except RuntimeError:
+        scenes = []
+    times = pick_times(
+        duration,
+        cadence=float(cfg.get("cadence_seconds", 20.0)),
+        scenes=scenes,
+        max_frames=int(cfg.get("max_frames", 600)),
+    )
+    cached, _ = _load_cached_notes(
+        Path(workdir) / "visual_notes.json", _movie_sig(movie, cfg))
+    return [t for t in times if t not in cached]
+
+
+def blind_stretch(captioned: list[int], missing: list[int],
+                  duration: float) -> tuple[float, float]:
+    """Longest run of film with no caption at all: (seconds, start_second).
+
+    This is what the coverage gate actually protects. Thirteen missing frames
+    scattered across two hours leave the beat matcher a neighbour on either
+    side of every hole; thirteen CONSECUTIVE missing frames leave a four-minute
+    stretch of film the timeline cannot see at all. Only the second one is a
+    reason to stop a finished run.
+    """
+    if not missing:
+        return 0.0, 0.0
+    have = sorted(captioned)
+    worst, worst_at = 0.0, 0.0
+    for t in sorted(missing):
+        prev = max((h for h in have if h <= t), default=0.0)
+        nxt = min((h for h in have if h >= t), default=float(duration))
+        span = float(nxt) - float(prev)
+        if span > worst:
+            worst, worst_at = span, float(prev)
+    return worst, worst_at
 
 
 def coverage_gate(
@@ -587,18 +677,65 @@ def coverage_gate(
     ratio, have, total = check_coverage(movie, cfg, workdir)
     if total == 0:
         return
-    if ratio < threshold:
-        pct = ratio * 100
-        need = int(total * threshold) - have
-        raise VisionError(
-            f"Vision caption coverage {pct:.1f}% ({have}/{total}) is below "
-            f"the required {threshold*100:.0f}% ({int(total*threshold)}/{total}). "
-            f"{need} more frames needed. Re-run the same movie (cached frames are "
-            f"reused, only missing ones are re-captured), or set "
-            f"vision.allow_incomplete: true / VISION_ALLOW_INCOMPLETE=1 to proceed "
-            f"anyway, or increase vision sweep attempts. The timeline's beat-matching "
-            f"would be degraded on incomplete data."
-        )
+    if ratio >= threshold:
+        return
+
+    pct = ratio * 100
+    need = int(total * threshold) - have
+    # A bare percentage is the wrong question. What degrades the timeline is a
+    # STRETCH of film with no captions, not a few scattered holes the beat
+    # matcher can interpolate across. Measure that before killing the run.
+    missing = missing_times(movie, cfg, workdir)
+    duration = probe_duration(movie)
+    captioned_pts: list[int] = []
+    try:
+        cached, _ = _load_cached_notes(
+            Path(workdir) / "visual_notes.json", _movie_sig(movie, cfg))
+        captioned_pts = sorted(cached)
+    except Exception:
+        captioned_pts = []
+    worst, worst_at = blind_stretch(captioned_pts, missing, duration)
+    try:
+        max_blind = float(cfg.get("max_blind_seconds", 180.0))
+    except (TypeError, ValueError):
+        max_blind = 180.0
+    # Absolute floor: a couple of stubborn frames never fail a build.
+    try:
+        max_missing = int(cfg.get("max_missing_frames", 0)) or max(
+            3, int(round(total * 0.03)))
+    except (TypeError, ValueError):
+        max_missing = max(3, int(round(total * 0.03)))
+
+    if len(missing) <= max_missing and worst <= max_blind:
+        print(f"  * Vision coverage {pct:.1f}% ({have}/{total}) is under the "
+              f"{threshold*100:.0f}% target, but the {len(missing)} missing "
+              f"frame(s) are scattered: the longest stretch of film with no "
+              f"caption is {worst:.0f}s (at {_fmt_label(worst_at)}), inside "
+              f"the {max_blind:.0f}s limit. The beat matcher can interpolate "
+              "across holes that small — continuing.", flush=True)
+        if missing:
+            print("    ... uncaptioned moments: "
+                  + ", ".join(_fmt_label(m) for m in missing[:12])
+                  + (" ..." if len(missing) > 12 else ""), flush=True)
+        return
+
+    reason = (f"the longest stretch of film with NO caption is {worst:.0f}s "
+              f"(at {_fmt_label(worst_at)}), over the "
+              f"{max_blind:.0f}s limit — the timeline would have nothing to "
+              f"match there"
+              if worst > max_blind else
+              f"{len(missing)} frames are missing, over the "
+              f"{max_missing}-frame limit")
+    raise VisionError(
+        f"Vision caption coverage {pct:.1f}% ({have}/{total}) is below "
+        f"the required {threshold*100:.0f}% ({int(total*threshold)}/{total}) and "
+        f"{reason}. {need} more frames needed. Re-run the same movie (cached "
+        f"frames are reused, only the missing ones are re-captured; shot "
+        f"detection is cached too, so a re-run starts in seconds), or raise "
+        f"vision.sweep_attempts, or switch vision.model off the throttled "
+        f"'-lite' free tier, or set vision.allow_incomplete: true / "
+        f"VISION_ALLOW_INCOMPLETE=1 to proceed anyway."
+    )
 
 
 def capture(
@@ -642,8 +779,8 @@ def capture(
     print(f"  * Vision pass: sampling on-screen action (provider {provider}) ...",
           flush=True)
     try:
-        scenes = _scene_times(
-            movie, float(cfg.get("scene_threshold", 0.35)), duration
+        scenes = _scene_times_cached(
+            movie, float(cfg.get("scene_threshold", 0.35)), duration, workdir
         )
         if scenes:
             print(f"    ... detected {len(scenes)} shot changes "
@@ -757,15 +894,39 @@ def capture(
 
     consecutive_failures = 0
 
-    def _caption_pass(times: list[int], tag: str) -> list[int]:
-        """Caption ``times`` in order; return the frames that still failed."""
+    def _caption_pass(times: list[int], tag: str, size: int | None = None) -> list[int]:
+        """Caption ``times`` in order; return the frames that still failed.
+
+        "Failed" means BOTH kinds of loss:
+          * the request raised (503 storm, quota, network), and
+          * the request succeeded but came back without a line for a frame.
+
+        The second kind used to be invisible: a batch whose response was empty
+        or unparseable was counted as a success, its frames were never written
+        to the cache, never swept, and the run ended below the coverage gate
+        with no error in the log to explain why ("97.8% (587/600)"). Those
+        frames are now returned here like any other failure, so the sweeps
+        below re-ask for them — one frame per request if needed.
+        """
         nonlocal consecutive_failures
+        bs = max(1, int(size or batch_size))
         failed: list[int] = []
-        for i in range(0, len(times), batch_size):
-            batch = [(t, frames[t]) for t in times[i : i + batch_size]]
+        for i in range(0, len(times), bs):
+            batch = [(t, frames[t]) for t in times[i : i + bs]]
             # Circuit breaker: if we've hit N consecutive failures, pause the
             # whole pass instead of hammering the saturated endpoint.
             if consecutive_failures >= max_consec:
+                if tag:
+                    # Already in a sweep: the provider is still down. Sitting
+                    # through another multi-minute cooldown here only delays
+                    # the run -- the frames are queued, bail out and let the
+                    # next sweep (or the next run) pick them up.
+                    print(f"    ... circuit breaker: {consecutive_failures} "
+                          "consecutive batches failed during the sweep — "
+                          "ending this sweep early, the rest stay queued",
+                          flush=True)
+                    failed.extend(times[i:])
+                    return failed
                 print(f"    ... circuit breaker: {consecutive_failures} consecutive batches failed — "
                       f"pausing whole vision pass for {breaker_pause:.0f}s cooldown ...", flush=True)
                 if breaker_pause:
@@ -783,18 +944,29 @@ def capture(
                     res = _caption_batch(client, model, batch)
                 consecutive_failures = 0
             except VisionError as exc:
-                print(f"    ! vision batch {i // batch_size + 1} {tag}failed: "
+                print(f"    ! vision batch {i // bs + 1} {tag}failed: "
                       f"{exc} — those frames stay queued for the final "
                       "sweep / next run", flush=True)
                 failed.extend(t for t, _ in batch)
                 consecutive_failures += 1
                 continue
+            # The call succeeded -- but did every frame come back with a line?
+            gaps = [t for t, _ in batch if not (res.get(t) or "").strip()]
+            if gaps:
+                print(f"    ... vision batch {i // bs + 1} {tag}returned no "
+                      f"caption for {len(gaps)}/{len(batch)} frame(s) "
+                      f"({', '.join(_fmt_label(g) for g in gaps[:6])}"
+                      f"{' ...' if len(gaps) > 6 else ''}) — queued for the "
+                      "sweep", flush=True)
+                failed.extend(gaps)
             for t, text in res.items():
                 if text:
-                    # Tag confidence: fallback = low confidence, retried = true if tag contains sweep
+                    # Only a FALLBACK provider is a degraded caption. A frame
+                    # recovered by a sweep came from the same model looking at
+                    # the same image -- it is a normal caption that simply took
+                    # two tries, so it keeps full weight in beat-matching and
+                    # is marked only by `retried`.
                     confidence = "low" if used_fallback else "high"
-                    if tag and "sweep" in tag:
-                        confidence = "low" if confidence == "high" else confidence
                     cached[t] = {
                         "text": text,
                         "confidence": confidence,
@@ -805,30 +977,65 @@ def capture(
             # rework (and the next run re-captures only what is missing).
             _save_cached_notes(cache_path, sig, cached)
             if progress:
-                progress(min(i + batch_size, len(times)), len(times),
+                progress(min(i + bs, len(times)), len(times),
                          len(cached))
-            elif (i // batch_size) % 5 == 0 or i + batch_size >= len(times):
+            elif (i // bs) % 5 == 0 or i + bs >= len(times):
                 low_cnt = sum(1 for v in cached.values() if v.get("provider") == "fallback")
                 fb_note = f", {low_cnt} via fallback" if low_cnt else ""
-                print(f"    ... {min(i + batch_size, len(times))}/{len(times)} "
+                print(f"    ... {min(i + bs, len(times))}/{len(times)} "
                       f"frames ({len(cached)} captioned{fb_note}, "
                       f"{(time.time() - started) / 60:.1f} min)", flush=True)
         return failed
 
     failed = _caption_pass(todo, "")
     # Free-tier demand spikes (503 "high demand") are usually temporary but
-    # can outlive one batch's patient retries: one final sweep over the
-    # frames that failed, after a short pause, before giving up.
-    if failed:
-        pause = max(float(cfg.get("sweep_pause_seconds", 60.0)), 0.0)
-        print(f"  * Vision pass: {len(failed)} frames hit the provider's "
-              f"demand cap — final sweep after a {pause:.0f}s pause ...",
+    # can outlive one batch's patient retries, and a batch can also come back
+    # empty or unparseable. Sweep whatever is still missing, with a SMALLER
+    # batch each round, ending at one frame per request: a single frame can
+    # never be lost to label confusion, and a small request is the one most
+    # likely to get through a saturated endpoint.
+    try:
+        sweeps = max(1, int(cfg.get("sweep_attempts", 3)))
+    except (TypeError, ValueError):
+        sweeps = 3
+    pause = max(float(cfg.get("sweep_pause_seconds", 60.0)), 0.0)
+    for attempt in range(1, sweeps + 1):
+        if not failed:
+            break
+        size = max(1, batch_size // (2 ** attempt))
+        wait = pause if attempt == 1 else min(pause, 30.0)
+        print(f"  * Vision pass: {len(failed)} frame(s) still uncaptioned — "
+              f"final sweep {attempt}/{sweeps} at {size} frame(s) per request"
+              + (f" after a {wait:.0f}s pause" if wait else "") + " ...",
               flush=True)
-        if pause:
-            time.sleep(pause)
+        if wait:
+            time.sleep(wait)
         # Reset breaker for sweep
         consecutive_failures = 0
-        failed = _caption_pass(failed, "(sweep) ")
+        before = len(failed)
+        failed = _caption_pass(sorted(set(failed)), f"(sweep {attempt}) ", size)
+        print(f"    ... sweep {attempt}: recovered {before - len(failed)}"
+              f"/{before} frame(s)", flush=True)
+        if failed and len(failed) == before and size == 1:
+            # One frame per request and nothing came back: more sweeps would
+            # only burn quota against the same wall.
+            print("    ... sweep made no progress at 1 frame/request — "
+                  "stopping here", flush=True)
+            break
+
+    # Persist exactly WHICH seconds of film have no caption, so the coverage
+    # gate can judge whether they form a blind stretch or are scattered.
+    still_missing = sorted(t for t in times if t not in cached)
+    try:
+        gaps_path = Path(workdir) / "vision_gaps.json"
+        if still_missing:
+            gaps_path.write_text(json.dumps(
+                {"sig": sig, "total": len(times), "missing": still_missing},
+                ensure_ascii=False), encoding="utf-8")
+        elif gaps_path.exists():
+            gaps_path.unlink()
+    except OSError:
+        pass
 
     result = [{"t": t, "text": cached[t]["text"],
                "confidence": cached[t].get("confidence", "high"),
@@ -838,21 +1045,27 @@ def capture(
     # Confidence summary for this run
     low_total = sum(1 for r in result if r.get("confidence") != "high" or r.get("provider") == "fallback")
     retried_total = sum(1 for r in result if r.get("retried"))
-    if failed:
+    if still_missing:
         # Never read a demand spike as "the film has no visual notes": say
-        # exactly what is missing and how cheaply to get it (the cache
-        # reuses everything that already succeeded).
+        # exactly WHICH moments are missing and how cheaply to get them (the
+        # cache reuses everything that already succeeded).
         coverage = len(result) / max(len(times), 1) * 100
-        print(f"  ! Vision pass: {len(failed)}/{len(missing)} frames could "
-              f"NOT be captioned — provider {provider} is under high demand "
-              f"('{model}' returned 503). Coverage {coverage:.1f}% "
-              f"({len(result)}/{len(times)}). The run continues with "
-              f"{len(result)} notes. Re-run the SAME movie: cached frames "
-              "are reused and only the missing ones are re-captured. If "
-              "this keeps happening, try the default flash model "
-              "(vision.model in config.yaml) — the -lite free tier is the "
-              "most throttled — or set vision.enabled: false for a "
-              "text-only run.", flush=True)
+        print(f"  ! Vision pass: {len(still_missing)} frame(s) could NOT be "
+              f"captioned after {sweeps} sweep(s) — '{model}' on {provider} "
+              f"either refused (503 high demand) or returned no caption for "
+              f"them. Coverage {coverage:.1f}% ({len(result)}/{len(times)}). "
+              f"The run continues with {len(result)} notes.", flush=True)
+        print("    ... uncaptioned moments: "
+              + ", ".join(_fmt_label(m) for m in still_missing[:12])
+              + (f" ... (+{len(still_missing) - 12} more, full list in "
+                 "vision_gaps.json)" if len(still_missing) > 12 else ""),
+              flush=True)
+        print("    ... Re-run the SAME movie to retry only these (frames, "
+              "captions and shot detection are all cached, so a re-run "
+              "starts in seconds). If it keeps happening, move vision.model "
+              "off the '-lite' free tier — it is the most throttled — or "
+              "set vision.enabled: false for a deliberate text-only run.",
+              flush=True)
         if low_total:
             print(f"  * Vision confidence: {len(result)-low_total} high, "
                   f"{low_total} low/fallback ({retried_total} retried/sweep)",

@@ -168,7 +168,18 @@ vision:
   sweep_pause_seconds: 60   # pause before the FINAL SWEEP that re-captures
                             # the frames a 503 "high demand" storm killed
                             # (set 0 to sweep immediately)
+  sweep_attempts: 3         # how many sweeps. Each one uses a SMALLER batch
+                            # than the last, ending at 1 frame per request:
+                            # a single frame can never be lost to label
+                            # confusion, and a small request is the one most
+                            # likely to get through a saturated endpoint
   coverage_threshold: 0.99  # hard gate: scriptwriting requires ≥99% captions before proceeding
+  # A bare percentage is the wrong question, though: what degrades the timeline
+  # is a STRETCH of film with no captions, not a few scattered holes the beat
+  # matcher can interpolate across. Below the threshold the build only fails
+  # when one of these two limits is also exceeded.
+  max_blind_seconds: 180    # longest run of film with no caption at all
+  max_missing_frames: 0     # 0 = auto (3% of sampled frames, minimum 3)
   allow_incomplete: false   # set true (or VISION_ALLOW_INCOMPLETE=1) to bypass coverage gate (debug only)
   max_consecutive_failures: 3  # circuit breaker: after N failed batches, pause whole pass
   circuit_breaker_pause: 180   # seconds to cooldown when breaker trips (3-5 min)

@@ -141,6 +141,16 @@ vision:
   max_frames: 400           # hard cap per movie (API-quota friendly)
   width: 512                # JPEG width sent to the model (smaller = cheaper)
   frames_per_request: 4     # frames per API call (free-tier request economy)
+  sweep_pause_seconds: 60   # pause before the sweeps that re-capture frames a
+                            # 503 "high demand" storm (or an empty response)
+                            # left uncaptioned
+  sweep_attempts: 3         # each sweep uses a smaller batch than the last,
+                            # ending at 1 frame per request
+  coverage_threshold: 0.99  # scriptwriting needs ≥99% of frames captioned
+  max_blind_seconds: 180    # under the threshold the build only fails if a
+  max_missing_frames: 0     # stretch of film this long has NO caption, or more
+                            # than this many frames are missing (0 = auto: 3%)
+  allow_incomplete: false   # true / VISION_ALLOW_INCOMPLETE=1 bypasses the gate
 
 # Step D — chronological timeline (recap line -> film moment, in order).
 # Beats advance monotonically through the film and each beat's visual length is

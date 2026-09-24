@@ -159,7 +159,18 @@ _DEFAULTS: dict[str, Any] = {
         "frames_per_request": 6,   # frames per API call: 6 => 100 req for 600 frames (was 4=>150, less hammering)
         "sweep_pause_seconds": 60.0,  # pause before the final sweep that
                                       # re-captures frames a 503 storm killed
+        "sweep_attempts": 3,  # extra sweeps over uncaptioned frames, each with
+                              # a SMALLER batch (ending at 1 frame/request):
+                              # a lone frame can never be lost to label
+                              # confusion and is likeliest to get through a
+                              # saturated endpoint
         "coverage_threshold": 0.99,  # hard gate: scriptwriting needs ≥99% captions
+        # ... but a bare percentage is the wrong question. What degrades the
+        # timeline is a STRETCH of film with no captions, not a few scattered
+        # holes the beat matcher interpolates across. Under the threshold the
+        # gate only fails when one of these is exceeded:
+        "max_blind_seconds": 180.0,  # longest run of film with no caption
+        "max_missing_frames": 0,     # 0 = auto (3% of sampled frames, min 3)
         "allow_incomplete": False,  # set true / VISION_ALLOW_INCOMPLETE=1 to bypass gate
         "max_consecutive_failures": 3,  # circuit breaker: after N failed batches, cooldown
         "circuit_breaker_pause": 180.0,  # seconds to pause whole vision pass (3-5 min)
@@ -339,6 +350,14 @@ def load_config(path: str | Path | None = None) -> dict:
         cfg["vision"]["fallback_base_url"] = os.environ["VISION_FALLBACK_BASE_URL"].strip()
     if os.environ.get("VISION_ALLOW_INCOMPLETE", "").strip().lower() in ("1", "true", "yes", "on"):
         cfg["vision"]["allow_incomplete"] = True
+    for _env, _key, _cast in (("VISION_SWEEP_ATTEMPTS", "sweep_attempts", int),
+                              ("VISION_MAX_BLIND_SECONDS", "max_blind_seconds", float),
+                              ("VISION_MAX_MISSING_FRAMES", "max_missing_frames", int)):
+        if os.environ.get(_env):
+            try:
+                cfg["vision"][_key] = _cast(os.environ[_env].strip())
+            except ValueError:
+                pass
     if os.environ.get("VISION_COVERAGE_THRESHOLD"):
         try:
             cfg["vision"]["coverage_threshold"] = float(os.environ["VISION_COVERAGE_THRESHOLD"])
