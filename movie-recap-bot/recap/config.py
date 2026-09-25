@@ -80,6 +80,20 @@ _DEFAULTS: dict[str, Any] = {
         # lines must have failed before the build is stopped.
         "humanize_min_failures": 3,
     },
+    # Per-beat architecture (replaces arbitrary 180s windows).
+    # Each beat is one continuous scene/action unit (4-40s) whose boundaries
+    # are merged from shot changes, vision timestamps and subtitle gaps.
+    # The writer gets a hard word budget tied to the beat's real duration at
+    # 175 wpm, so visuals and narration stay locked by meaning, not position.
+    "beats": {
+        "enabled": True,           # use beat-first planning (Step 0-5)
+        "wpm": 175,                # narration rate for budget (words per minute)
+        "gap_threshold": 1.5,      # subtitle silence that creates a beat boundary
+        "min_beat_seconds": 4.0,   # beats shorter than this are merged (4-40s units)
+        "max_borrow_ratio": 0.3,   # max fraction of a neighbor's duration that may be borrowed
+        "validate": True,          # run MATCH/PARTIAL/MISMATCH gate before encoding
+        "validation_model": None,  # cheap model for the gate (defaults to llm.model)
+    },
     # Step D — chronological timeline (replaces semantic vector matching).
     # Beats advance monotonically through the film and every beat's visual is
     # locked to its narration cue, so video length == audio length exactly.
