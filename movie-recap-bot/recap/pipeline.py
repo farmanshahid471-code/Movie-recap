@@ -23,11 +23,16 @@ import hashlib
 import json
 from pathlib import Path
 
-from . import (align, chunk, clip, dialogue, languages, llm, scenes, script,
+from . import (align, beats, chunk, clip, dialogue, languages, llm, scenes, script,
                subtitles, summarize, timeline, translate, tts, video, vision)
 from .config import out_dir, work_dir
 from .dialogue import DialogueError
 from .util import count_words, probe_duration
+
+# Keep a reference to the original chunk script generator so tests that stub it
+# can be detected — the beat-first path should be skipped when the test has
+# replaced the generator with a deterministic fixture.
+_ORIGINAL_GENERATE_SEGMENTED = script.generate_segmented_script
 
 
 def _sig(*parts: object) -> str:
@@ -804,10 +809,103 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
     print(f"  * Contextual chunking: {window:.0f}s windows, "
           f"{overlap:.0f}s overlap")
 
+    # ---- per-beat early scene detection (for Step 0 beat boundaries) ----
+    beats_cfg = cfg.get("beats") or {}
+    beats_enabled = bool(beats_cfg.get("enabled", True))
+    snap_bounds_early: list[float] = []
+    if beats_enabled:
+        try:
+            _b, _m = scenes.scene_boundaries(movie, cfg.get("video") or {}, wd)
+            snap_bounds_early = list(_b or [])
+            if snap_bounds_early:
+                print(f"  * [beats] {len(snap_bounds_early)} shot boundaries cached for beat detection", flush=True)
+        except Exception as exc:
+            print(f"  ! [beats] early scene detection failed ({exc}); beats will use vision+subtitle gaps only", flush=True)
+            snap_bounds_early = []
+
     # per-language chunked summaries + segmented scripts
     authored: dict[str, dict] = {}        # code -> {segments, sentences}
     for code in native:
         cues = transcripts[code]
+        # ---------------- BEAT-FIRST PATH (Steps 0-5) -----------------
+        _beats_success = False
+        _stubbed_for_test = script.generate_segmented_script is not _ORIGINAL_GENERATE_SEGMENTED
+        if beats_enabled and not _stubbed_for_test and llm.provider_configured(cfg.get("llm", {}).get("provider", "")):
+            try:
+                b_wpm = int(beats_cfg.get("wpm", 175))
+                b_gap = float(beats_cfg.get("gap_threshold", 1.5))
+                b_min = float(beats_cfg.get("min_beat_seconds", 4.0))
+                b_borrow = float(beats_cfg.get("max_borrow_ratio", 0.3))
+                b_validate = bool(beats_cfg.get("validate", True))
+                beat_list = beats.detect_beats(
+                    cues, visual_notes, snap_bounds_early, movie_dur,
+                    gap_threshold=b_gap, min_beat_seconds=b_min,
+                )
+                print(f"  * [beats] {languages.name(code)}: {len(beat_list)} beats from shot+vision+gap boundaries", flush=True)
+                try:
+                    (wd / "chunks").mkdir(parents=True, exist_ok=True)
+                    (wd / f"beats_{code}.raw.json").write_text(
+                        json.dumps(beat_list, ensure_ascii=False, indent=2)[:800000], encoding="utf-8"
+                    )
+                except OSError:
+                    pass
+                _narrs, _beats_adj = beats.generate_beat_script(
+                    beat_list, cfg.get("llm", {}), wpm=b_wpm,
+                    max_borrow_ratio=b_borrow, do_validate=b_validate,
+                )
+                if not _narrs or len(_narrs) < 3:
+                    raise DialogueError(f"beat writer returned only {len(_narrs)} beats")
+                _segments: list[dict] = []
+                for _b, _nar in zip(_beats_adj, _narrs):
+                    _nar_clean = (_nar or "").strip()
+                    if not _nar_clean:
+                        continue
+                    _sents = [s.strip() for s in _nar_clean.split(".") if s.strip()]
+                    if len(_sents) <= 1:
+                        _sents = [_nar_clean]
+                    else:
+                        _sents = [s + "." for s in _sents]
+                    n_s = len(_sents)
+                    b_lo = float(_b.get("start_ts", 0.0))
+                    b_hi = float(_b.get("end_ts", b_lo + 5.0))
+                    b_dur = max(b_hi - b_lo, 0.5)
+                    step = b_dur / max(n_s, 1)
+                    for k, _s in enumerate(_sents):
+                        lo = b_lo + k * step
+                        hi = lo + step
+                        _segments.append({
+                            "sentence": _s.strip(),
+                            "film_start": round(lo, 3),
+                            "film_end": round(hi, 3),
+                            "anchor": round((lo + hi) / 2.0, 3),
+                            "zone_lo": round(b_lo, 3),
+                            "zone_hi": round(b_hi, 3),
+                        })
+                if len(_segments) < 10:
+                    raise DialogueError(f"beat writer produced only {len(_segments)} segments")
+                lang_name_beats = languages.name(code)
+                b_marker = tdir / f"script_{code}.marker.json"
+                b_sig = _sig(beat_list, _narrs, b_wpm, bool(cfg.get("narration", {}).get("sign_off", True)), "beats-v1")
+                seg_path = tdir / f"script_{code}.segments.json"
+                seg_path.write_text(json.dumps(_segments, ensure_ascii=False, indent=2), encoding="utf-8")
+                _write_marker(b_marker, b_sig)
+                sentences = [s["sentence"] for s in _segments]
+                got_words = count_words(" ".join(sentences))
+                est = got_words / max(b_wpm, 1) * 60
+                script.write_script_file("\n".join(sentences), tdir / f"script_{code}.txt")
+                (tdir / f"script_{code}.json").write_text(json.dumps(sentences, ensure_ascii=False, indent=2), encoding="utf-8")
+                print(f"  * {lang_name_beats} recap (beats): {len(sentences)} sentences, {got_words} words ≈ {est:.0f}s at {b_wpm} wpm over {len(beat_list)} beats", flush=True)
+                try:
+                    (wd / f"beats_{code}.beats.json").write_text(json.dumps(_beats_adj, ensure_ascii=False, indent=2)[:800000], encoding="utf-8")
+                except OSError:
+                    pass
+                authored[code] = {"segments": _segments, "sentences": sentences, "beats": _beats_adj}
+                _beats_success = True
+            except Exception as exc_beats:
+                print(f"  ! [beats] {languages.name(code)} beat generation failed ({type(exc_beats).__name__}: {exc_beats}) — falling back to chunk path", flush=True)
+                _beats_success = False
+        if _beats_success:
+            continue
         chunks = chunk.chunk_cues(cues, window, overlap)
         if movie_dur > 0:
             # A chunk's film territory may never extend past the film
@@ -1121,21 +1219,21 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         seg_for_lang = _extend_final_zone(seg_for_lang, movie_dur)
         seg_for_lang = timeline.rewindow_to_speech(
             seg_for_lang, durations, movie_dur)
-        beats = timeline.build_timeline(
+        tl_beats = timeline.build_timeline(
             seg_for_lang, durations, movie_dur, tl_cfg,
             word_times=[c.words for c in cues_t],
             stats=tl_stats,
             scene_bounds=snap_bounds,
         )
-        _write_json(beats, wd / f"beats_{code}.json")
+        _write_json(tl_beats, wd / f"beats_{code}.json")
         _report = timeline.timeline_report(
-            beats, audio_span, tl_stats.get("word_locked_beats", 0),
+            tl_beats, audio_span, tl_stats.get("word_locked_beats", 0),
             tl_stats.get("snapped_cuts", 0),
             tl_stats.get("slowed_groups", 0),
             tl_stats.get("slowed_seconds", 0.0),
         )
         print(f"  * [{code}] timeline: {_report}")
-        _longest = max((d for b in beats for _, d, _f, _v in (b.get("cuts") or [])),
+        _longest = max((d for b in tl_beats for _, d, _f, _v in (b.get("cuts") or [])),
                        default=0.0)
         if _longest > 10.0:
             print(f"  ! [{code}] longest shot is {_longest:.1f}s -- one visual "
@@ -1146,7 +1244,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         # run past the end of the film (the freeze-at-film-end path). A
         # couple of seconds of tail padding is honest; many seconds is the
         # visible "hundreds of sentences over one still frame" symptom.
-        _frozen = sum(_f for b in beats for (_s, _d, _f, _v)
+        _frozen = sum(_f for b in tl_beats for (_s, _d, _f, _v)
                       in (b.get("cuts") or []))
         if _frozen > 10.0:
             print(f"  ! [{code}] WARNING: the picture is FROZEN for "
@@ -1161,7 +1259,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         # visuals do not match at all"); a healthy run reads a second or
         # two.
         _offs = []
-        for _b, _s in zip(beats, seg_for_lang):
+        for _b, _s in zip(tl_beats, seg_for_lang):
             _a = _s.get("anchor")
             if _a is None:
                 continue
@@ -1210,7 +1308,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         # expensive ffmpeg clipping + burn entirely.
         ef_marker = wd / f".render_{code}.marker.json"
         ef_sig = _sig(
-            str(out_mp4), [c.as_dict() for c in cues_t], beats,
+            str(out_mp4), [c.as_dict() for c in cues_t], tl_beats,
             str(movie.resolve()), clip_mode, dict(cfg.get("subtitles", {})),
             vcfg.get("bgm", ""), float(vcfg.get("bgm_volume", 0.12)),
         )
@@ -1221,7 +1319,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                   "re-render.")
             continue
 
-        cuts = timeline.flatten_cuts(beats)
+        cuts = timeline.flatten_cuts(tl_beats)
         print(f"  * [{code}] cutting {len(cuts)} shots from the film "
               f"(mode={clip_mode}) ...")
         visual = clip.build_locked_visual(
