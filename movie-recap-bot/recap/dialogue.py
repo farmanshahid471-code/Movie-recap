@@ -59,7 +59,8 @@ def from_srt_path(path: Path) -> list[dict]:
 
 
 def find_subtitle_near(video: Path, extra: str | None = None,
-                       lang: str | None = None) -> Path | None:
+                       lang: str | None = None,
+                       auto_discover: bool = True) -> Path | None:
     """Look for an SRT/ASS/VTT matching the movie name (or an explicit path).
 
     With ``lang`` given, only a subtitle *tagged for that language* counts:
@@ -73,6 +74,8 @@ def find_subtitle_near(video: Path, extra: str | None = None,
         p = Path(extra)
         if p.exists():
             return p
+    if extra == "" or not auto_discover:
+        return None
     if lang and lang != "en":
         tagged = [
             video.with_name(f"{video.stem}.{lang}{ext}")

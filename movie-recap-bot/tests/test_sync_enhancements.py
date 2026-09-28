@@ -305,3 +305,73 @@ def test_segmented_tts_generation() -> None:
         assert manifest[0]["beat"] == 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ==============================================================================
+# 5. Target Duration Constraint & Subtitle Discovery / Cache Tests
+# ==============================================================================
+def test_select_beats_for_target_duration() -> None:
+    """Verify that select_beats_for_target constrains full-movie beats to target duration."""
+    from recap import beats
+
+    # Simulate an 87-minute movie (5220s) with 100 beats of ~52s each
+    # At 175 wpm, each beat is ~150 words -> 15,000 words total (87 minutes)
+    movie_beats = []
+    t = 0.0
+    for i in range(100):
+        movie_beats.append({
+            "start_ts": t,
+            "end_ts": t + 52.0,
+            "duration": 52.0,
+            "transcript_lines": [{"text": f"Character {i} talks about the quest."}] if i % 2 == 0 else [],
+            "vision_notes": [{"t": t + 10.0, "text": f"Visual action {i}", "confidence": "high"}] if i % 3 == 0 else [],
+            "shot_count": 4,
+        })
+        t += 52.0
+
+    # User sets duration to 1200s (20 minutes) -> target_words = 3000 words at 150 wpm
+    target_words = 3000
+    chosen = beats.select_beats_for_target(movie_beats, target_words, wpm=150)
+
+    assert len(chosen) < len(movie_beats)
+    # Check that opening beat and ending beat are always included
+    assert chosen[0]["start_ts"] == 0.0
+    assert chosen[-1]["end_ts"] == movie_beats[-1]["end_ts"]
+
+    # Total word budget of chosen beats should match ~target_words (not 15,000 words!)
+    total_chosen_words = sum(
+        beats.word_budget_for_duration(b["duration"], wpm=150)[1] for b in chosen
+    )
+    assert total_chosen_words <= target_words * 1.25
+    assert total_chosen_words >= target_words * 0.70
+
+
+def test_find_subtitle_near_with_and_without_subtitles() -> None:
+    """Verify that explicitly empty subtitle ('') or auto_discover=False does NOT grab nearby srt."""
+    from recap import dialogue
+
+    tmp = Path(tempfile.mkdtemp(prefix="test-sub-find-"))
+    try:
+        movie = tmp / "my_movie.mp4"
+        movie.write_bytes(b"mockvideo")
+        srt = tmp / "my_movie.srt"
+        srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+
+        # 1. Normal discovery finds the nearby .srt
+        found = dialogue.find_subtitle_near(movie, None)
+        assert found == srt
+
+        # 2. When user explicitly specifies empty string ("without subtitles"), it must NOT auto-discover
+        found_empty = dialogue.find_subtitle_near(movie, extra="")
+        assert found_empty is None
+
+        # 3. When auto_discover is False, it must NOT auto-discover
+        found_no_auto = dialogue.find_subtitle_near(movie, None, auto_discover=False)
+        assert found_no_auto is None
+
+        # 4. Explicit valid path is always respected
+        found_explicit = dialogue.find_subtitle_near(movie, extra=str(srt))
+        assert found_explicit == srt
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+

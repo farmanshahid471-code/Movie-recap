@@ -627,10 +627,23 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
     if bare_srt and "en" not in codes and len(codes) == 1:
         sources_cfg.setdefault(codes[0], bare_srt)
     # Locate each requested language's own subtitle (<movie>.<code>.srt etc.).
+    sources_cfg = cfg.get("language", {}).get("sources") or {}
+    dlg_cfg = cfg.get("dialogue") or {}
+    auto_discover = bool(dlg_cfg.get("auto_discover", True))
+    if dlg_cfg.get("use_subtitles") is False:
+        auto_discover = False
+
     native_sources: dict[str, str] = {}
     for code in codes:
-        found = dialogue.find_subtitle_near(movie, sources_cfg.get(code),
-                                            lang=code)
+        explicit_sub = sources_cfg.get(code)
+        if explicit_sub is None and code == "en":
+            explicit_sub = dlg_cfg.get("srt_path")
+        if dlg_cfg.get("use_subtitles") is False or explicit_sub == "":
+            found = None
+        else:
+            found = dialogue.find_subtitle_near(movie, explicit_sub,
+                                                lang=code,
+                                                auto_discover=auto_discover)
         if found:
             native_sources[code] = str(found)
 
@@ -674,6 +687,30 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                   f"unchanged movie ({len(cached)} cues). Delete "
                   f"{wd / (cache_name + '.json')} to force re-extract.")
             continue
+
+        # Invalidate stale downstream scripts, summaries, beats, audio, and render markers
+        # so old summaries, scripts, beat files, and audio are never reused with new dialogue!
+        for stale in [
+            tdir / f"script_{code}.segments.json",
+            tdir / f"script_{code}.marker.json",
+            tdir / f"script_{code}.txt",
+            tdir / f"script_{code}.json",
+            tdir / f"summaries_{code}.txt",
+            tdir / f"summaries_{code}.txt.sig",
+            wd / f"beats_{code}.json",
+            wd / f"beats_{code}.beats.json",
+            wd / f"beats_{code}.raw.json",
+            wd / f".narrate_{code}.marker.json",
+            wd / f".render_{code}.marker.json",
+            wd / f"{code}.mp3",
+            wd / f"{code}.timing.json",
+            wd / f"{code}.beats.json",
+            outd / f"{name}_{code}.mp4",
+        ]:
+            stale.unlink(missing_ok=True)
+        if code == "en":
+            (tdir / "summaries.txt").unlink(missing_ok=True)
+            (tdir / "summaries.txt.sig").unlink(missing_ok=True)
         cues = dialogue.extract_dialogue(
             movie,
             source_srt,
@@ -842,6 +879,12 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                     gap_threshold=b_gap, min_beat_seconds=b_min,
                 )
                 print(f"  * [beats] {languages.name(code)}: {len(beat_list)} beats from shot+vision+gap boundaries", flush=True)
+
+                b_target = int(cfg.get("narration", {}).get("words_target", 2000))
+                if b_target > 0 and len(beat_list) > 5:
+                    beat_list = beats.select_beats_for_target(beat_list, b_target, wpm=b_wpm)
+                    print(f"  * [beats] Selected {len(beat_list)} key chronological beats matching target budget of {b_target} words (~{b_target / b_wpm * 60:.0f}s)", flush=True)
+
                 try:
                     (wd / "chunks").mkdir(parents=True, exist_ok=True)
                     (wd / f"beats_{code}.raw.json").write_text(
@@ -849,57 +892,70 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                     )
                 except OSError:
                     pass
-                _narrs, _beats_adj = beats.generate_beat_script(
-                    beat_list, cfg.get("llm", {}), wpm=b_wpm,
-                    max_borrow_ratio=b_borrow, do_validate=b_validate,
-                )
-                if not _narrs or len(_narrs) < 3:
-                    raise DialogueError(f"beat writer returned only {len(_narrs)} beats")
-                _segments: list[dict] = []
-                for _b, _nar in zip(_beats_adj, _narrs):
-                    _nar_clean = (_nar or "").strip()
-                    if not _nar_clean:
-                        continue
-                    _sents = [s.strip() for s in _nar_clean.split(".") if s.strip()]
-                    if len(_sents) <= 1:
-                        _sents = [_nar_clean]
-                    else:
-                        _sents = [s + "." for s in _sents]
-                    n_s = len(_sents)
-                    b_lo = float(_b.get("start_ts", 0.0))
-                    b_hi = float(_b.get("end_ts", b_lo + 5.0))
-                    b_dur = max(b_hi - b_lo, 0.5)
-                    step = b_dur / max(n_s, 1)
-                    for k, _s in enumerate(_sents):
-                        lo = b_lo + k * step
-                        hi = lo + step
-                        _segments.append({
-                            "sentence": _s.strip(),
-                            "film_start": round(lo, 3),
-                            "film_end": round(hi, 3),
-                            "anchor": round((lo + hi) / 2.0, 3),
-                            "zone_lo": round(b_lo, 3),
-                            "zone_hi": round(b_hi, 3),
-                        })
-                if len(_segments) < 10:
-                    raise DialogueError(f"beat writer produced only {len(_segments)} segments")
+
                 lang_name_beats = languages.name(code)
                 b_marker = tdir / f"script_{code}.marker.json"
-                b_sig = _sig(beat_list, _narrs, b_wpm, bool(cfg.get("narration", {}).get("sign_off", True)), "beats-v1")
+                b_sig = _sig(beat_list, b_wpm, b_target, bool(cfg.get("narration", {}).get("sign_off", True)), "beats-v2")
                 seg_path = tdir / f"script_{code}.segments.json"
-                seg_path.write_text(json.dumps(_segments, ensure_ascii=False, indent=2), encoding="utf-8")
-                _write_marker(b_marker, b_sig)
+                _segments = None
+                if _marker_ok(b_marker, b_sig) and seg_path.exists():
+                    try:
+                        _segments = json.loads(seg_path.read_text(encoding="utf-8")) or None
+                    except Exception:
+                        _segments = None
+                    if _segments:
+                        print(f"  * Reusing existing {lang_name_beats} beats script "
+                              f"({len(_segments)} segments — matches this movie/target). Delete "
+                              f"script_{code}.segments.json to force re-generate.", flush=True)
+
+                if _segments is None:
+                    _narrs, _beats_adj = beats.generate_beat_script(
+                        beat_list, cfg.get("llm", {}), wpm=b_wpm,
+                        max_borrow_ratio=b_borrow, do_validate=b_validate,
+                    )
+                    if not _narrs or len(_narrs) < 3:
+                        raise DialogueError(f"beat writer returned only {len(_narrs)} beats")
+                    _segments = []
+                    for _b, _nar in zip(_beats_adj, _narrs):
+                        _nar_clean = (_nar or "").strip()
+                        if not _nar_clean:
+                            continue
+                        _sents = [s.strip() for s in _nar_clean.split(".") if s.strip()]
+                        if len(_sents) <= 1:
+                            _sents = [_nar_clean]
+                        else:
+                            _sents = [s + "." for s in _sents]
+                        n_s = len(_sents)
+                        b_lo = float(_b.get("start_ts", 0.0))
+                        b_hi = float(_b.get("end_ts", b_lo + 5.0))
+                        b_dur = max(b_hi - b_lo, 0.5)
+                        step = b_dur / max(n_s, 1)
+                        for k, _s in enumerate(_sents):
+                            lo = b_lo + k * step
+                            hi = lo + step
+                            _segments.append({
+                                "sentence": _s.strip(),
+                                "film_start": round(lo, 3),
+                                "film_end": round(hi, 3),
+                                "anchor": round((lo + hi) / 2.0, 3),
+                                "zone_lo": round(b_lo, 3),
+                                "zone_hi": round(b_hi, 3),
+                            })
+                    if len(_segments) < 10:
+                        raise DialogueError(f"beat writer produced only {len(_segments)} segments")
+                    seg_path.write_text(json.dumps(_segments, ensure_ascii=False, indent=2), encoding="utf-8")
+                    _write_marker(b_marker, b_sig)
+                    try:
+                        (wd / f"beats_{code}.beats.json").write_text(json.dumps(_beats_adj, ensure_ascii=False, indent=2)[:800000], encoding="utf-8")
+                    except OSError:
+                        pass
                 sentences = [s["sentence"] for s in _segments]
                 got_words = count_words(" ".join(sentences))
                 est = got_words / max(b_wpm, 1) * 60
                 script.write_script_file("\n".join(sentences), tdir / f"script_{code}.txt")
                 (tdir / f"script_{code}.json").write_text(json.dumps(sentences, ensure_ascii=False, indent=2), encoding="utf-8")
                 print(f"  * {lang_name_beats} recap (beats): {len(sentences)} sentences, {got_words} words ≈ {est:.0f}s at {b_wpm} wpm over {len(beat_list)} beats", flush=True)
-                try:
-                    (wd / f"beats_{code}.beats.json").write_text(json.dumps(_beats_adj, ensure_ascii=False, indent=2)[:800000], encoding="utf-8")
-                except OSError:
-                    pass
-                authored[code] = {"segments": _segments, "sentences": sentences, "beats": _beats_adj}
+                authored[code] = {"segments": _segments, "sentences": sentences}
                 _beats_success = True
             except Exception as exc_beats:
                 print(f"  ! [beats] {languages.name(code)} beat generation failed ({type(exc_beats).__name__}: {exc_beats}) — falling back to chunk path", flush=True)

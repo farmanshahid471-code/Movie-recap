@@ -785,6 +785,8 @@ def subtitle_for(movie: Path | None, explicit: str = "") -> Path | None:
     try:
         from recap.dialogue import find_subtitle_near
 
+        if explicit == "":
+            return None
         return find_subtitle_near(Path(movie), explicit or None)
     except Exception:
         return None
@@ -1067,14 +1069,22 @@ def run_semantic(langs: list[str], cfg: dict | None = None) -> list[Path]:
     # config, otherwise the engine can't see the browsed .srt and silently
     # falls back to Whisper-transcribing the whole film.
     rc.setdefault("dialogue", {})
-    sub = (cfg.get("auto_subtitle") or "").strip() or None
+    sub = (cfg.get("auto_subtitle") or "").strip()
     if sub:
         rc["dialogue"]["srt_path"] = sub
+        rc["dialogue"]["use_subtitles"] = True
+        rc["dialogue"]["auto_discover"] = False
+        rc.setdefault("language", {}).setdefault("sources", {})["en"] = sub
         _log(f"    dialogue subtitle: {sub}")
     else:
         rc["dialogue"]["srt_path"] = None
+        rc["dialogue"]["use_subtitles"] = False
+        rc["dialogue"]["auto_discover"] = False
+        rc.setdefault("language", {}).setdefault("sources", {})["en"] = ""
+        _log("    dialogue source: Whisper ASR (no subtitles)")
     rc["dialogue"]["whisper_model"] = cfg.get("whisper_model", "small")
     rc["dialogue"]["whisper_device"] = cfg.get("whisper_device", "auto")
+    clear_staged_scripts()
 
     # Dialogue sources: each language's own subtitle, else Whisper reads the
     # movie's English audio (install on demand when nothing is present).

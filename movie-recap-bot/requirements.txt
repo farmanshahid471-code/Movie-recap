@@ -29,8 +29,11 @@ numpy>=1.24.0
 
 # ---- Optional: higher-quality TTS / forced alignment ----
 # elevenlabs>=1.0.0    # ElevenLabs multilingual TTS (best quality, paid)
+# WhisperX forced alignment engine (https://github.com/m-bain/whisperx):
 whisperx>=3.1.0        # Forced alignment with VAD & phoneme-level word timestamps
 
 # Optional (recommended): snap every visual cut onto the film's real
-# shot changes for a professional edit feel (timeline.snap_to_scenes).
+# shot changes for a professional edit feel (timeline.snap_to_scenes):
+# PySceneDetect (https://github.com/Breakthrough-Open/PySceneDetect):
 # pip install scenedetect[opencv]
+

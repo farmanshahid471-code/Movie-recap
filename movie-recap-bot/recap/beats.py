@@ -368,6 +368,94 @@ def required_time_for_words(words: int, wpm: int = _DEFAULT_WPM) -> float:
     return max(float(words), 0.0) / max(float(wpm), 1.0) * 60.0
 
 
+def select_beats_for_target(
+    beats: list[dict],
+    target_words: int,
+    wpm: int = _DEFAULT_WPM,
+) -> list[dict]:
+    """Select a subset of chronological beats that fit the target word budget.
+
+    When recapping an 80-120 minute film into a 10-20 minute recap (e.g. 1200s / ~3000 words),
+    detecting beats across the whole film produces far more footage and words than the target.
+    This function scores beats by narrative significance (dialogue richness, key visual notes,
+    shot dynamics), guarantees beginning-to-end chronological coverage (opening, middle, climax/ending),
+    and selects beats whose combined word budgets hit target_words without ballooning the recap.
+    """
+    if not beats or target_words <= 0:
+        return beats
+
+    total_words = sum(word_budget_for_duration(float(b.get("duration", 0.0)), wpm=wpm)[1] for b in beats)
+    if total_words <= target_words * 1.15:
+        # All beats fit comfortably within target
+        return beats
+
+    # Score each beat
+    scored: list[tuple[float, int, dict]] = []
+    for idx, b in enumerate(beats):
+        dur = float(b.get("duration", 0.0) or 0.0)
+        lines = b.get("transcript_lines") or []
+        vision = b.get("vision_notes") or []
+        shots = int(b.get("shot_count", 1) or 1)
+
+        score = 1.0
+        # Dialogue carries plot progression
+        score += min(len(lines) * 2.0, 10.0)
+        # Vision notes indicate significant visual action
+        for v in vision:
+            conf = v.get("confidence", "high") if isinstance(v, dict) else "high"
+            score += 3.0 if conf == "high" else 1.5
+        # Cut activity
+        score += min(shots * 0.5, 4.0)
+        # Give strong weight to opening and ending beats to preserve narrative arc
+        if idx == 0 or idx == len(beats) - 1:
+            score += 25.0
+        elif idx < 3 or idx >= len(beats) - 3:
+            score += 10.0
+
+        scored.append((score, idx, b))
+
+    # Divide beats into chronological buckets to ensure uniform coverage across the movie
+    num_buckets = max(int(target_words / 120), 5)
+    num_buckets = min(num_buckets, len(beats))
+    bucket_size = len(beats) / float(num_buckets)
+
+    selected_indices: set[int] = {0, len(beats) - 1}  # Always include first and last beat
+    current_words = sum(
+        word_budget_for_duration(float(beats[i].get("duration", 0.0)), wpm=wpm)[1]
+        for i in selected_indices
+    )
+
+    # First pass: pick best beat in each chronological bucket
+    for b_idx in range(num_buckets):
+        lo = int(b_idx * bucket_size)
+        hi = int((b_idx + 1) * bucket_size)
+        hi = max(hi, lo + 1)
+        hi = min(hi, len(beats))
+        candidates = [s for s in scored if lo <= s[1] < hi and s[1] not in selected_indices]
+        if candidates:
+            best = max(candidates, key=lambda x: x[0])
+            b_dur = float(best[2].get("duration", 0.0))
+            _, max_w = word_budget_for_duration(b_dur, wpm=wpm)
+            if current_words + max_w <= target_words * 1.15:
+                selected_indices.add(best[1])
+                current_words += max_w
+
+    # Second pass: if still under target, pick remaining top-scored beats
+    remaining = [s for s in scored if s[1] not in selected_indices]
+    remaining.sort(key=lambda x: x[0], reverse=True)
+    for s in remaining:
+        b_dur = float(s[2].get("duration", 0.0))
+        _, max_w = word_budget_for_duration(b_dur, wpm=wpm)
+        if current_words + max_w <= target_words * 1.08:
+            selected_indices.add(s[1])
+            current_words += max_w
+        if current_words >= target_words:
+            break
+
+    chosen = [beats[i] for i in sorted(selected_indices)]
+    return chosen
+
+
 def _format_transcript_block(lines: list[dict]) -> str:
     if not lines:
         return "(no dialogue in this beat)"
