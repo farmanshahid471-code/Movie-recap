@@ -74,7 +74,12 @@ def narration_words_whisperx(
         return None
 
     try:
+        import os
         dev = "cuda" if (device == "cuda" or (device in ("auto", None) and torch.cuda.is_available())) else "cpu"
+        # On Windows CPU, PyTorch/torchcodec has missing C++ DLLs (libtorchcodec_core.dll)
+        # and pyannote crashes Python with code 255. Fallback safely to faster-whisper.
+        if dev == "cpu" and os.name == "nt":
+            return None
         compute_type = "float16" if dev == "cuda" else "int8"
 
         # 1. Load audio
@@ -193,7 +198,10 @@ def align_with_whisperx(
         import whisperx  # type: ignore
         import torch  # type: ignore
 
+        import os
         dev = "cuda" if (device == "cuda" or (device in ("auto", None) and torch.cuda.is_available())) else "cpu"
+        if dev == "cpu" and os.name == "nt":
+            return None
         compute_type = "float16" if dev == "cuda" else "int8"
         audio = whisperx.load_audio(str(audio_path))
         try:
