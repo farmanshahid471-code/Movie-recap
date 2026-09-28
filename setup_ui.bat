@@ -3,14 +3,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 title Recap Studio - Setup and Open
 
 :: =========================================================
-::  Recap Studio - one click to OPEN.
-::
-::  * finds Python and installs any missing dependencies
-::  * checks ffmpeg and the project layout
-::  * starts the control panel and opens it in your browser
-::
-::  To CLOSE: click "Close Studio" in the panel, press Ctrl+C
-::  in this window, or double-click stop_ui.bat.
+::  Recap Studio - One Click Setup and Open
 :: =========================================================
 
 set "ROOT=%~dp0"
@@ -27,18 +20,31 @@ echo  ==========================================
 echo.
 
 :: ---------------------------------------------------------
-:: 0. Data location -- keep EVERY byte off the C: drive
+:: 0. Storage drive configuration -- use F: drive if available
 :: ---------------------------------------------------------
-:: All outputs, model weights, ffmpeg binaries, pip cache and temp files go
-:: under RECAP_DATA. Defaults to D:\recap-data when a D: drive exists; edit
-:: RECAP_DATA below if your big drive has another letter.
-set "RECAP_DATA=D:\recap-data"
-if not exist "D:\nul" set "RECAP_DATA=%ROOT%\.recap-data"
-mkdir "%RECAP_DATA%" 2>nul
-if not exist "%RECAP_DATA%\" set "RECAP_DATA=%ROOT%\.recap-data"
+set "TARGET_DRIVE="
+if exist "F:\" (
+    set "TARGET_DRIVE=F:"
+) else if exist "D:\" (
+    set "TARGET_DRIVE=D:"
+) else (
+    set "TARGET_DRIVE=%ROOT%"
+)
+
+if "%TARGET_DRIVE%"=="%ROOT%" (
+    set "RECAP_DATA=%ROOT%\.recap-data"
+    set "RECAP_OUTPUT=%ROOT%\output"
+) else (
+    set "RECAP_DATA=%TARGET_DRIVE%\recap-data"
+    set "RECAP_OUTPUT=%TARGET_DRIVE%\recap"
+)
+
 mkdir "%RECAP_DATA%" 2>nul
 mkdir "%RECAP_DATA%\cache" 2>nul
-mkdir "%RECAP_DATA%\tmp"   2>nul
+mkdir "%RECAP_DATA%\tmp" 2>nul
+mkdir "%RECAP_DATA%\pip-cache" 2>nul
+mkdir "%RECAP_OUTPUT%" 2>nul
+
 set "TEMP=%RECAP_DATA%\tmp"
 set "TMP=%RECAP_DATA%\tmp"
 set "PIP_CACHE_DIR=%RECAP_DATA%\pip-cache"
@@ -47,32 +53,55 @@ set "STATIC_FFMPEG_CACHE_DIR=%RECAP_DATA%\cache\static-ffmpeg"
 set "HF_HOME=%RECAP_DATA%\cache\huggingface"
 set "WHISPER_CACHE_DIR=%RECAP_DATA%\cache\whisper"
 set "RECAP_LOG_DIR=%RECAP_DATA%"
-echo  Data root : %RECAP_DATA%   (nothing is stored on the C: drive)
+set "OUTPUT_DIR=%RECAP_OUTPUT%"
+
+echo  Data Directory   : %RECAP_DATA%
+echo  Output Directory : %RECAP_OUTPUT%
+echo  (All caches, temporary files, and video outputs stay off the C: drive)
+echo.
 
 :: ---------------------------------------------------------
-:: 1. Find a Python interpreter (py launcher first, then python)
+:: 1. Find Python interpreter
 :: ---------------------------------------------------------
 set "PY="
 where py >nul 2>&1 && set "PY=py -3"
 if not defined PY (
     where python >nul 2>&1 && set "PY=python"
 )
+
 if not defined PY (
-    echo  [X] Python was not found on PATH.
-    echo      Install Python 3.10+ from https://www.python.org/downloads/
-    echo      and tick "Add python.exe to PATH" during setup.
-    goto :fail
+    for %%D in (F: C: D:) do (
+        for %%V in (Python312 Python311 Python310 Python39 Python) do (
+            if exist "%%D\%%V\python.exe" set "PY=%%D\%%V\python.exe"
+            if exist "%%D\Program Files\%%V\python.exe" set "PY=%%D\Program Files\%%V\python.exe"
+        )
+    )
+)
+if not defined PY (
+    if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" set "PY=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+    if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PY=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
+    if exist "%LOCALAPPDATA%\Programs\Python\Python310\python.exe" set "PY=%LOCALAPPDATA%\Programs\Python\Python310\python.exe"
 )
 
-%PY% -c "import sys;print('  [OK] Python %%d.%%d.%%d' %% sys.version_info[:3])"
+if not defined PY (
+    echo  [X] Python was not found on PATH or standard directories.
+    echo      Please install Python 3.10+ from https://www.python.org/downloads/
+    echo      IMPORTANT: Check the box "Add python.exe to PATH" during installation.
+    echo.
+    pause
+    exit /b 1
+)
+
+%PY% -c "import sys;print('  [OK] Python %%d.%%d.%%d detected at: ' %% sys.version_info[:3], sys.executable)"
 if errorlevel 1 (
-    echo  [X] Python could not run. Reinstall it, or fix your PATH.
-    goto :fail
+    echo  [X] Python failed to run.
+    pause
+    exit /b 1
 )
 echo.
 
 :: ---------------------------------------------------------
-:: 2. Install / verify the pipeline dependencies
+:: 2. Check and install core dependencies
 :: ---------------------------------------------------------
 echo  Checking Python dependencies...
 set "MISSING="
@@ -82,93 +111,72 @@ set "MISSING="
 %PY% -c "import static_ffmpeg"  >nul 2>&1 || set "MISSING=!MISSING! static-ffmpeg"
 %PY% -c "import openai"         >nul 2>&1 || set "MISSING=!MISSING! openai"
 %PY% -c "import scenedetect"    >nul 2>&1 || set "MISSING=!MISSING! scenedetect[opencv]"
+%PY% -c "import vastai"         >nul 2>&1 || set "MISSING=!MISSING! vastai"
 
-if not defined MISSING (
-    echo  [OK] PyYAML, pysubs2, edge-tts, static-ffmpeg, openai, scenedetect
-) else (
-    echo  [..] Installing:!MISSING!
+if defined MISSING (
+    echo  Installing missing dependencies: !MISSING!
     %PY% -m pip install --upgrade pip >nul 2>&1
-    %PY% -m pip install!MISSING!
+    %PY% -m pip install !MISSING!
     if errorlevel 1 (
-        echo.
-        echo  [X] pip could not install the dependencies. Try this by hand:
-        echo      %PY% -m pip install PyYAML pysubs2 edge-tts static-ffmpeg openai scenedetect[opencv]
-        goto :fail
+        echo  Retrying installation with --no-warn-script-location...
+        %PY% -m pip install --no-warn-script-location !MISSING!
     )
-    echo  [OK] Dependencies installed.
+) else (
+    echo  [OK] Core dependencies installed: PyYAML, pysubs2, edge-tts, static-ffmpeg, openai, scenedetect, vastai
 )
 echo.
 
-echo  Checking forced alignment engine (WhisperX)...
+echo  Checking forced alignment engine - WhisperX...
 %PY% -c "import whisperx" >nul 2>&1
-if not errorlevel 1 (
-    echo  [OK] whisperx ready for forced alignment.
-) else (
-    echo  [..] Installing whisperx (VAD + phoneme alignment)...
-    %PY% -m pip install "whisperx>=3.1.0"
-    if not errorlevel 1 (
-        echo  [OK] whisperx installed successfully.
+if errorlevel 1 (
+    echo  Installing whisperx for frame-accurate phoneme alignment...
+    %PY% -m pip install whisperx>=3.1.0
+    if errorlevel 1 (
+        echo  [NOTE] whisperx install had issues. The pipeline will automatically use faster-whisper fallback.
     ) else (
-        echo  [!] whisperx install had issues or requires torch. Fallback to faster-whisper is active.
+        echo  [OK] whisperx installed successfully.
     )
+) else (
+    echo  [OK] whisperx ready.
 )
 echo.
 
 :: ---------------------------------------------------------
-:: 3. Verify ffmpeg / ffprobe (static-ffmpeg fetches them into the data root)
+:: 3. Verify ffmpeg / ffprobe
 :: ---------------------------------------------------------
 %PY% recap-studio\tools\ensure_ffmpeg.py
-if not errorlevel 1 (
-    echo  [OK] ffmpeg + ffprobe ready - binaries kept in %RECAP_DATA%, not C:.
-) else (
-    echo  [!] ffmpeg unavailable right now - setup continues; the first render
-    echo      will fetch it - keep an internet connection available.
+if errorlevel 1 (
+    echo  [!] ffmpeg setup notice - if needed, static-ffmpeg will complete download on first run.
 )
 echo.
 
 :: ---------------------------------------------------------
-:: 4. Verify the project layout
+:: 4. Verify project layout
 :: ---------------------------------------------------------
 if not exist "recap-studio\app.py" (
-    echo  [X] recap-studio\app.py not found.
-    echo      Run this file from the Movie-recap folder it shipped in.
-    goto :fail
+    echo  [X] recap-studio\app.py not found. Please run this batch file from the repository root.
+    pause
+    exit /b 1
 )
-if not exist "recap-studio\static\index.html" (
-    echo  [X] recap-studio\static\index.html not found.
-    goto :fail
-)
-echo  [OK] Project structure looks good.
-echo.
 
 :: ---------------------------------------------------------
-:: 5. Already running on this port? Restart it FRESH.
+:: 5. Port check - restart if already running
 :: ---------------------------------------------------------
-:: A leftover instance from an older code copy is the classic cause of a
-:: dead panel: the old process still serves, but its log stream is broken,
-:: so the Console stays empty and buttons do nothing.
 %PY% recap-studio\tools\portcheck.py %PORT% >nul 2>&1
 if not errorlevel 1 (
     echo  [..] An instance is already running on port %PORT%.
-    echo       Restarting it with the current code - any in-progress run stops.
-    %PY% recap-studio\tools\shutdown.py %PORT%
-    if errorlevel 1 (
-        echo.
-        echo  [X] Port %PORT% is still occupied. Close the other Recap Studio
-        echo      window or run stop_ui.bat, then start setup_ui.bat again.
-        pause
-        exit /b 1
-    )
+    echo       Restarting instance with updated code...
+    %PY% recap-studio\tools\shutdown.py %PORT% >nul 2>&1
 )
 
 :: ---------------------------------------------------------
-:: 6. Start the panel; it opens the browser itself when ready
+:: 6. Launch Recap Studio
 :: ---------------------------------------------------------
-echo  Starting Recap Studio on %URL%
-echo  Keep this window open while you work.
-echo  To stop: press Ctrl+C here, click "Close Studio" in the panel,
-echo  or double-click stop_ui.bat.
-echo  ------------------------------------------
+echo.
+echo  Starting Recap Studio at %URL%
+echo  Keep this console window open while using the panel.
+echo  Press Ctrl+C here or click "Close Studio" in the web panel to stop.
+echo  -------------------------------------------------------------
 echo.
 
 %PY% recap-studio\app.py --port %PORT% --open-browser
@@ -176,19 +184,10 @@ set "RC=%ERRORLEVEL%"
 
 echo.
 if "%RC%"=="0" (
-    echo  Recap Studio has been stopped. You can close this window.
+    echo  Recap Studio has closed normally.
 ) else (
-    echo  Recap Studio exited with code %RC% - see the messages above.
-    echo  Common fix: %PY% -m pip install PyYAML pysubs2 edge-tts static-ffmpeg openai
+    echo  Recap Studio exited with return code: %RC%
 )
-goto :end
-
-:fail
 echo.
-echo  Setup did not finish - see the message above.
-
-:end
-echo.
-endlocal
 pause
 exit /b 0

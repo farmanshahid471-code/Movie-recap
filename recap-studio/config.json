@@ -1,7 +1,7 @@
 {
   "engine": "semantic",
   "movie_path": "",
-  "output_dir": "D:\\recap",
+  "output_dir": "F:\\recap",
   "storyboard": true,
   "duration": 900,
   "montage": "scenes",

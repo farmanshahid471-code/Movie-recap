@@ -63,7 +63,7 @@ DEFAULT_CONFIG = {
     # "recap"    = legacy 5-step engine (script file/LLM -> montage -> mux).
     "engine": "semantic",
     "movie_path": "",                       # required for the semantic engine
-    "output_dir": r"D:\recap",              # where the clips + _work go; "" = recap-studio/output
+    "output_dir": r"F:\recap" if Path("F:/").exists() else (r"D:\recap" if Path("D:/").exists() else ""),              # where the clips + _work go; "" = recap-studio/output
     "storyboard": True,                     # legacy engine only: placeholder scenes
     "duration": 840,                        # target recap length in seconds (~14 min full-length)
     "montage": "scenes",                    # legacy engine only
