@@ -15,10 +15,11 @@ def main():
     # 1. Get file path from command line arg or user input
     file_path = ""
     if len(sys.argv) > 1:
-        file_path = " ".join(sys.argv[1:]).strip().strip('"')
+        file_path = " ".join(sys.argv[1:]).strip().strip('"').strip("'")
 
     if not file_path:
-        file_path = input("  Enter the path of your movie file (e.g. D:\\movie.mp4): ").strip().strip('"')
+        print("  Tip: You can drag and drop your movie file directly into this window.")
+        file_path = input("  Enter or drag your movie file path: ").strip().strip('"').strip("'")
 
     if not file_path or not os.path.exists(file_path):
         print(f"  [X] File not found: {file_path}")
@@ -101,22 +102,43 @@ def main():
         pass
 
     import time
-    last_print = time.time()
-
-    def progress_callback(transferred, total):
-        nonlocal last_print
-        now = time.time()
-        if now - last_print >= 1.0 or transferred == total:
-            last_print = now
-            pct = (transferred / total) * 100 if total else 0
-            mb_done = transferred / 1e6
-            mb_tot = total / 1e6
-            print(f"\r  Uploading: {pct:.1f}% ({mb_done:.1f}/{mb_tot:.1f} MB)", end="", flush=True)
+    start_time = time.time()
+    last_print = start_time
+    total = src.stat().st_size
+    transferred = 0
+    chunk_size = 128 * 1024  # 128 KB chunks
 
     try:
-        sftp.put(str(src), remote_path, callback=progress_callback)
-        print("\n  [OK] Upload Complete!")
-        print("\n  " + "=" * 60)
+        with open(src, "rb") as local_f, sftp.file(remote_path, "wb") as remote_f:
+            try:
+                remote_f.set_pipelined(True)
+            except Exception:
+                pass
+
+            while True:
+                chunk = local_f.read(chunk_size)
+                if not chunk:
+                    break
+                remote_f.write(chunk)
+                transferred += len(chunk)
+                now = time.time()
+                if now - last_print >= 0.8 or transferred == total:
+                    elapsed = max(now - start_time, 0.001)
+                    speed_mbs = (transferred / elapsed) / 1e6
+                    pct = (transferred / total) * 100 if total else 0
+                    mb_done = transferred / 1e6
+                    mb_tot = total / 1e6
+                    eta_s = (total - transferred) / (transferred / elapsed) if transferred > 0 else 0
+                    print(
+                        f"\r  Uploading: {pct:5.1f}% [{mb_done:6.1f} / {mb_tot:6.1f} MB] "
+                        f"@ {speed_mbs:5.1f} MB/s (ETA: {int(eta_s)}s)   ",
+                        end="",
+                        flush=True,
+                    )
+                    last_print = now
+
+        print("\n\n  " + "=" * 60)
+        print("  [OK] Upload Complete!")
         print(f"  Paste this path into Recap Studio 'Movie file path':")
         print(f"    {remote_path}")
         print("  " + "=" * 60)
