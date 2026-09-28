@@ -81,9 +81,10 @@ set "MISSING="
 %PY% -c "import edge_tts"       >nul 2>&1 || set "MISSING=!MISSING! edge-tts"
 %PY% -c "import static_ffmpeg"  >nul 2>&1 || set "MISSING=!MISSING! static-ffmpeg"
 %PY% -c "import openai"         >nul 2>&1 || set "MISSING=!MISSING! openai"
+%PY% -c "import scenedetect"    >nul 2>&1 || set "MISSING=!MISSING! scenedetect[opencv]"
 
 if not defined MISSING (
-    echo  [OK] PyYAML, pysubs2, edge-tts, static-ffmpeg, openai
+    echo  [OK] PyYAML, pysubs2, edge-tts, static-ffmpeg, openai, scenedetect
 ) else (
     echo  [..] Installing:!MISSING!
     %PY% -m pip install --upgrade pip >nul 2>&1
@@ -91,10 +92,25 @@ if not defined MISSING (
     if errorlevel 1 (
         echo.
         echo  [X] pip could not install the dependencies. Try this by hand:
-        echo      %PY% -m pip install PyYAML pysubs2 edge-tts static-ffmpeg openai
+        echo      %PY% -m pip install PyYAML pysubs2 edge-tts static-ffmpeg openai scenedetect[opencv]
         goto :fail
     )
     echo  [OK] Dependencies installed.
+)
+echo.
+
+echo  Checking forced alignment engine (WhisperX)...
+%PY% -c "import whisperx" >nul 2>&1
+if not errorlevel 1 (
+    echo  [OK] whisperx ready for forced alignment.
+) else (
+    echo  [..] Installing whisperx (VAD + phoneme alignment)...
+    %PY% -m pip install "whisperx>=3.1.0"
+    if not errorlevel 1 (
+        echo  [OK] whisperx installed successfully.
+    ) else (
+        echo  [!] whisperx install had issues or requires torch. Fallback to faster-whisper is active.
+    )
 )
 echo.
 
