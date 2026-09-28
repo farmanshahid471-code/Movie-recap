@@ -123,13 +123,15 @@ def _from_whisper(
 ) -> list[dict]:
     """Transcribe with Whisper (openai-whisper, faster-whisper, or whisperx)."""
     audio = _extract_audio(video, tmp_dir)
-    # Try faster-whisper first (fast, CPU-friendly), then openai-whisper, then whisperx.
+    # Try faster-whisper first (fast, GPU/CPU-friendly), then openai-whisper, then whisperx.
     try:
         return _faster_whisper(audio, model_size, device, language, word_timestamps)
     except ImportError:
-        pass
+        print("  * Note: faster-whisper not installed; using openai-whisper. (Tip: 'pip install faster-whisper' is 10x faster)", flush=True)
+    except Exception as exc:
+        print(f"  * Note: faster-whisper error ({exc}); trying openai-whisper...", flush=True)
     try:
-        return _openai_whisper(audio, model_size, language, word_timestamps)
+        return _openai_whisper(audio, model_size, device, language, word_timestamps)
     except ImportError:
         pass
     try:
@@ -137,7 +139,7 @@ def _from_whisper(
     except ImportError:
         raise DialogueError(
             "No Whisper implementation found for audio transcription. Install one of:\n"
-            "  pip install faster-whisper      # recommended (CPU-friendly)\n"
+            "  pip install faster-whisper      # recommended (fastest)\n"
             "  pip install openai-whisper\n"
             "  pip install whisperx            # word-level timestamps + diarization\n"
             "OR provide an existing .srt subtitle file next to the movie."
@@ -212,19 +214,29 @@ def _faster_whisper(
 def _openai_whisper(
     audio: Path,
     model_size: str,
+    device: str,
     language: str | None,
     word_timestamps: bool = False,
 ) -> list[dict]:
     import whisper  # type: ignore
 
-    # Keep the ~GB model weights off the OS user profile: bootstrap() points
-    # WHISPER_CACHE_DIR at the configured cache root (see recap/storage.py).
+    dev = device
+    if not dev or dev == "auto":
+        try:
+            import torch
+            dev = "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            dev = "cpu"
+
     download_root = os.environ.get("WHISPER_CACHE_DIR") or None
-    model = whisper.load_model(model_size, download_root=download_root)
+    print(f"  * Whisper (OpenAI): loading model '{model_size}' on {dev}...", flush=True)
+    model = whisper.load_model(model_size, device=dev, download_root=download_root)
+    print(f"  * Whisper (OpenAI): transcribing audio on {dev} (word_timestamps={word_timestamps})...", flush=True)
     out = model.transcribe(
         str(audio),
         language=language,
         word_timestamps=word_timestamps,
+        verbose=True,
     )
     cues: list[dict] = []
     for s in out.get("segments", []):

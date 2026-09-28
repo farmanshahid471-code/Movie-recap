@@ -739,17 +739,19 @@ def ensure_whisper() -> tuple[bool, str]:
     interpreter that is running the panel. One-time; later runs find it already
     present. Returns ``(ok, message)``.
     """
-    if whisper_available():
+    if have("faster_whisper") or have("whisperx"):
         return True, "already installed"
 
-    _log("    Whisper not installed -> downloading & installing faster-whisper "
-         "(one-time; can take several minutes on a slow connection) ...")
+    _log("    faster-whisper not installed -> installing faster-whisper for 10x faster GPU transcription...")
     ok, why = _run_pip_install("faster-whisper", "faster-whisper", timeout=2400)
     if not ok:
+        if whisper_available():
+            _log(f"    (faster-whisper install warning: {why}; using available whisper fallback)")
+            return True, "fallback"
         return False, why
 
-    if whisper_available():
-        _log("    faster-whisper installed.")
+    if have("faster_whisper"):
+        _log("    faster-whisper installed successfully.")
         return True, "installed"
     return False, "faster-whisper was installed but could not be imported"
 
