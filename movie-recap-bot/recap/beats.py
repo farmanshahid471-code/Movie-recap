@@ -1029,12 +1029,11 @@ def validate_beat(
 
     # Determine model: prefer a cheap model if configured, else the main model
     provider_name = (provider or cfg_llm.get("provider") or "").strip().lower()
-    # For gemini, use gemini-2.0-flash if available as cheap model
     model = cfg_llm.get("validation_model") or cfg_llm.get("model") or ""
-    # Allow env override for cheap model
+    # Allow env override for validation model (never leak VISION_MODEL into text validation)
     import os
 
-    cheap_model = os.environ.get("VALIDATION_MODEL") or os.environ.get("VISION_MODEL") or ""
+    cheap_model = os.environ.get("VALIDATION_MODEL") or ""
     if cheap_model:
         model = cheap_model
 

@@ -124,9 +124,9 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
             or "https://api.deepseek.com",
             timeout=timeout,
         )
+        model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["deepseek"]
         if model and ("gemini" in model.lower() or "gpt" in model.lower() or "claude" in model.lower() or "qwen" in model.lower() or "llama" in model.lower()):
             model = DEFAULT_MODELS["deepseek"]
-        model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["deepseek"]
         return client, model
 
     if provider == "gemini":
@@ -139,9 +139,9 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
             or "https://generativelanguage.googleapis.com/v1beta/openai/",
             timeout=timeout,
         )
+        model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["gemini"]
         if model and ("deepseek" in model.lower() or "gpt" in model.lower() or "claude" in model.lower() or "qwen" in model.lower() or "llama" in model.lower()):
             model = DEFAULT_MODELS["gemini"]
-        model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["gemini"]
         return client, model
 
     if provider == "anthropic":
