@@ -121,33 +121,15 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
             api_key=os.environ.get("DEEPSEEK_API_KEY"),
             base_url=base_url
             or os.environ.get("DEEPSEEK_BASE_URL")
-            or "https://api.deepseek.com/v1",
+            or "https://api.deepseek.com",
             timeout=timeout,
         )
+        if model and ("gemini" in model.lower() or "gpt" in model.lower() or "claude" in model.lower() or "qwen" in model.lower() or "llama" in model.lower()):
+            model = DEFAULT_MODELS["deepseek"]
         model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["deepseek"]
         return client, model
 
-    if provider == "groq":
-        # Free tier (no credit card): console.groq.com -> API Keys.
-        # Very fast Llama on custom hardware; ~30 req/min is plenty for a recap
-        # (~25 LLM calls per movie).
-        import openai  # type: ignore
-
-        client = openai.OpenAI(
-            api_key=os.environ.get("GROQ_API_KEY"),
-            base_url=base_url
-            or os.environ.get("GROQ_BASE_URL")
-            or "https://api.groq.com/openai/v1",
-            timeout=timeout,
-        )
-        model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["groq"]
-        return client, model
-
     if provider == "gemini":
-        # Google AI Studio free API key (aistudio.google.com -> Get API key).
-        # Flash models keep a generous free tier (~1500 requests/day). This is
-        # Google's OpenAI-compatible endpoint; model names like
-        # gemini-3.6-flash and other current Flash models work here.
         import openai  # type: ignore
 
         client = openai.OpenAI(
@@ -157,6 +139,8 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
             or "https://generativelanguage.googleapis.com/v1beta/openai/",
             timeout=timeout,
         )
+        if model and ("deepseek" in model.lower() or "gpt" in model.lower() or "claude" in model.lower() or "qwen" in model.lower() or "llama" in model.lower()):
+            model = DEFAULT_MODELS["gemini"]
         model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["gemini"]
         return client, model
 
@@ -364,6 +348,11 @@ def complete(
 
     p = (provider or "").strip().lower()
     client, resolved_model = _client_from(provider, model, base_url)
+
+    try:
+        timeout = float(os.environ.get("LLM_TIMEOUT", "180"))
+    except ValueError:
+        timeout = 180.0
 
     try:
         env_max = int(os.environ.get("LLM_MAX_TOKENS", "0") or "0")

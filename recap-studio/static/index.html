@@ -467,11 +467,16 @@ function settingsCard(cfg, s){
   };
   const provSel = card.querySelector('#llm_provider');
   const knownModels = Object.values(PRESETS).map(p => p.model).filter(Boolean);
-  provSel.onchange = () => {
+  provSel.onchange = (e) => {
     const p = PRESETS[provSel.value] || PRESETS.deepseek;
     const m = card.querySelector('#llm_model'), b = card.querySelector('#llm_base_url'), k = card.querySelector('#llm_api_key');
-    if (!m.value.trim() || knownModels.includes(m.value.trim())) m.value = p.model;
-    if (!b.value.trim() || Object.values(PRESETS).some(x => x.base && x.base === b.value.trim())) b.value = p.base;
+    if (e) {
+      m.value = p.model;
+      b.value = p.base;
+    } else {
+      if (!m.value.trim() || knownModels.includes(m.value.trim())) m.value = p.model;
+      if (!b.value.trim() || Object.values(PRESETS).some(x => x.base && x.base === b.value.trim())) b.value = p.base;
+    }
     k.disabled = !p.key;
     k.placeholder = p.key ? 'paste your API key' : 'not needed for this provider';
     card.querySelector('#llmNote').innerHTML = p.note;
