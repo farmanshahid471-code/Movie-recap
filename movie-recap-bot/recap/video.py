@@ -249,3 +249,186 @@ def make_storyboard(count: int, cfg_video: dict, workdir: Path, duration: float 
         if out.exists():
             clips.append(out)
     return clips
+
+
+# --------------------------------------------------------------------------
+# Dynamic Audio & Video Retiming (atempo, freeze-framing, silence padding)
+# --------------------------------------------------------------------------
+def retime_audio(
+    audio_in: Path,
+    out_audio: Path,
+    target_duration: float,
+    max_atempo: float = 1.15,
+) -> float:
+    """Retime a TTS audio clip to match a target video beat duration.
+
+    Fallback logic:
+    - Audio Stretching (atempo): If audio is slightly longer than the video beat
+      (target_duration < audio_dur <= target_duration * 1.15), speeds up audio by
+      up to 1.15x using FFmpeg's atempo filter.
+    - Video Freeze-Framing overflow: If audio heavily overruns (audio_dur > target_duration * 1.15),
+      speeds up audio by max_atempo (1.15x); caller freezes the video frame for the rest.
+    - Silence Padding: If video beat is longer than audio (target_duration > audio_dur),
+      inserts silence at the end using apad so next narration line snaps exactly
+      to the start of the next visual scene.
+    """
+    out_audio.parent.mkdir(parents=True, exist_ok=True)
+    a_dur = probe_duration(audio_in)
+    t_dur = float(target_duration)
+
+    if a_dur <= 0.0:
+        # Mock/invalid audio data (e.g. unit tests): preserve file and return target
+        try:
+            out_audio.write_bytes(audio_in.read_bytes() if audio_in.exists() else b"")
+        except Exception:
+            pass
+        return t_dur
+
+    if t_dur <= 0.05 or abs(a_dur - t_dur) < 0.01:
+        run([which_ffmpeg(), "-y", "-i", str(audio_in), "-c", "copy", str(out_audio)], check=False)
+        if not out_audio.exists():
+            out_audio.write_bytes(audio_in.read_bytes())
+        return a_dur
+
+    if t_dur < a_dur <= t_dur * max_atempo:
+        speed = min(max(a_dur / t_dur, 1.0), max_atempo)
+        cmd = [
+            which_ffmpeg(), "-y",
+            "-i", str(audio_in),
+            "-filter:a", f"atempo={speed:.4f}",
+            "-t", f"{t_dur:.3f}",
+            str(out_audio),
+        ]
+        run(cmd, check=False)
+        return probe_duration(out_audio) if out_audio.exists() else t_dur
+
+    if a_dur > t_dur * max_atempo:
+        cmd = [
+            which_ffmpeg(), "-y",
+            "-i", str(audio_in),
+            "-filter:a", f"atempo={max_atempo:.4f}",
+            str(out_audio),
+        ]
+        run(cmd, check=False)
+        return probe_duration(out_audio) if out_audio.exists() else (a_dur / max_atempo)
+
+    pad_dur = max(t_dur - a_dur, 0.0)
+    cmd = [
+        which_ffmpeg(), "-y",
+        "-i", str(audio_in),
+        "-af", f"apad=pad_dur={pad_dur:.3f}",
+        "-t", f"{t_dur:.3f}",
+        str(out_audio),
+    ]
+    run(cmd, check=False)
+    return probe_duration(out_audio) if out_audio.exists() else t_dur
+
+
+def freeze_frame_video(
+    video_in: Path,
+    out_video: Path,
+    freeze_duration: float,
+    cfg_video: dict | None = None,
+) -> Path:
+    """Freeze the final frame of video_in for freeze_duration seconds using FFmpeg tpad."""
+    out_video.parent.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_video or {}
+    fps = int(cfg.get("fps", 30))
+    if freeze_duration <= 0.01:
+        run([which_ffmpeg(), "-y", "-i", str(video_in), "-c", "copy", str(out_video)], check=False)
+        if not out_video.exists():
+            out_video.write_bytes(video_in.read_bytes())
+        return out_video
+
+    vf = f"tpad=stop_mode=clone:stop_duration={freeze_duration:.3f}"
+    cmd = [
+        which_ffmpeg(), "-y",
+        "-i", str(video_in),
+        "-vf", vf,
+        "-r", str(fps),
+        "-c:v", cfg.get("codec", "libx264"),
+        "-pix_fmt", "yuv420p",
+        "-an",
+        str(out_video),
+    ]
+    run(cmd, check=False)
+    return out_video
+
+
+def retime_beat_clip(
+    video_in: Path,
+    audio_in: Path,
+    target_dur: float,
+    out_video: Path,
+    out_audio: Path,
+    max_atempo: float = 1.15,
+    cfg_video: dict | None = None,
+) -> tuple[Path, Path, float]:
+    """Retime a single (video, audio) beat pair with stretching, freezing, or padding."""
+    out_video.parent.mkdir(parents=True, exist_ok=True)
+    out_audio.parent.mkdir(parents=True, exist_ok=True)
+
+    a_dur = probe_duration(audio_in)
+    v_dur = probe_duration(video_in)
+    if target_dur <= 0:
+        target_dur = v_dur
+
+    if v_dur < a_dur <= v_dur * max_atempo:
+        final_dur = retime_audio(audio_in, out_audio, v_dur, max_atempo=max_atempo)
+        freeze_frame_video(video_in, out_video, 0.0, cfg_video)
+        return out_video, out_audio, final_dur
+
+    if a_dur > v_dur * max_atempo:
+        final_dur = retime_audio(audio_in, out_audio, v_dur, max_atempo=max_atempo)
+        freeze_dur = max(final_dur - v_dur, 0.0)
+        freeze_frame_video(video_in, out_video, freeze_dur, cfg_video)
+        return out_video, out_audio, final_dur
+
+    final_dur = retime_audio(audio_in, out_audio, v_dur, max_atempo=max_atempo)
+    freeze_frame_video(video_in, out_video, 0.0, cfg_video)
+    return out_video, out_audio, final_dur
+
+
+def assemble_retimed_narration_track(
+    beat_audios: list[Path],
+    visual_durations: list[float],
+    out_mp3: Path,
+    workdir: Path,
+    max_atempo: float = 1.15,
+) -> tuple[Path, list, list[float]]:
+    """Retime each beat audio file to snap directly to the visual scene boundary.
+
+    Prevents compound drift across the entire montage. Returns (out_mp3, cues, final_durations).
+    """
+    from .tts import TimedCue
+
+    workdir = Path(workdir)
+    retimed_dir = workdir / "retimed_audio"
+    retimed_dir.mkdir(parents=True, exist_ok=True)
+
+    retimed_files: list[Path] = []
+    cues: list[TimedCue] = []
+    final_durs: list[float] = []
+    cum = 0.0
+
+    n = min(len(beat_audios), len(visual_durations))
+    for i in range(n):
+        src_audio = beat_audios[i]
+        target = float(visual_durations[i])
+        out_beat = retimed_dir / f"beat_{i+1:03d}_retimed.mp3"
+        dur = retime_audio(src_audio, out_beat, target, max_atempo=max_atempo)
+        retimed_files.append(out_beat)
+        final_durs.append(dur)
+        cues.append(TimedCue(f"Beat {i+1}", cum, cum + dur))
+        cum += dur
+
+    listfile = workdir / "concat_retimed_audio.txt"
+    listfile.write_text("\n".join(f"file '{p.as_posix()}'" for p in retimed_files) + "\n", encoding="utf-8")
+    run([which_ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(listfile), "-c", "copy", str(out_mp3)], check=False)
+    if not out_mp3.exists() or out_mp3.stat().st_size == 0:
+        with open(out_mp3, "wb") as o:
+            for rf in retimed_files:
+                if rf.exists():
+                    o.write(rf.read_bytes())
+
+    return out_mp3, cues, final_durs

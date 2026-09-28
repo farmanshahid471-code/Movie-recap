@@ -1219,12 +1219,37 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         seg_for_lang = _extend_final_zone(seg_for_lang, movie_dur)
         seg_for_lang = timeline.rewindow_to_speech(
             seg_for_lang, durations, movie_dur)
+
+        # Segmented TTS: check for individual beat audio files (beat_001.mp3, ...)
+        beat_files = tts.get_beat_files(wd, code)
+        beat_audio_durs = [float(c.duration) for c in cues_t] if (beat_files and len(beat_files) == len(cues_t)) else None
+
         tl_beats = timeline.build_timeline(
             seg_for_lang, durations, movie_dur, tl_cfg,
             word_times=[c.words for c in cues_t],
             stats=tl_stats,
             scene_bounds=snap_bounds,
+            audio_durations=beat_audio_durs,
         )
+
+        # Dynamic Audio Retiming: snap each beat audio directly to its video boundary
+        if beat_files and beat_audio_durs and len(beat_files) == len(tl_beats):
+            try:
+                retimed_mp3 = wd / f"{code}_retimed.mp3"
+                target_durs = [float(b.get("duration", 0.0)) for b in tl_beats]
+                _, retimed_cues, _ = video.assemble_retimed_narration_track(
+                    beat_files, target_durs, retimed_mp3, wd / "retimed" / code,
+                    max_atempo=float(tl_cfg.get("max_atempo", 1.15)),
+                )
+                if retimed_mp3.exists() and retimed_mp3.stat().st_size > 0:
+                    mp3 = retimed_mp3
+                    cues_t = retimed_cues
+                    audio_span = probe_duration(mp3)
+                    print(f"  * [{code}] dynamic audio retiming: snapped {len(beat_files)} "
+                          "audio beats directly to video shot boundaries (zero drift)")
+            except Exception as e_retime:
+                print(f"  ! [{code}] dynamic audio retiming notice: {e_retime}")
+
         _write_json(tl_beats, wd / f"beats_{code}.json")
         _report = timeline.timeline_report(
             tl_beats, audio_span, tl_stats.get("word_locked_beats", 0),

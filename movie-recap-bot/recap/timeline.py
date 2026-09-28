@@ -310,6 +310,7 @@ def build_timeline(
     word_times: list | None = None,
     stats: dict | None = None,
     scene_bounds: list[float] | None = None,
+    audio_durations: list[float] | None = None,
 ) -> list[dict]:
     """Build the chronological, audio-locked beat list.
 
@@ -526,6 +527,10 @@ def build_timeline(
              round(float(v), 3))
             for s, d, f, v in b["cuts"]
         ]
+    if audio_durations:
+        max_atempo = float((cfg_timeline or {}).get("max_atempo", 1.15))
+        apply_beat_retiming_to_timeline(beats, audio_durations, max_atempo=max_atempo)
+
     if stats is not None:
         stats["word_locked_beats"] = word_locked
         stats["snapped_cuts"] = snapped
@@ -533,6 +538,109 @@ def build_timeline(
         stats["held_shots"] = held
         stats["slowed_groups"] = slowed
         stats["slowed_seconds"] = round(slowed_secs, 1)
+    return beats
+
+
+def compute_dynamic_retiming(
+    audio_dur: float,
+    video_dur: float,
+    max_atempo: float = 1.15,
+) -> dict:
+    """Calculate fallback retiming parameters for one visual/audio beat pair.
+
+    1. Audio Stretching (atempo): If audio is slightly longer than video
+       (video_dur < audio_dur <= video_dur * 1.15), speed up audio by up to
+       1.15x so audio fits the video beat.
+    2. Video Freeze-Framing: If narration heavily overruns the visual scene
+       (audio_dur > video_dur * 1.15), freeze the final frame of the video
+       beat until the audio finishes, rather than letting audio bleed into
+       the next scene.
+    3. Silence Padding: If video beat is longer than audio (video_dur > audio_dur),
+       insert silence at the end of the TTS file so the next narration line
+       snaps exactly to the start of the next visual scene.
+    """
+    a_dur = max(float(audio_dur), 0.05)
+    v_dur = max(float(video_dur), 0.05)
+
+    if abs(a_dur - v_dur) < 0.01:
+        return {
+            "action": "exact",
+            "audio_dur": round(a_dur, 3),
+            "video_dur": round(v_dur, 3),
+            "atempo": 1.0,
+            "freeze": 0.0,
+            "silence_pad": 0.0,
+            "final_dur": round(v_dur, 3),
+        }
+
+    if v_dur < a_dur <= v_dur * max_atempo:
+        speed = a_dur / v_dur
+        return {
+            "action": "atempo",
+            "audio_dur": round(a_dur, 3),
+            "video_dur": round(v_dur, 3),
+            "atempo": round(speed, 4),
+            "freeze": 0.0,
+            "silence_pad": 0.0,
+            "final_dur": round(v_dur, 3),
+        }
+
+    if a_dur > v_dur * max_atempo:
+        eff_a_dur = a_dur / max_atempo
+        freeze = eff_a_dur - v_dur
+        return {
+            "action": "freeze",
+            "audio_dur": round(a_dur, 3),
+            "video_dur": round(v_dur, 3),
+            "atempo": round(max_atempo, 4),
+            "freeze": round(freeze, 3),
+            "silence_pad": 0.0,
+            "final_dur": round(eff_a_dur, 3),
+        }
+
+    silence_pad = v_dur - a_dur
+    return {
+        "action": "silence_padding",
+        "audio_dur": round(a_dur, 3),
+        "video_dur": round(v_dur, 3),
+        "atempo": 1.0,
+        "freeze": 0.0,
+        "silence_pad": round(silence_pad, 3),
+        "final_dur": round(v_dur, 3),
+    }
+
+
+def apply_beat_retiming_to_timeline(
+    beats: list[dict],
+    audio_durations: list[float],
+    max_atempo: float = 1.15,
+) -> list[dict]:
+    """Apply dynamic retiming fallback logic across the timeline beats.
+
+    - Freezes the video beat's final frame when narration heavily overruns.
+    - Speeds up audio up to 1.15x when audio is slightly longer.
+    - Pads silence when video is longer, snapping the next line to the next scene.
+    """
+    for i, b in enumerate(beats):
+        if i >= len(audio_durations):
+            break
+        a_dur = float(audio_durations[i])
+        v_dur = float(b.get("duration", 0.0))
+        retiming = compute_dynamic_retiming(a_dur, v_dur, max_atempo=max_atempo)
+        b["retiming"] = retiming
+
+        if retiming["action"] == "freeze" and retiming["freeze"] > 0:
+            cuts = list(b.get("cuts") or [])
+            if cuts:
+                s, d, f, v = cuts[-1]
+                cuts[-1] = (
+                    round(float(s), 3),
+                    round(float(d) + retiming["freeze"], 3),
+                    round(float(f) + retiming["freeze"], 3),
+                    round(float(v), 3),
+                )
+                b["cuts"] = cuts
+            b["duration"] = round(retiming["final_dur"], 3)
     return beats
 
 

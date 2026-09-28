@@ -165,18 +165,24 @@ def _read_partial(path: Path) -> dict[int, str]:
     return out
 
 
-def _visual_block(visual) -> str:
-    """Render a chunk's on-screen notes ('[MM:SS] caption' lines) for the prompt.
+def calculate_beat_max_words(duration_seconds: float) -> int:
+    """Calculate maximum word count for a beat or scene duration.
 
-    ``visual`` is an optional list of {"t": seconds, "text": ...} records. An
-    empty list yields an empty string so text-only runs are byte-identical to
-    before.
-    Low-confidence / fallback captions are tagged so the summarizer weights them lower.
+    Formula: Beat Duration (seconds) * 2.5 (Words Per Second) = Max Words.
+    """
+    return max(1, int(round(float(duration_seconds) * 2.5)))
+
+
+def _visual_block(visual, chunk_start: float | None = None, chunk_end: float | None = None) -> str:
+    """Render a chunk's on-screen notes and shot boundaries with calculated max words.
+
+    Formula: Beat Duration (seconds) * 2.5 (Words Per Second) = Max Words.
     """
     if not visual:
         return ""
     lines = []
-    for v in visual:
+    v_sorted = sorted(visual, key=lambda v: float(v.get("t", 0.0) or 0.0))
+    for i, v in enumerate(v_sorted):
         t = v.get("t")
         text = (v.get("text") or "").strip()
         if text is None or not text:
@@ -190,13 +196,23 @@ def _visual_block(visual) -> str:
         if t is None:
             lines.append(text + suffix)
         else:
-            m, s = divmod(int(float(t)) % 3600, 60)
-            h = int(float(t)) // 3600
+            t_curr = float(t)
+            if i + 1 < len(v_sorted) and v_sorted[i + 1].get("t") is not None:
+                beat_dur = max(float(v_sorted[i + 1]["t"]) - t_curr, 1.0)
+            elif chunk_end is not None and chunk_end > t_curr:
+                beat_dur = max(chunk_end - t_curr, 1.0)
+            else:
+                beat_dur = 8.0
+            max_words = calculate_beat_max_words(beat_dur)
+            min_words = max(1, int(round(max_words * 0.75)))
+            m, s = divmod(int(t_curr) % 3600, 60)
+            h = int(t_curr) // 3600
             stamp = f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
-            lines.append(f"[{stamp}] {text}{suffix}")
+            lines.append(f"[{stamp}] (Beat Duration: {beat_dur:.1f}s | Limit: exactly {min_words} to {max_words} words) {text}{suffix}")
     if not lines:
         return ""
-    return "\n\n=== WHAT IS ON SCREEN (VISUAL NOTES, WITH FILM TIMES) ===\n" \
+    return "\n\n=== WHAT IS ON SCREEN (VISUAL NOTES WITH DURATION & MAX WORDS CONSTRAINTS) ===\n" \
+        + "Formula applied: Beat Duration (seconds) * 2.5 Words Per Second = Max Words\n" \
         + "\n".join(lines) + "\n=== END VISUAL NOTES ===\n"
 
 
@@ -302,16 +318,38 @@ def summarize_chunks(
     def one(chunk: dict) -> str:
         text = chunk.get("text", "") or ""
         budget = _summary_budget(len(text))
+        chunk_start = float(chunk.get("start", 0.0) or 0.0)
+        chunk_end = float(chunk.get("end", 0.0) or 0.0)
+        if chunk_end <= chunk_start and chunk.get("cues"):
+            cues = chunk["cues"]
+            chunk_start = float(cues[0].get("start", 0.0) or 0.0)
+            chunk_end = float(cues[-1].get("end", chunk_start + 8.0) or (chunk_start + 8.0))
+        chunk_dur = max(chunk_end - chunk_start, 1.0) if chunk_end > chunk_start else 8.0
+
+        max_words = calculate_beat_max_words(chunk_dur)
+        min_words = max(1, int(round(max_words * 0.75)))
+        system_prompt = (
+            SYSTEM_SUMMARY
+            + f"\n\nSTRICT SPATIAL CONSTRAINT:\n"
+            f"This scene is {chunk_dur:.0f} seconds long. Your summary must be exactly {min_words} to {max_words} words. "
+            f"(Formula: Beat Duration ({chunk_dur:.1f}s) * 2.5 Words Per Second = Max {max_words} Words). "
+            f"Prevent narration overflow before TTS by strictly mathematically bounding your summary to this visual timeline."
+        )
+
         user = PROMPT_SUMMARY.format(
             transcript=text, budget=budget,
-            visual=_visual_block(chunk.get("visual")),
+            visual=_visual_block(chunk.get("visual"), chunk_start=chunk_start, chunk_end=chunk_end),
+        )
+        user += (
+            f"\n\nSTRICT SCENE CONSTRAINT: This scene is {chunk_dur:.0f} seconds long. "
+            f"Your summary must be exactly {min_words} to {max_words} words (Formula: {chunk_dur:.1f}s * 2.5 = Max {max_words} words)."
         )
         if lang_instr:
             user += lang_instr
         raw = llm.complete(
             cfg_llm.get("provider", ""),
             model,
-            SYSTEM_SUMMARY,
+            system_prompt,
             user,
             base_url=cfg_llm.get("base_url"),
             max_tokens=_summary_max_tokens(budget),

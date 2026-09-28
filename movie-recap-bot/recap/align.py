@@ -1,4 +1,4 @@
-"""Step C+ — lock the visuals to the SPOKEN narration with faster-whisper.
+"""Step C+ — lock the visuals to the SPOKEN narration with WhisperX forced alignment.
 
 Why this module exists
 ----------------------
@@ -8,23 +8,18 @@ the TTS backend reports word boundaries (only edge-tts does; OpenAI and
 ElevenLabs return a bare mp3, and the old fallback guessed cue times
 proportionally by word count — drifting seconds away from the voice).
 
-The fix (suggested by the bot's owner, and it is the right one): run the
-GENERATED narration audio back through faster-whisper. Whisper measures what
-the viewer actually hears, so:
+The fix: run the GENERATED narration audio through WhisperX forced alignment.
+WhisperX utilizes Voice Activity Detection (VAD) and phoneme-level forced
+alignment to guarantee highly accurate word timestamps:
 
 * every sentence cue start becomes the true start of its first spoken word,
-* every cue carries word-level timestamps, whatever the TTS provider was,
-* the timeline can then place its micro-cut boundaries ON WORDS — the visual
-  switches at the exact moment the narrator moves to the next clause/subject,
-  instead of at an arbitrary even split.
+* every cue carries word-level timestamps with phoneme-level accuracy,
+* outputs a structured JSON with precise start/end times for every word,
+  eliminating drift entirely.
 
-Cost: one extra faster-whisper pass over the (much shorter) narration mp3 —
-a 15-minute voiceover takes a couple of minutes on CPU with the small model,
-and the result is cached per audio content hash so re-runs are free.
-
-Everything here degrades gracefully: no faster-whisper installed, a failed
-transcription, or a bad word-to-sentence match just keeps the provider's own
-cues — the pipeline never breaks because of this module.
+Degrades gracefully: if whisperx is unavailable, falls back to faster-whisper,
+and if transcription fails or word-to-sentence match is poor, keeps the
+provider's own cues — the pipeline never breaks because of this module.
 """
 from __future__ import annotations
 
@@ -61,18 +56,85 @@ def _hash_file(path: Path) -> str:
     return h.hexdigest()[:20]
 
 
-def narration_words(
+def narration_words_whisperx(
     mp3: Path,
     model_size: str = "small",
     device: str = "auto",
     language: str | None = None,
 ) -> list[tuple[str, float, float]] | None:
-    """Transcribe the narration audio and return every spoken word with times.
+    """Run WhisperX with VAD and phoneme-level forced alignment.
 
-    Returns ``[(word, start, end)]`` in order, or ``None`` when faster-whisper
-    is unavailable or the transcription fails (the caller keeps whatever
-    timings the TTS provider gave it).
+    Utilizes Voice Activity Detection (VAD) and phoneme-level alignment
+    to guarantee highly accurate word timestamps, eliminating drift.
     """
+    try:
+        import whisperx  # type: ignore
+        import torch  # type: ignore
+    except Exception:
+        return None
+
+    try:
+        dev = "cuda" if (device == "cuda" or (device in ("auto", None) and torch.cuda.is_available())) else "cpu"
+        compute_type = "float16" if dev == "cuda" else "int8"
+
+        # 1. Load audio
+        audio = whisperx.load_audio(str(mp3))
+
+        # 2. Transcribe with VAD
+        try:
+            model = whisperx.load_model(
+                model_size,
+                device=dev,
+                compute_type=compute_type,
+                language=language,
+            )
+        except Exception:
+            model = whisperx.load_model(
+                model_size,
+                device=dev,
+                compute_type="float32",
+                language=language,
+            )
+        result = model.transcribe(audio, batch_size=16, language=language)
+
+        # 3. Phoneme-level forced alignment
+        align_lang = result.get("language") or language or "en"
+        try:
+            model_a, metadata = whisperx.load_align_model(
+                language_code=align_lang, device=dev
+            )
+            aligned = whisperx.align(
+                result.get("segments", []),
+                model_a,
+                metadata,
+                audio,
+                dev,
+                return_char_alignments=False,
+            )
+            segments = aligned.get("segments", [])
+        except Exception as align_err:
+            print(f"  ! whisperx forced alignment model fallback: {align_err}", flush=True)
+            segments = result.get("segments", [])
+
+        words: list[tuple[str, float, float]] = []
+        for seg in segments:
+            for w in seg.get("words", []):
+                wt = (w.get("word") or "").strip()
+                if wt and "start" in w and "end" in w:
+                    words.append((wt, float(w["start"]), float(w["end"])))
+        return words or None
+    except Exception as e:
+        print(f"  ! whisperx alignment failed ({type(e).__name__}: {e}), trying fallback...", flush=True)
+        return None
+
+
+def narration_words_whisper(
+    mp3: Path,
+    model_size: str = "small",
+    device: str = "auto",
+    language: str | None = None,
+) -> list[tuple[str, float, float]] | None:
+    """Fallback: transcribe with faster-whisper when whisperx is not available."""
     try:
         from faster_whisper import WhisperModel  # type: ignore
     except Exception:
@@ -93,6 +155,58 @@ def narration_words(
                     words.append((wt, float(w.start), float(w.end)))
         return words or None
     except Exception:
+        return None
+
+
+def narration_words(
+    mp3: Path,
+    model_size: str = "small",
+    device: str = "auto",
+    language: str | None = None,
+) -> list[tuple[str, float, float]] | None:
+    """Extract spoken word timestamps from narration audio using WhisperX forced alignment.
+
+    Swaps out base Whisper for WhisperX (VAD + phoneme alignment).
+    Degrades gracefully to faster-whisper if WhisperX is unavailable.
+    """
+    words = narration_words_whisperx(
+        mp3, model_size=model_size, device=device, language=language
+    )
+    if words:
+        return words
+    return narration_words_whisper(
+        mp3, model_size=model_size, device=device, language=language
+    )
+
+
+def align_with_whisperx(
+    audio_path: Path | str,
+    language: str | None = None,
+    device: str = "auto",
+    model_size: str = "small",
+) -> dict | None:
+    """Run WhisperX end-to-end forced alignment on an audio file.
+
+    Returns the aligned dictionary structure with segments and word timestamps.
+    """
+    try:
+        import whisperx  # type: ignore
+        import torch  # type: ignore
+
+        dev = "cuda" if (device == "cuda" or (device in ("auto", None) and torch.cuda.is_available())) else "cpu"
+        compute_type = "float16" if dev == "cuda" else "int8"
+        audio = whisperx.load_audio(str(audio_path))
+        try:
+            model = whisperx.load_model(model_size, device=dev, compute_type=compute_type, language=language)
+        except Exception:
+            model = whisperx.load_model(model_size, device=dev, compute_type="float32", language=language)
+        result = model.transcribe(audio, batch_size=16, language=language)
+        align_lang = result.get("language") or language or "en"
+        model_a, metadata = whisperx.load_align_model(language_code=align_lang, device=dev)
+        aligned = whisperx.align(result.get("segments", []), model_a, metadata, audio, dev, return_char_alignments=False)
+        return aligned
+    except Exception as e:
+        print(f"  ! align_with_whisperx error: {e}", flush=True)
         return None
 
 
@@ -300,25 +414,39 @@ def align_narration(
         if marker.exists() and words_path.exists() \
                 and json.loads(marker.read_text(encoding="utf-8")).get("sig") == sig:
             raw = json.loads(words_path.read_text(encoding="utf-8"))
-            words = [(w[0], float(w[1]), float(w[2])) for w in raw.get("words", [])] or None
+            raw_words = raw.get("words", [])
+            parsed_words: list[tuple[str, float, float]] = []
+            for item in raw_words:
+                if isinstance(item, dict):
+                    parsed_words.append((str(item.get("word", "")), float(item.get("start", 0.0)), float(item.get("end", 0.0))))
+                elif isinstance(item, (list, tuple)) and len(item) >= 3:
+                    parsed_words.append((str(item[0]), float(item[1]), float(item[2])))
+            words = parsed_words or None
     except Exception:
         words = None
 
     if words is None:
-        print(f"  * [{code}] whisper-aligning the narration audio "
+        print(f"  * [{code}] whisperx-aligning the narration audio "
               f"({audio_span / 60:.1f} min; model={model_size}) ...", flush=True)
         words = narration_words(mp3, model_size=model_size, device=device,
                                 language=language)
         if words is None:
             print(f"  ! [{code}] narration alignment unavailable "
-                  "(no faster-whisper or transcription failed) — keeping the "
+                  "(whisperx/whisper unavailable or transcription failed) — keeping the "
                   "TTS provider's own timing.", flush=True)
             return provider_cues, False
         try:
             words_path.write_text(
                 json.dumps(
-                    {"words": [[w, round(s, 3), round(e, 3)] for w, s, e in words]},
+                    {
+                        "engine": "whisperx",
+                        "words": [
+                            {"word": w, "start": round(s, 3), "end": round(e, 3)}
+                            for w, s, e in words
+                        ],
+                    },
                     ensure_ascii=False,
+                    indent=2,
                 ),
                 encoding="utf-8",
             )

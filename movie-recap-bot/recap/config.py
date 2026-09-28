@@ -45,6 +45,10 @@ _DEFAULTS: dict[str, Any] = {
         # Optional smaller/faster model just for the narration alignment
         # (defaults to dialogue.whisper_model, i.e. "small").
         "whisper_align_model": None,
+        # Segmented TTS Generation: generate individual audio files per scene or
+        # beat (beat_001.mp3, beat_002.mp3, ...), snapping each directly to its
+        # video shot boundary to prevent continuous drift.
+        "segmented_tts": True,
         # Close every video with the channel outro ("If you enjoyed the
         # video, don't forget to leave a like...") like real recap channels.
         "sign_off": True,
@@ -133,6 +137,12 @@ _DEFAULTS: dict[str, Any] = {
         # visual outlasting several sentences" warning); _shot_split forces
         # an extra mid-shot cut whenever a segment would exceed this.
         "max_shot_seconds": 7.0,
+        # Dynamic Audio & Video Retiming: fallback logic to achieve frame-to-audio sync:
+        # - Audio stretching: speeds up TTS audio up to max_atempo (1.15x) via atempo
+        # - Video freeze-framing: freezes final frame of video beat if narration overruns
+        # - Silence padding: inserts silence at end of TTS file if video beat is longer
+        "dynamic_retiming": True,
+        "max_atempo": 1.15,
     },
     # Whisper ASR tuning (auto-recap from the movie's own audio).
     "dialogue": {

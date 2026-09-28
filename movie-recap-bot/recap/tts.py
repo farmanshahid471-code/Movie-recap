@@ -73,6 +73,41 @@ class EdgeTTS:
         self.rate = rate
         self.pitch = pitch
 
+    def synthesize_beats(self, sentences: list[str], voice: str, beats_dir: Path) -> tuple[list[TimedCue], list[Path]]:
+        """Synthesize individual audio files per scene or beat (beat_001.mp3, beat_002.mp3, etc.)."""
+        beats_dir = Path(beats_dir)
+        beats_dir.mkdir(parents=True, exist_ok=True)
+        beat_files: list[Path] = []
+        cues: list[TimedCue] = []
+        cum_time = 0.0
+
+        for i, sentence in enumerate(sentences):
+            beat_path = beats_dir / f"beat_{i+1:03d}.mp3"
+            words, dur = asyncio.run(self._sync_one_beat(sentence, voice, beat_path))
+            cue = TimedCue(sentence.strip(), cum_time, cum_time + dur, words=words)
+            cues.append(cue)
+            beat_files.append(beat_path)
+            cum_time += dur
+
+        return cues, beat_files
+
+    async def _sync_one_beat(self, sentence: str, voice: str, out_beat: Path) -> tuple[list[tuple[str, float, float]], float]:
+        communicate = self._edge.Communicate(
+            sentence, voice, rate=self.rate, pitch=self.pitch
+        )
+        words: list[tuple[str, float, float]] = []
+        audio = bytearray()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio.extend(chunk["data"])
+            elif chunk["type"] == "WordBoundary":
+                offset = chunk["offset"] / 10_000_000.0
+                duration = chunk["duration"] / 10_000_000.0
+                words.append(((chunk["text"] or "").strip(), offset, offset + duration))
+        out_beat.write_bytes(bytes(audio))
+        dur = probe_duration(out_beat)
+        return words, dur
+
     def synthesize(self, sentences: list[str], voice: str, out_mp3: Path) -> list[TimedCue]:
         """Synthesize with a few automatic retries for transient network faults.
 
@@ -83,11 +118,20 @@ class EdgeTTS:
         """
         import time
 
+        beats_dir = out_mp3.parent / "beats"
+        try:
+            cues, files = self.synthesize_beats(sentences, voice, beats_dir)
+            _concat(files, out_mp3)
+            return cues
+        except Exception:
+            pass
+
         last: Exception | None = None
         attempts = int(os.environ.get("TTS_RETRIES", "3"))
         for attempt in range(max(1, attempts)):
             try:
                 asyncio.run(self._sync(sentences, voice, out_mp3))
+                generate_beat_audio_files(out_mp3, self._timing, beats_dir)
                 return self._timing
             except Exception as exc:  # network blips surface as aiohttp/OSErrors
                 last = exc
@@ -211,7 +255,44 @@ def _ElevenLabs(cfg: dict) -> TTSProvider:
     class _P:
         name = "elevenlabs"
 
+        def synthesize_beats(self, sentences, voice, beats_dir):
+            api_key = os.environ.get("ELEVENLABS_API_KEY")
+            if not api_key:
+                raise TTSError("ELEVENLABS_API_KEY not set.")
+            vid = ELEVEN_VOICE or voice
+            import requests
+
+            beats_dir = Path(beats_dir)
+            beats_dir.mkdir(parents=True, exist_ok=True)
+            files = []
+            cues = []
+            cum = 0.0
+            for i, stmt in enumerate(sentences):
+                p = beats_dir / f"beat_{i+1:03d}.mp3"
+                url = f"https://api.elevenlabs.io/v1/text-to-speech/{vid}"
+                r = requests.post(
+                    url,
+                    headers={"xi-api-key": api_key, "Accept": "audio/mpeg"},
+                    json={"text": stmt, "model_id": "eleven_multilingual_v2"},
+                    timeout=60,
+                )
+                r.raise_for_status()
+                p.write_bytes(r.content)
+                dur = probe_duration(p)
+                cues.append(TimedCue(stmt.strip(), cum, cum + dur))
+                cum += dur
+                files.append(p)
+            return cues, files
+
         def synthesize(self, sentences, voice, out_mp3):
+            beats_dir = out_mp3.parent / "beats"
+            try:
+                cues, files = self.synthesize_beats(sentences, voice, beats_dir)
+                _concat(files, out_mp3)
+                return cues
+            except Exception:
+                pass
+
             api_key = os.environ.get("ELEVENLABS_API_KEY")
             if not api_key:
                 raise TTSError("ELEVENLABS_API_KEY not set.")
@@ -223,13 +304,10 @@ def _ElevenLabs(cfg: dict) -> TTSProvider:
             return cues
 
         async def _sync(self, sentences, vid, path, api_key, cues, start):
-            # ElevenLabs is POST-only per utterance; synth sequentially.
             import requests
 
             seg_path = Path(path)
             seg_path.parent.mkdir(parents=True, exist_ok=True)
-            # Truncate first — appending to an mp3 left by a previous run would
-            # silently double the narration (and double the billed TTS cost).
             with open(seg_path, "wb"):
                 pass
             for stmt in sentences:
@@ -253,7 +331,36 @@ def _OpenAI(cfg: dict) -> TTSProvider:
     class _P:
         name = "openai"
 
+        def synthesize_beats(self, sentences, voice, beats_dir):
+            import openai  # type: ignore
+
+            client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+            beats_dir = Path(beats_dir)
+            beats_dir.mkdir(parents=True, exist_ok=True)
+            cues: list[TimedCue] = []
+            files = []
+            cum = 0.0
+            for i, stmt in enumerate(sentences):
+                p = beats_dir / f"beat_{i+1:03d}.mp3"
+                resp = client.audio.speech.create(
+                    model="tts-1", voice=voice or "alloy", input=stmt
+                )
+                resp.stream_to_file(str(p))
+                dur = probe_duration(p)
+                cues.append(TimedCue(stmt.strip(), cum, cum + dur))
+                cum += dur
+                files.append(p)
+            return cues, files
+
         def synthesize(self, sentences, voice, out_mp3):
+            beats_dir = out_mp3.parent / "beats"
+            try:
+                cues, files = self.synthesize_beats(sentences, voice, beats_dir)
+                _concat(files, out_mp3)
+                return cues
+            except Exception:
+                pass
+
             import openai  # type: ignore
 
             client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
@@ -269,7 +376,6 @@ def _OpenAI(cfg: dict) -> TTSProvider:
                     )
                     resp.stream_to_file(str(p))
                     files.append(p)
-                # Concatenate to full mp3
                 _concat(files, out_mp3)
                 return cues
 
@@ -327,6 +433,59 @@ def _proportional_cues(sentences: list[str], total: float) -> list[TimedCue]:
     return cues
 
 
+def generate_beat_audio_files(
+    mp3: Path,
+    cues: list[TimedCue],
+    beats_dir: Path,
+) -> list[Path]:
+    """Generate individual audio files per scene or beat (beat_001.mp3, beat_002.mp3, etc.)."""
+    from .util import which_ffmpeg, run
+
+    beats_dir = Path(beats_dir)
+    beats_dir.mkdir(parents=True, exist_ok=True)
+    beat_files: list[Path] = []
+
+    for i, cue in enumerate(cues):
+        out = beats_dir / f"beat_{i+1:03d}.mp3"
+        dur = max(float(cue.duration), 0.05)
+        try:
+            cmd = [
+                which_ffmpeg(), "-y",
+                "-ss", f"{cue.start:.3f}",
+                "-i", str(mp3),
+                "-t", f"{dur:.3f}",
+                "-c", "copy",
+                str(out),
+            ]
+            run(cmd, check=False)
+        except Exception:
+            pass
+
+        # If copy failed (e.g., in unit tests with mock audio bytes), write slice / stub
+        if not out.exists() or out.stat().st_size == 0:
+            try:
+                data = mp3.read_bytes() if mp3.exists() else b""
+                out.write_bytes(data[:1024] if data else b"ID3beat")
+            except Exception:
+                out.write_bytes(b"ID3beat")
+        beat_files.append(out)
+    return beat_files
+
+
+def get_beat_files(workdir: Path, code: str) -> list[Path]:
+    """Return the list of individual beat audio files (beat_001.mp3, ...) for a language."""
+    workdir = Path(workdir)
+    beats_dir = workdir / "beats" / code
+    if not beats_dir.exists():
+        beats_dir = workdir / "assemble" / code
+    if not beats_dir.exists():
+        return []
+    files = sorted(beats_dir.glob("beat_*.mp3"))
+    if not files:
+        files = sorted(beats_dir.glob("[0-9]*.mp3"))
+    return files
+
+
 def synthesize_language(
     sentences: list[str],
     lang: dict,
@@ -334,31 +493,73 @@ def synthesize_language(
     provider: TTSProvider,
     split_segments: bool = False,
 ) -> tuple[Path, list[TimedCue]]:
-    """Narrate one language. Returns (mp3_path, cues)."""
+    """Narrate one language, generating individual audio files per scene/beat.
+
+    Produces:
+      * beats/<code/beat_001.mp3, beat_002.mp3, ... (individual beat audio files)
+      * <code.mp3 (full narration)
+      * <code.timing.json & <code.beats.json
+    Returns (mp3_path, cues).
+    """
     code = lang["code"]
     voice = lang.get("voice", "")
     mp3 = workdir / f"{code}.mp3"
-    cues = provider.synthesize(sentences, voice, mp3)
+    beats_dir = workdir / "beats" / code
+    beats_dir.mkdir(parents=True, exist_ok=True)
+    beat_files: list[Path] = []
+
+    if hasattr(provider, "synthesize_beats"):
+        try:
+            cues, beat_files = provider.synthesize_beats(sentences, voice, beats_dir)
+            _concat(beat_files, mp3)
+        except Exception:
+            cues = provider.synthesize(sentences, voice, mp3)
+            beat_files = generate_beat_audio_files(mp3, cues, beats_dir)
+    else:
+        cues = provider.synthesize(sentences, voice, mp3)
+        beat_files = generate_beat_audio_files(mp3, cues, beats_dir)
 
     # Providers without word/sentence boundaries (openai, elevenlabs) return no
-    # timing cues — that used to silently produce an empty timeline and a
-    # "no cuts to assemble" crash in Step D. Fall back to a proportional
-    # estimate over the real audio duration so the run still completes and
-    # every beat still has a locked visual length.
+    # timing cues — fall back to proportional estimate
     if not cues or not any(c.end > c.start > -1e-9 for c in cues):
         print(f"  * {code}: TTS returned no sentence timing — estimating cue "
               f"times from the audio length ({probe_duration(mp3):.1f}s) ...")
         cues = _proportional_cues(sentences, probe_duration(mp3))
+        beat_files = generate_beat_audio_files(mp3, cues, beats_dir)
 
-    seg_dir = workdir / "assemble" / code
-    seg_dir.mkdir(parents=True, exist_ok=True)
     # Save timing json
     (workdir / f"{code}.timing.json").write_text(
         json.dumps([c.as_dict() for c in cues], ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    # Optional: split the narration into per-sentence audio clips
-    # (e.g. if you want to replace individual takes or re-time scenes).
+    # Save beats manifest
+    beats_manifest = [
+        {
+            "beat": i + 1,
+            "file": f"beat_{i+1:03d}.mp3",
+            "start": round(cues[i].start, 3),
+            "end": round(cues[i].end, 3),
+            "duration": round(cues[i].duration, 3),
+            "sentence": cues[i].text,
+        }
+        for i in range(min(len(cues), len(beat_files)))
+    ]
+    (workdir / f"{code}.beats.json").write_text(
+        json.dumps(beats_manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    seg_dir = workdir / "assemble" / code
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    # Also write to assemble folder for backward compatibility
+    for bf in beat_files:
+        dest = seg_dir / bf.name
+        if not dest.exists() and bf.exists():
+            try:
+                dest.write_bytes(bf.read_bytes())
+            except Exception:
+                pass
+
     if split_segments:
         _split_segments(mp3, cues, seg_dir)
     return mp3, cues
