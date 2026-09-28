@@ -574,7 +574,7 @@ _KEY_ENV = {
 # Sensible model when the provider changes and nothing better is configured.
 PROVIDER_PRESETS = {
     "ollama": {"model": "qwen2.5", "base_url": "http://localhost:11434/v1", "key": False},
-    "deepseek": {"model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1", "key": True},
+    "deepseek": {"model": "deepseek-chat", "base_url": "https://api.deepseek.com", "key": True},
     "openai": {"model": "gpt-4o-mini", "base_url": "https://api.openai.com/v1", "key": True},
     "anthropic": {"model": "claude-3-5-sonnet-latest", "base_url": "", "key": True},
     # Free cloud tiers (no credit card):

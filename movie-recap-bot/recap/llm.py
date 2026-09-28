@@ -225,6 +225,110 @@ def verify_model(cfg_llm: dict) -> None:
         )
 
 
+def _direct_http_completion(
+    provider: str,
+    base_url: str | None,
+    api_key: str | None,
+    model: str,
+    messages: list[dict],
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    json_mode: bool = False,
+    timeout: float = 180.0,
+) -> str | None:
+    """Zero-dependency HTTP fallback for OpenAI-compatible endpoints.
+
+    Bypasses SDK version incompatibilities or logging/process errors.
+    """
+    url = (base_url or "").rstrip("/")
+    if not url:
+        if provider == "deepseek":
+            url = "https://api.deepseek.com"
+        elif provider == "groq":
+            url = "https://api.groq.com/openai/v1"
+        elif provider == "openai":
+            url = "https://api.openai.com/v1"
+        elif provider == "ollama":
+            url = "http://localhost:11434/v1"
+
+    if url.endswith("/chat/completions"):
+        endpoint = url
+    elif url.endswith("/v1"):
+        endpoint = f"{url}/chat/completions"
+    elif "deepseek.com" in url:
+        endpoint = f"{url}/chat/completions"
+    else:
+        endpoint = f"{url}/v1/chat/completions"
+
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "MovieRecap/1.0",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key.strip()}"
+
+    payload: dict = {
+        "model": model,
+        "messages": messages,
+    }
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if max_tokens is not None:
+        payload["max_tokens"] = int(max_tokens)
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+
+    # 1. Try requests library
+    try:
+        import requests
+        resp = requests.post(endpoint, headers=headers, json=payload, timeout=timeout)
+        if resp.status_code == 200:
+            data = resp.json()
+            choices = data.get("choices") or []
+            if choices:
+                return (choices[0].get("message", {}).get("content") or "").strip()
+        else:
+            print(f"  ! Direct HTTP status {resp.status_code}: {resp.text[:200]}", flush=True)
+    except ImportError:
+        pass
+    except Exception as exc:
+        print(f"  ! Direct requests attempt failed ({type(exc).__name__}: {exc})", flush=True)
+
+    # 2. Try standard library urllib
+    try:
+        import json
+        import ssl
+        import urllib.request
+
+        req = urllib.request.Request(
+            endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        ctx = ssl.create_default_context()
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+                body = json.loads(r.read().decode("utf-8"))
+                choices = body.get("choices") or []
+                if choices:
+                    return (choices[0].get("message", {}).get("content") or "").strip()
+        except urllib.error.HTTPError as h_err:
+            print(f"  ! Direct urllib HTTPError {h_err.code}: {h_err.read().decode(errors='replace')[:200]}", flush=True)
+        except Exception:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+                body = json.loads(r.read().decode("utf-8"))
+                choices = body.get("choices") or []
+                if choices:
+                    return (choices[0].get("message", {}).get("content") or "").strip()
+    except Exception as exc:
+        print(f"  ! Direct urllib fallback failed ({type(exc).__name__}: {exc})", flush=True)
+
+    return None
+
+
 def complete(
     provider: str,
     model: str,
@@ -303,11 +407,29 @@ def complete(
     for attempt in range(attempts):
         try:
             if has_chat:  # OpenAI-compatible (OpenAI / DeepSeek / Ollama / ...)
-                resp = client.chat.completions.create(**kwargs)
-                _log_tokens(p, resolved_model, resp)
-                text = (resp.choices[0].message.content or "").strip()
-                if text:
-                    return text
+                try:
+                    resp = client.chat.completions.create(**kwargs)
+                    _log_tokens(p, resolved_model, resp)
+                    text = (resp.choices[0].message.content or "").strip()
+                    if text:
+                        return text
+                except (TypeError, Exception) as inner_exc:
+                    if isinstance(inner_exc, TypeError) or not _retryable(inner_exc):
+                        print(f"  * Note: OpenAI SDK error ({type(inner_exc).__name__}: {inner_exc}); switching to direct HTTP request...", flush=True)
+                        fallback_text = _direct_http_completion(
+                            provider=p,
+                            base_url=base_url or os.environ.get(f"{p.upper()}_BASE_URL"),
+                            api_key=os.environ.get(f"{p.upper()}_API_KEY") or os.environ.get("LLM_API_KEY"),
+                            model=resolved_model,
+                            messages=kwargs["messages"],
+                            temperature=kwargs.get("temperature"),
+                            max_tokens=kwargs.get("max_tokens"),
+                            json_mode=json_mode and p in _JSON_MODE_PROVIDERS,
+                            timeout=timeout,
+                        )
+                        if fallback_text:
+                            return fallback_text
+                    raise inner_exc
                 raise LLMError(
                     "provider returned an empty message (tokens were billed but "
                     "nothing came back) — retry the run, or switch to a "
