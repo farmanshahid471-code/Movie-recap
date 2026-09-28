@@ -157,10 +157,9 @@ class Handler(BaseHTTPRequestHandler):
         if p is not None and p.is_file():
             p = p.parent
         if p is None or not p.is_dir():
-            return self._json(200, {
-                "ok": True, "path": "", "parent": "", "dirs": [], "files": [],
-                "roots": self._roots(),
-            })
+            p = Path(".").resolve()
+        if not p.is_dir():
+            p = Path.home()
 
         try:
             entries = sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
@@ -180,7 +179,12 @@ class Handler(BaseHTTPRequestHandler):
         if os.name == "nt":
             import string
             return [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
-        return ["/"]
+        roots = [str(Path(".").resolve()), str(Path.home()), "/"]
+        uniq = []
+        for r in roots:
+            if r and r not in uniq and os.path.exists(r):
+                uniq.append(r)
+        return uniq
 
     def do_POST(self):
         self._guard(self._route_post)
@@ -230,6 +234,30 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/stop_run":
             ok = runner.cancel_run()
             return self._json(200, {"ok": ok, "error": "" if ok else "no run in progress"})
+
+        if path == "/api/upload":
+            fname = self._query("name") or "movie.mp4"
+            fname = Path(fname).name
+            upload_dir = Path("uploads").resolve()
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            dest = upload_dir / fname
+
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            left = length
+            with open(dest, "wb") as f:
+                while left > 0:
+                    chunk = self.rfile.read(min(left, 1024 * 1024))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    left -= len(chunk)
+            runner._log(f"    Uploaded {fname} ({dest.stat().st_size / 1e6:.1f} MB) -> {dest}")
+            return self._json(200, {
+                "ok": True,
+                "path": str(dest.resolve()),
+                "name": fname,
+                "size": dest.stat().st_size,
+            })
 
         if path == "/api/stop":
             runner.cancel_run()

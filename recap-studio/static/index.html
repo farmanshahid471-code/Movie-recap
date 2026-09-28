@@ -417,6 +417,18 @@ function settingsCard(cfg, s){
     field.parentNode.insertBefore(wrap, field);
     wrap.appendChild(field); wrap.appendChild(btn);
     btn.onclick = () => openBrowser(inp, kind);
+
+    if (inp === 'movie_path') {
+      const upBtn = document.createElement('button');
+      upBtn.className = 'btn'; upBtn.type = 'button'; upBtn.textContent = 'Upload from PC…';
+      upBtn.title = 'Upload a movie file directly from your local PC (e.g. D: drive) to the GPU server';
+      const fileInput = document.createElement('input');
+      fileInput.type = 'file'; fileInput.accept = 'video/*,.mkv,.mp4,.avi,.mov,.webm'; fileInput.style.display = 'none';
+      fileInput.onchange = () => uploadFileToField(fileInput, inp);
+      upBtn.onclick = () => fileInput.click();
+      wrap.appendChild(upBtn);
+      wrap.appendChild(fileInput);
+    }
   });
 
   const env = s.env || {};
@@ -612,6 +624,49 @@ async function stopRun(){
     toast(r.ok ? 'Stop requested — finishing the current step' : 'Nothing to stop', !r.ok);
   } catch (e) { toast('Stop failed: ' + e.message, true); }
   refresh();
+}
+
+// ------------------------------------------------------- file upload ---
+function uploadFileToField(fileInput, targetInputId){
+  const file = fileInput.files[0];
+  if (!file) return;
+  toast('Starting upload of ' + file.name + ' (' + (file.size / 1e6).toFixed(1) + ' MB)...');
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/upload?name=' + encodeURIComponent(file.name));
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      const pct = Math.round((e.loaded / e.total) * 100);
+      toast('Uploading ' + file.name + '... ' + pct + '%');
+    }
+  };
+  xhr.onload = () => {
+    if (xhr.status === 200) {
+      try {
+        const resp = JSON.parse(xhr.responseText);
+        if (resp.ok && resp.path) {
+          const field = $('#' + targetInputId);
+          if (field) {
+            field.value = resp.path;
+            saveConfig();
+            toast('Uploaded successfully: ' + resp.name);
+          }
+        } else {
+          toast('Upload failed: ' + (resp.error || 'unknown error'), true);
+        }
+      } catch (err) {
+        toast('Upload response parse error', true);
+      }
+    } else {
+      toast('Upload failed with status ' + xhr.status, true);
+    }
+    fileInput.value = '';
+    refresh();
+  };
+  xhr.onerror = () => {
+    toast('Upload network error', true);
+    fileInput.value = '';
+  };
+  xhr.send(file);
 }
 
 // ------------------------------------------------------- file browser ---
