@@ -110,8 +110,10 @@ set "MISSING="
 %PY% -c "import pysubs2"        >nul 2>&1 || set "MISSING=!MISSING! pysubs2"
 %PY% -c "import edge_tts"       >nul 2>&1 || set "MISSING=!MISSING! edge-tts"
 %PY% -c "import static_ffmpeg"  >nul 2>&1 || set "MISSING=!MISSING! static-ffmpeg"
+%PY% -c "import requests"       >nul 2>&1 || set "MISSING=!MISSING! requests"
 %PY% -c "import openai"         >nul 2>&1 || set "MISSING=!MISSING! openai"
 %PY% -c "import scenedetect"    >nul 2>&1 || set "MISSING=!MISSING! scenedetect[opencv]"
+%PY% -c "import faster_whisper" >nul 2>&1 || set "MISSING=!MISSING! faster-whisper"
 %PY% -c "import vastai"         >nul 2>&1 || set "MISSING=!MISSING! vastai"
 
 if defined MISSING (
@@ -123,7 +125,7 @@ if defined MISSING (
         %PY% -m pip install --no-warn-script-location !MISSING!
     )
 ) else (
-    echo  [OK] Core dependencies installed: PyYAML, pysubs2, edge-tts, static-ffmpeg, openai, scenedetect, vastai
+    echo  [OK] Core dependencies installed: PyYAML, pysubs2, edge-tts, static-ffmpeg, openai, faster-whisper, scenedetect, vastai
 )
 echo.
 

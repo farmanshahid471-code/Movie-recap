@@ -257,6 +257,14 @@ def _openai_whisper(
 
 
 def _whisperx(audio: Path, model_size: str, device: str, language: str | None) -> list[dict]:
+    import os
+    if os.name == "nt" and (not device or device in ("cpu", "auto")):
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                raise RuntimeError("whisperx Pyannote VAD is unstable on Windows CPU without CUDA; please use faster-whisper")
+        except Exception:
+            raise RuntimeError("whisperx Pyannote VAD is unstable on Windows CPU without CUDA; please use faster-whisper")
     import whisperx  # type: ignore
 
     model = whisperx.load_model(model_size, device, compute_type="int8")
