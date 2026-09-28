@@ -173,8 +173,13 @@ def test_ffmpeg_retime_audio_and_freeze_video() -> None:
     try:
         sine_wav = tmp / "sine.wav"
         # 2.0s audio tone
+        from recap.util import which_ffmpeg
+        try:
+            ffmpeg_bin = which_ffmpeg()
+        except RuntimeError:
+            pytest.skip("ffmpeg not available in this test environment")
         subprocess.run(
-            ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=1000:duration=2.0", str(sine_wav)],
+            [ffmpeg_bin, "-y", "-f", "lavfi", "-i", "sine=frequency=1000:duration=2.0", str(sine_wav)],
             capture_output=True, check=True
         )
 
