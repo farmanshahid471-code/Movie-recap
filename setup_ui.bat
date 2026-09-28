@@ -71,13 +71,14 @@ if not defined PY (
 
 if not defined PY (
     for %%D in (F: C: D:) do (
-        for %%V in (Python312 Python311 Python310 Python39 Python) do (
+        for %%V in (Python313 Python312 Python311 Python310 Python39 Python) do (
             if exist "%%D\%%V\python.exe" set "PY=%%D\%%V\python.exe"
             if exist "%%D\Program Files\%%V\python.exe" set "PY=%%D\Program Files\%%V\python.exe"
         )
     )
 )
 if not defined PY (
+    if exist "%LOCALAPPDATA%\Programs\Python\Python313\python.exe" set "PY=%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
     if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" set "PY=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
     if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PY=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
     if exist "%LOCALAPPDATA%\Programs\Python\Python310\python.exe" set "PY=%LOCALAPPDATA%\Programs\Python\Python310\python.exe"
