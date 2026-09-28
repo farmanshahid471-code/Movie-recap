@@ -176,9 +176,7 @@ def _faster_whisper(
     from faster_whisper import WhisperModel  # type: ignore
 
     device = device or "auto"
-    print(f"  * Whisper: loading model '{model_size}' (device={device}) and transcribing. "
-          f"This is the slow step — on CPU a full movie can take many minutes; the log "
-          f"prints progress below so you know it is alive ...")
+    print(f"  * Whisper: loading model '{model_size}' (device={device}) and transcribing...", flush=True)
     model = WhisperModel(model_size, device=device, compute_type="int8")
     segments, _info = model.transcribe(
         str(audio),
@@ -190,8 +188,8 @@ def _faster_whisper(
     n = 0
     for seg in segments:
         n += 1
-        if n % 25 == 0:
-            print(f"    ... {n} segments, ~{seg.end / 60:.1f} min of audio transcribed")
+        if n % 5 == 0 or n == 1:
+            print(f"    ... {n} segments, ~{seg.end / 60:.1f} min of film transcribed", flush=True)
         text = (seg.text or "").strip()
         if not text:
             continue
