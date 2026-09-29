@@ -858,3 +858,247 @@ the existing 92 — **99 tests passing**:
 * `test_gate_still_fails_on_a_blind_stretch_of_film` — 10 uncaptioned minutes
   still fails.
 * `test_blind_stretch_measurement`, `test_caption_lines_parse_with_bullets_and_dashes`.
+
+---
+
+## Round 5 (2026-09-29): "the narration is really bad — it's describing the scene"
+
+You reported four problems and one verdict. The verdict is the root of the
+other four, so it comes first.
+
+### 0. The narration was a *description* because the prompt asked for one
+
+`beats.BEAT_SYSTEM_PROMPT` — the system prompt behind every beat of the beat
+path — read:
+
+> "Describe ONLY what happens in this beat. Do not reference earlier or later
+> beats."
+
+One beat at a time (4-40 seconds of film), scoped to itself, asked to
+*describe*. That is exactly what came back: `"A man in a suit walks down a
+hallway. He is holding a file. The camera follows him."` Every sentence true,
+none of them a story. Language models do not ignore an instruction like that;
+they follow it. The storytelling voice already living in `script.py`
+(`NARRATOR_PERSONA`, `VOICE_GUIDE`, the exemplars) never reached the beat
+writer at all.
+
+**Fix — `recap/story.py`, a story-first writer for the beat path.**
+
+* Consecutive beats are grouped into **story units** (~45s of film, 2-8
+  beats). One call writes a whole scene, so it can chain cause into effect
+  and land a short beat between two long ones — things a 6-second beat
+  cannot do.
+* Each call gets a **rolling ledger**: the story so far (one recap line per
+  previous unit), the cast already introduced, and the *previous unit's last
+  line* to continue from. The narration stops reintroducing the same
+  character and stops treating every unit as the start of the film.
+* Each call gets **the film position** (opening / setup / rising / midpoint /
+  complication / climax / resolution, derived from where the unit sits in the
+  runtime) and what the story must be *doing* there, so tension rises instead
+  of every event weighing the same.
+* The system prompt is `narrative.STORY_RULES`: people want things and things
+  get in the way; cause leads to consequence; stakes rise; emotion comes from
+  action, never from labels; short beats land; pay off what you set up — with
+  a worked bad/good pair and a hard ban on scene/shot/camera language:
+  *"a description of the frame is not a sentence in a story."*
+* The chunk path (`script.PROMPT_SEGMENT_JSON`, `SYSTEM_RECAP_BEATS`,
+  `POLISH_PROMPT`) now carries the same rules, so both writers tell stories.
+
+### 1. Dialogue ↔ visual mismatch, out of sync
+
+**Cause.** The writer never knew which footage a sentence would play over.
+Each beat was written blind, then the beat's narration was split on `"."`
+into equal shares of the beat window — every sentence got an arbitrary slice,
+and `setpts`/`fps` stretched whatever did not fit.
+
+**Fix.**
+
+* **Visual-to-text binding.** Every beat in a unit is labelled `B1..Bn` and
+  arrives with its **exact film range** (`[B3] 12:40-12:52 (12s of footage —
+  at most 35 words)`) and its own dialogue + vision facts. The model must tag
+  every sentence with the beat it narrates, and every beat with a real event
+  must get a sentence.
+* **Measured binding check.** `story.binding_score` compares each sentence's
+  content words against the facts of the beat it claims. A sentence narrating
+  footage it was never given (`score < 0.12`) is flagged and rewritten with
+  the beat's facts in front of the model.
+* **Hard shot boundaries stay the unit boundaries.** Story units are built out
+  of `beats.detect_beats`, whose boundaries merge PySceneDetect shot changes
+  (`scenes.scene_boundaries`, cached) with vision timestamps and subtitle
+  gaps, and `timeline.build_timeline` still snaps every cut onto a real shot
+  change within `snap_tolerance`.
+* **Word-level sync is unchanged and still authoritative**: the timed TTS
+  word boundaries (or WhisperX alignment) drive the micro-cuts and
+  `rewindow_to_speech` re-sizes every window to the *measured* speech.
+
+### 2. Visuals before the relevant scene (ordering)
+
+**Cause.** Arbitrary windows and fallback anchors could point backwards.
+
+**Fix.**
+
+* `story.unit_to_segments` lays sentences down **beat by beat in film order**,
+  splitting a beat's window in proportion to sentence length, and
+  `story.enforce_chronology` clamps any window forward so
+  `film_start[i] < film_end[i] <= film_start[i+1]` always holds —
+  `story.check_chronology` is the assertion.
+* Ordering is never "fixed" by sorting: the narration order **is** the story
+  order, so a late window is pushed forward, never swapped.
+* New guard at assembly time: `timeline.cut_order_violations` +
+  `timeline.repair_cut_order`. Before ffmpeg runs, every cut is checked
+  against the film playhead; a cut pointing at already-shown film is pushed
+  forward and the run logs
+  `! [en] N cut(s) pointed at film already shown; pushed M forward`.
+  `timeline.timeline_report` also reports `chronological=NO` if it ever sees
+  one, so the condition cannot hide.
+
+### 3. "The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed gemini-3.1-flash-lite"
+
+**Cause.** Model resolution was per-provider *sanitising* only: a stray
+`MODEL_NAME`/`VISION_MODEL` from another family was silently swapped for the
+hard-coded default (`deepseek-chat`) — which a custom/proxy endpoint need not
+serve either. The run then burned `LLM_RETRIES` (4) on a request the endpoint
+can only reject, with no diagnostic line saying which model went where.
+
+**Fix — one resolution path and a real recovery.**
+
+* `llm.resolve_model(provider, model, base_url)` — the single place a model
+  name is chosen. Precedence: the configured model **if it belongs to the
+  provider**, else the provider's own env var (`DEEPSEEK_MODEL`,
+  `GEMINI_MODEL`, `OPENAI_MODEL`, `ANTHROPIC_MODEL`, `OLLAMA_MODEL`,
+  `GROQ_MODEL`), else the legacy `MODEL_NAME` when it fits, else the provider
+  default. A cross-family name never ships; the substitution is printed once.
+* **Endpoint capability probe.** When `llm.base_url` is set (proxy, gateway,
+  regional router), the bot asks it `GET /models` once, and if the configured
+  name is not on the list it uses one that is — naming it and telling you how
+  to make it permanent (`llm.model:` in `config.yaml`, or
+  `MODEL_NAME=<name>`).
+* **Error recovery.** A 400 whose text names the supported models
+  (`llm.parse_supported_models`) is parsed, remembered per endpoint, and the
+  call is **retried immediately** with a supported name instead of dying after
+  four backoffs; the log says which name it switched to and how to pin it.
+* **One diagnostic line per run**: `* [llm] provider=deepseek
+  model='deepseek-chat' base_url=...` — the line that would have made this
+  obvious in the first place.
+* Vision and text stay separate: `VISION_MODEL` only ever sets
+  `vision.model`, and a vision-family name can no longer reach the text LLM.
+
+### 4. Slow-mo and frame-rate artefacts ("25 section(s) still play below 1x")
+
+**Cause.** Three compounding things: budgets computed from a *guessed*
+words-per-minute, a hard `0.6x` fallback whenever a section's narration
+outlasted its own window, and film between selected beats that **no sentence
+ever played over** (the target-budget selection skips beats, so gaps of unused
+footage sat between every pair of sections).
+
+**Fix.**
+
+* **Measured word-rate budgets.** The beat path now budgets with the cached,
+  *measured* words-per-minute for the actual voice (the same
+  `_work/narration_rate.json` cache the chunk path uses), instead of the
+  configured guess — so a sentence that "fits" on paper really fits on screen.
+* **B-roll borrowing.** A section whose narration is longer than its own
+  window first spends the un-narrated film between it and the next section.
+  That film is free — nothing else narrates over it — and the next section
+  still starts exactly on its own window. `timeline_report` shows
+  `N sections on B-roll`.
+* **A safe floor instead of a crawl.** `timeline.min_speed` is now `0.85`
+  (was 0.6, and 0.35 before that): at most a 15% slow-down, inside the range
+  nobody notices.
+* **Freeze padding below the floor.** `timeline.freeze_when_starved: true`
+  (default) makes a section that still cannot fit HOLD its shot's final frame
+  for the remainder — `clip.cut_segment` renders it with
+  `tpad=stop_mode=clone`; `freeze` was already part of the cut tuple. A held
+  frame reads as an editing choice; a 0.3x crawl reads as a broken render.
+  `slow_mo_before_freeze: false` skips the slow-down entirely (1x + held
+  frame). The run logs `pacing: N section(s) spent un-narrated film as
+  B-roll; N shot(s) held their final frame`.
+
+### 3b. Vision had the same model/provider mismatch (and now runs on the native Gemini SDK)
+
+The reported `VISION_MODEL=gemini-3.1-flash-lite` — set for a *different*
+provider — was sent verbatim to the Gemini endpoint, which can only answer
+`the supported API model names are ...`. The vision pass now resolves its
+model with the same family rule as the text LLM
+(`vision.resolve_vision_model` / `vision_model_fits`): a name another family
+owns is refused, printed once, and replaced by the provider default; an
+unknown local/proxy name is left alone because the endpoint may serve it.
+
+Gemini also prefers the **native `google.generativeai` SDK** when it is
+installed (`pip install google-generativeai`) and `vision.base_url` is unset —
+the caption call site is unchanged because the native path is wrapped in an
+OpenAI-shaped facade (`_GeminiNativeClient.chat.completions.create`
+translating text + data-URI images into native parts). Without the SDK (or
+with a custom `base_url`, i.e. a proxy) the existing OpenAI-compatible
+endpoint is used automatically — nothing new is required to keep working.
+`vision.native: false` forces the compatible endpoint.
+
+### 1b. Shot-boundary locking and word-level alignment stay authoritative
+
+Both were already in the pipeline and are unchanged in direction, now with the
+story writer sitting on top of them:
+
+* `pipeline` caches the film's **shot boundaries** (`scenes.scene_boundaries`,
+  PySceneDetect; FFmpeg scene deltas when unavailable) *before* any text is
+  written, and `beats.detect_beats` builds every beat from
+  `merge(shot boundaries, vision timestamps, subtitle gaps > 1.5s)` — so the
+  visual unit a sentence is bound to is a real camera cut, not a guess.
+* `timeline.build_timeline` still snaps each cut onto a real shot change
+  (`snap_to_scenes`, `snap_tolerance: 0.8`).
+* `narration.whisper_align` runs the generated voice back through
+  faster-whisper/WhisperX and re-anchors every cue — and every **word** —
+  to what was actually spoken; `cut_on_words` places the micro-cuts on those
+  measured word boundaries, and `rewindow_to_speech` re-sizes every sentence
+  window to the *measured* speech before the timeline is built. The unit
+  budgets are computed from the same measured words-per-minute
+  (`_work/narration_rate.json`), so a sentence that "fits" on paper fits on
+  screen.
+
+### New knobs
+
+| key | default | meaning |
+| --- | --- | --- |
+| `story.enabled` | `true` | story-unit writer; `false` = old per-beat writer |
+| `story.unit_seconds` | `45` | film covered by one story unit (one LLM call) |
+| `story.min/max_beats_per_unit` | `2` / `8` | unit size bounds |
+| `story.sentence_words` | `16` | planning size for the sentence count |
+| `story.retry_overflow` | `true` | one targeted retry when a unit overruns |
+| `story.repair` / `repair_batch` | `true` / `12` | description rewrite pass |
+| `timeline.min_speed` | `0.85` | slow-down floor (1.0 = never slow down) |
+| `timeline.freeze_when_starved` | `true` | hold the last frame instead of crawling |
+| `timeline.slow_mo_before_freeze` | `true` | floor speed first, then the hold |
+| `DEEPSEEK_MODEL` etc. | – | per-provider model names (`MODEL_NAME` stays as legacy) |
+| `vision.native` | `true` | native Gemini SDK when installed (compat endpoint otherwise) |
+
+### Verification
+
+`movie-recap-bot/tests/test_story_narration.py` (17 new tests) plus two new
+vision tests, all green with the existing suite — **127 passed, 1 skipped**:
+
+* the unit prompt asks for a story, carries the story-so-far, the cast and the
+  previous line, and labels every beat with its exact film range + budget;
+* beat labels can never rewind (out-of-range labels clamp to the nearest
+  beat; unlabelled lines spread proportionally, in order);
+* sentence windows are strictly monotone for `n` units and `check_chronology`
+  finds nothing; a late window is pushed forward, never sorted;
+* the description lint separates captions (`"The camera pans..."`) from story,
+  and the description-first trim keeps `Marco` + `file` while deleting
+  `camera` / `there is`;
+* an end-to-end stubbed run produces a strictly chronological script, the next
+  unit's prompt contains the previous unit's recap, and the flagged
+  description line is rewritten into story with its facts intact;
+* the story script drives `timeline.build_timeline` at **1x** with no held
+  frames and no replays;
+* the reported model-name error parses to
+  `['deepseek-flash', 'deepseek-v4-pro']`, a Gemini name is refused for
+  DeepSeek, an endpoint's own `/models` list wins over the stale default, and
+  recovery fires only on real model-name errors;
+* a vision model name from another family (`deepseek-chat`, `gpt-4o-mini`,
+  `claude-*`) is refused for Gemini with one printed warning while an unknown
+  local/proxy name passes through, and the native Gemini facade exposes the
+  same `chat.completions.create` call the captioner uses.
+
+`tests/test_visual_flow.py` was updated to the new pacing contract:
+over-delivered and estimate-sized sections now assert **B-roll borrowing keeps
+them at 1x**, and a packed section with no free film asserts a held frame with
+every speed at or above the floor — the deep crawl is gone by test.

@@ -60,8 +60,12 @@ def test_no_replay_overlapping_windows() -> None:
              for i, c in enumerate(cues)]
     beats = timeline.build_timeline(sents, durs, 6000.0, CFG)
     prev_end = -1.0
+    # Cut tuples are rounded to milliseconds on the way out, so the
+    # reconstructed footage end can differ from the internal playhead by a
+    # fraction of a frame. Half a frame is the honest tolerance; anything
+    # larger is a real rewind.
     for s, d, f, sp in _cuts_in_order(beats):
-        assert s >= prev_end - 1e-6, f"rewind: {s:.2f} < {prev_end:.2f}"
+        assert s >= prev_end - 0.02, f"rewind: {s:.2f} < {prev_end:.2f}"
         prev_end = max(prev_end, s + (d - f) * sp)
     # length lock still exact
     total = sum(d for _, d, _f, _v in _cuts_in_order(beats))
@@ -451,10 +455,20 @@ def test_overdelivered_section_still_plays_at_1x() -> None:
             for x, (lo, hi) in zip(over, wins)]
     cues = [TimedCue(x, i * 5.2, i * 5.2 + 4.8) for i, x in enumerate(over)]
     stats: dict = {}
-    timeline.build_timeline(segs, timeline.lock_durations(cues, 20 * 5.2),
-                            6000.0, dict(CFG), stats=stats)
-    assert stats.get("slowed_groups", 0) > 0, \
-        "over-budget section must be the slow-mo case (bug reproduction)"
+    raw_beats = timeline.build_timeline(
+        segs, timeline.lock_durations(cues, 20 * 5.2), 6000.0, dict(CFG),
+        stats=stats)
+    # The over-budget section is over its OWN window, but the film between it
+    # and the next section is un-narrated: the timeline spends that B-roll
+    # rather than slowing the picture down, and never goes below min_speed.
+    assert stats.get("borrowed_groups", 0) >= 1, \
+        "the un-narrated film must be available as B-roll"
+    assert stats.get("slowed_groups", 0) == 0, \
+        "over-delivery must not crawl: B-roll covers it"
+    assert stats.get("padded_shots", 0) == 0, "no freeze needed with B-roll"
+    for _s0, _d0, _f0, _sp0 in _cuts_in_order(raw_beats):
+        assert _sp0 >= CFG.get("min_speed", 0.85) - 1e-9, \
+            f"speed {_sp0}x below the floor"
 
     # --- after the fix: trimmed to the footage -> all 1x, nothing frozen --
     fitted = script_mod._fit_section_to_footage(over, cap, [])
@@ -763,11 +777,47 @@ def test_rewindow_to_speech_guarantees_1x() -> None:
     span = (n - 1) * 9.0 + 8.4
     durs = timeline.lock_durations(cues, span)
 
-    # --- before the fix: every section slow-moes --------------------------
+    # --- UNFIXED WINDOWS no longer slow the whole video down --------------
+    # These windows are 35% too small for their sentences, so pacing them
+    # 1x-safe is impossible *inside their own zones*. What the timeline now
+    # does instead of crawling: it borrows the un-narrated film between the
+    # sections (the beats select_beats_for_target skipped) as B-roll, which
+    # costs nothing and keeps every cut at 1x.
     stats_bug: dict = {}
-    timeline.build_timeline(segs, durs, 6000.0, dict(CFG), stats=stats_bug)
-    assert stats_bug.get("slowed_groups", 0) >= 3, \
-        "estimate-sized windows + slower voice must slow-mo (bug repro)"
+    bug_beats = timeline.build_timeline(segs, durs, 6000.0, dict(CFG),
+                                        stats=stats_bug)
+    assert stats_bug.get("borrowed_groups", 0) >= 1, \
+        "the un-narrated film between sections must be usable as B-roll"
+    assert stats_bug.get("slowed_groups", 0) == 0, \
+        "B-roll borrowing must keep the estimate-sized windows at 1x"
+    assert stats_bug.get("padded_shots", 0) == 0, "no freeze needed with B-roll"
+    for _s0, _d0, _f0, _sp0 in _cuts_in_order(bug_beats):
+        assert abs(_sp0 - 1.0) < 1e-9, f"expected 1x with B-roll, got {_sp0}x"
+
+    # --- with NO free film anywhere (windows packed back-to-back), the
+    #     section holds its final frame instead of crawling below min_speed
+    packed = []
+    for i, cue in enumerate(cues):
+        a = i * 9.0
+        packed.append({"sentence": cue.text, "film_start": a,
+                       "film_end": a + 9.0, "anchor": a + 4.5,
+                       "zone_lo": a, "zone_hi": a + 9.0})
+    # ...and the voice is slow: 14.4s of speech per 9s window, with no gap
+    # to borrow from. 9/14.4 = 0.625 < min_speed -> the shot must hold.
+    slow_cues = [TimedCue(s, i * 15.0, i * 15.0 + 14.4) for i in range(n)]
+    slow_durs = timeline.lock_durations(slow_cues, (n - 1) * 15.0 + 14.4)
+    stats_packed: dict = {}
+    cfg_packed = dict(CFG)
+    cfg_packed["min_speed"] = 0.85
+    cfg_packed["micro_cut_seconds"] = 2.4
+    packed_beats = timeline.build_timeline(packed, slow_durs, 6000.0,
+                                           cfg_packed, stats=stats_packed)
+    for _s0, _d0, _f0, _sp0 in _cuts_in_order(packed_beats):
+        assert _sp0 >= 0.85 - 1e-9, (
+            f"speed {_sp0}x went below the min_speed floor; the timeline must "
+            "hold a frame instead of stretching the picture further")
+    assert stats_packed.get("padded_shots", 0) >= 1, \
+        "a starved section with no B-roll must hold its last frame"
 
     # --- after the fix: windows re-sized to the measured speech -----------
     rewin = timeline.rewindow_to_speech(segs, durs, 6000.0)

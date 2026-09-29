@@ -335,12 +335,17 @@ def build_timeline(
         previous cut's footage — the film never rewinds, no moment is shown
         twice (except the unavoidable end-of-film clamp when the narration
         outlasts the movie),
-      * MOTION GUARANTEE: mid-film the picture NEVER freezes. When a
-        section's narration is longer than the film behind it, the footage
-        plays in slow motion (down to ``min_speed``) instead of running
-        ahead or holding a frame — cuts are
-        ``(film_start, duration, freeze, speed)`` tuples and ``freeze`` is
-        non-zero only when the narration outlasts the movie itself,
+      * MOTION POLICY (``min_speed`` + ``freeze_when_starved``): a section
+        whose narration is longer than the film it owns first spends the
+        un-narrated film between its window and the next section's (B-roll —
+        beats the target-budget selection skipped), then eases into ONE mild
+        slow-down that never goes below ``min_speed``, and only then holds
+        its final frame (``tpad`` clone in ``clip.cut_segment``) for the
+        remainder. A held frame reads as an editing choice; a 0.3x crawl
+        reads as a broken render. Cuts are
+        ``(film_start, duration, freeze, speed)`` tuples. Set
+        ``freeze_when_starved: false`` for the old behaviour (keep slowing /
+        walking forward, never freeze mid-film),
       * with word timings, every intra-sentence shot change happens on a
         spoken word boundary, not mid-word,
       * with scene bounds, every cut starts on a real shot change.
@@ -353,9 +358,21 @@ def build_timeline(
     cut_on_words = bool(cfg.get("cut_on_words", True))
     snap_tol = float(cfg.get("snap_tolerance", 0.8))
     max_lead = max(float(cfg.get("max_lead_seconds", 3.0)), 0.0)
-    min_speed = min(max(float(cfg.get("min_speed", 0.6)), 0.1), 1.0)
+    min_speed = min(max(float(cfg.get("min_speed", 0.85)), 0.1), 1.0)
     min_new = float(cfg.get("min_new_footage", 0.8))
     max_shot = max(float(cfg.get("max_shot_seconds", 7.0)), 0.0)
+    # A section whose narration is longer than the film it owns (even after
+    # borrowing the film nobody else narrates) HOLDS its last shot's final
+    # frame for the remainder instead of stretching the picture into an ever
+    # slower crawl. Set false for the old "keep slowing down / run ahead"
+    # behaviour.
+    freeze_when_starved = bool(cfg.get("freeze_when_starved", True))
+    # When a section is starved, which comes first: the mild slow-down down to
+    # min_speed, or the held frame? True = floor speed then freeze (default:
+    # the picture still moves a little). False = freeze-only padding: the
+    # footage plays at 1x and the shot simply holds its final frame for the
+    # overrun, which is the closest thing to "cut, then pad the shot".
+    slow_mo_before_freeze = bool(cfg.get("slow_mo_before_freeze", True))
     scene_bounds = sorted(scene_bounds or [])
 
     n = min(len(sentences), len(durations))
@@ -388,17 +405,26 @@ def build_timeline(
         groups[0]["film_start"] = 0.0
         groups[0]["film_end"] = movie_dur
 
+    # Section film windows, in order: the next section's start is the ceiling
+    # for how far the current one may walk (see the B-roll note below).
+    group_starts = [float(g.get("film_start", 0.0) or 0.0) for g in groups]
+
     beats: list[dict] = []
     playhead = 0.0        # beat-level monotonicity across groups
     film_playhead = 0.0   # END of the last cut's consumed film: no replays
     word_locked = 0
     snapped = 0
     pushed = 0
-    held = 0              # freeze events (end-of-film only)
+    held = 0              # freeze events (end-of-film clamps)
+    padded = 0            # cuts that HOLD their last frame because the
+                          # section's narration outlasts the film it owns
+    padded_secs = 0.0     # narration seconds carried by a held frame
     slowed = 0            # groups paced below 1x (slow motion)
     slowed_secs = 0.0     # narration seconds played in slow motion
+    borrowed_groups = 0   # groups that used unused film from a gap
+    borrowed_secs = 0.0
 
-    for g in groups:
+    for gi, g in enumerate(groups):
         f0 = max(float(g["film_start"]), playhead)
         f1 = float(g["film_end"])
         if movie_dur > 0:
@@ -411,24 +437,54 @@ def build_timeline(
         total_nar = sum(max(float(durations[i]), 0.0) for i in idxs) or 1.0
         span = f1 - f0
 
-        # ---- GROUP PACING (the motion guarantee) --------------------------
-        # How much narration time does this window of film have to cover?
-        # When the narration is LONGER than the film behind it (a dialogue-
-        # dense section), playing at 1x would either run the visuals far
-        # ahead of the story or force a frozen frame. A human editor plays
-        # that stretch in slow motion instead: the footage keeps MOVING at a
-        # reduced speed and stays locked to the moment being narrated. The
-        # speed is clamped at min_speed (0.6x default = a mild, barely
-        # perceptible slow-down; starved sections are rare after the anchor
-        # fix and budget enforcement, so the floor mostly never binds) and
-        # is 1.0 whenever the window has enough film, so normal sections
-        # are untouched.
-        entry = max(f0, film_playhead)
-        room = f1 - entry
-        if total_nar > 0 and room > 0:
-            grp_speed = min(1.0, max(min_speed, room / total_nar))
+        # ---- FILM BUDGET: own window + the B-roll nobody narrates ---------
+        # Beats are SELECTED (select_beats_for_target), so the film between
+        # one section's window and the next section's window is footage no
+        # sentence in the script ever plays over. A section whose narration
+        # is longer than its own window may borrow that gap instead of
+        # sliding into slow motion: free footage, and the next section still
+        # starts on its own window untouched. The last group may run to the
+        # end of the film (the tail below the final zone is B-roll too).
+        if gi + 1 < len(groups):
+            ceiling = group_starts[gi + 1]
+            if ceiling < f1:
+                ceiling = f1          # windows overlap: no borrowing
+        elif movie_dur > 0:
+            ceiling = movie_dur
         else:
-            grp_speed = min_speed if room <= 0 else 1.0
+            ceiling = f1
+        if movie_dur > 0:
+            ceiling = min(max(ceiling, f1), movie_dur)
+
+        # ---- GROUP PACING (safe motion, then an honest freeze) ------------
+        # How much narration time does the available film have to cover?
+        #  * enough film  -> 1x, untouched;
+        #  * a little short -> one mild slow-down, never below min_speed;
+        #  * a lot short -> min_speed AND the final frame of the section is
+        #    held (tpad clone) for the remainder: a still frame reads as an
+        #    editing choice, a 0.3x crawl reads as a broken render.
+        entry = max(f0, film_playhead)
+        room = ceiling - entry
+        if ceiling > f1 + 1e-6 and total_nar > 0 and room > 0:
+            # how much of the gap this section actually SPENT (own window
+            # first, then the un-narrated film beyond it)
+            _film_used = min(room, total_nar * min(1.0, max(room / total_nar, 0.0)))
+            _own = max(f1 - entry, 0.0)
+            _borrow = _film_used - _own
+            if _borrow > 0.5:
+                borrowed_groups += 1
+                borrowed_secs += _borrow
+        if total_nar > 0 and room > 0:
+            ideal = room / total_nar
+        else:
+            ideal = 0.0
+        starved = ideal < min_speed
+        if room <= 0 or ideal >= 1.0:
+            grp_speed = 1.0
+        elif starved and not slow_mo_before_freeze:
+            grp_speed = 1.0        # freeze-only padding: never slow the picture
+        else:
+            grp_speed = max(min_speed, ideal)
         if grp_speed < 0.999:
             slowed += 1
             slowed_secs += total_nar * (1.0 - grp_speed) / max(grp_speed, 1e-6)
@@ -489,23 +545,32 @@ def build_timeline(
                 # being narrated (the pacing above keeps this rare).
                 if start - desired > max_lead:
                     start = film_playhead
-                # Freeze ONLY when the film itself has run out (the narration
-                # outlasts the movie). Everywhere else the picture moves:
-                # new footage at 1x, or the same moment in slow motion.
+                # FILM BUDGET per cut. A cut plays ``per`` seconds of
+                # narration; at ``grp_speed`` it needs ``per * speed`` seconds
+                # of film. When the section's film budget runs out first —
+                # the honest over-budget case — the shot HOLDS its final
+                # frame (clip.cut_segment renders it with tpad
+                # stop_mode=clone) instead of being stretched further.
+                # Freezing is also the only legal move at the very end of the
+                # movie, where there is no film left at all.
                 freeze = 0.0
                 moving = per * grp_speed
-                if movie_dur > 0 and start + moving > movie_dur:
-                    film_left = max(movie_dur - max(start, 0.0), 0.0)
-                    if film_left >= moving - 1e-9:
-                        pass
+                if starved and freeze_when_starved:
+                    film_left = max(ceiling - film_playhead, 0.0)
+                    if moving > film_left:
+                        moving = max(film_left, 0.0)
+                if movie_dur > 0 and film_playhead + moving > movie_dur:
+                    moving = max(movie_dur - film_playhead, 0.0)
+                if moving < per * grp_speed - 1e-9:
+                    freeze = per - moving / max(grp_speed, 1e-6)
+                    if starved and freeze_when_starved:
+                        padded += 1
+                        padded_secs += freeze
                     else:
-                        # show whatever film remains, freeze the rest
-                        moving = film_left
-                        freeze = per - moving / max(grp_speed, 1e-6)
                         held += 1
                 cut = [start, per, freeze, grp_speed]
                 cuts.append(cut)
-                film_playhead = start + moving
+                film_playhead = max(film_playhead, start) + moving
 
             beats.append(
                 {
@@ -538,6 +603,10 @@ def build_timeline(
         stats["held_shots"] = held
         stats["slowed_groups"] = slowed
         stats["slowed_seconds"] = round(slowed_secs, 1)
+        stats["padded_shots"] = padded
+        stats["padded_seconds"] = round(padded_secs, 1)
+        stats["borrowed_groups"] = borrowed_groups
+        stats["borrowed_seconds"] = round(borrowed_secs, 1)
     return beats
 
 
@@ -794,9 +863,62 @@ def flatten_cuts(beats: list[dict]) -> list[tuple[float, float, float]]:
     return out
 
 
+def cut_order_violations(cuts: list[tuple], tol: float = 0.02) -> list[int]:
+    """Indices of cuts whose film PTS replays footage the previous cut showed.
+
+    Problem 2 of the bug report — "visuals shown before the relevant scene /
+    ordering chaos" — is exactly this: a clip whose source PTS is behind the
+    clip that plays before it. ``build_timeline`` makes it structurally
+    impossible (the film playhead never rewinds), so this is the assertion
+    that keeps it that way and names the offending shots when something
+    upstream hands the assembler a shuffled plan.
+    """
+    bad: list[int] = []
+    playhead = None
+    for i, cut in enumerate(cuts or []):
+        try:
+            start, dur, freeze, speed = cut
+        except (TypeError, ValueError):
+            continue
+        start = float(start)
+        moving = max((float(dur) - float(freeze)) * float(speed), 0.0)
+        if playhead is not None and start < playhead - tol:
+            bad.append(i)
+        playhead = max(playhead or 0.0, start + moving)
+    return bad
+
+
+def repair_cut_order(cuts: list[tuple], tol: float = 0.02) -> tuple[list[tuple], int]:
+    """Push a rewind-causing cut forward to the playhead (never reorder).
+
+    Sorting the shots by PTS would put them under the WRONG sentences — the
+    cut order IS the narration timeline — so a violation is repaired by
+    starting the offending shot where the previous one ended. Returns
+    ``(cuts, fixed_count)``.
+    """
+    out: list[tuple] = []
+    playhead: float | None = None
+    fixed = 0
+    for cut in cuts or []:
+        try:
+            start, dur, freeze, speed = cut
+        except (TypeError, ValueError):
+            continue
+        start = float(start)
+        if playhead is not None and start < playhead - tol:
+            start = playhead
+            fixed += 1
+        moving = max((float(dur) - float(freeze)) * float(speed), 0.0)
+        playhead = max(playhead or 0.0, start + moving)
+        out.append((round(start, 3), float(dur), float(freeze), float(speed)))
+    return out, fixed
+
+
 def timeline_report(beats: list[dict], audio_span: float,
                     word_locked: int = 0, snapped: int = 0,
-                    slowed: int = 0, slowed_secs: float = 0.0) -> str:
+                    slowed: int = 0, slowed_secs: float = 0.0,
+                    padded: int = 0, padded_secs: float = 0.0,
+                    borrowed: int = 0) -> str:
     """One-line human summary used in the run log."""
     cuts = flatten_cuts(beats)
     total = sum(d for _, d, _f, _v in cuts)
@@ -814,6 +936,13 @@ def timeline_report(beats: list[dict], audio_span: float,
         bits.append(f"{snapped} cuts on shot changes")
     if slowed:
         bits.append(f"{slowed} slow-mo sections ({slowed_secs:.0f}s)")
+    if padded:
+        bits.append(f"{padded} held-frame shots ({padded_secs:.0f}s)")
+    if borrowed:
+        bits.append(f"{borrowed} sections on B-roll")
+    out_of_order = cut_order_violations(cuts)
+    if out_of_order:
+        bits.append(f"!! {len(out_of_order)} cut(s) out of PTS order")
     return (
         f"{', '.join(bits)}, "
         f"video {total:.1f}s vs narration {audio_span:.1f}s "

@@ -16,6 +16,9 @@ imageio-ffmpeg>=0.4.9
 # Install only the provider(s) you use:
 openai>=1.30.0          # OpenAI + DeepSeek (openai-compatible)
 anthropic>=0.34.0       # Anthropic Claude
+# Native Gemini SDK — used for the vision pass when installed (vision.native).
+# Without it Gemini still works through its OpenAI-compatible endpoint:
+# google-generativeai>=0.8.0
 # requests>=2.31.0      # Ollama (if you don't want the SDK)
 
 # ---- Step A-F semantic engine (the `auto` command) ----

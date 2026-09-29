@@ -289,6 +289,59 @@ def test_caption_lines_parse_with_bullets_and_dashes() -> None:
     print("ok: bulleted / em-dashed caption lines parse cleanly")
 
 
+# ---------------------------------------------------------------------------
+# 5. vision model / provider match + native Gemini client
+# ---------------------------------------------------------------------------
+
+def test_vision_model_is_never_from_another_family() -> None:
+    """A text-LLM leftover must not be sent to the vision endpoint.
+
+    The reported failure: the vision call was configured with a model name
+    the endpoint (Gemini) does not serve, and every batch died with
+    "the supported API model names are ..." -- the same class of error as the
+    text side. A name another family owns is replaced by the provider default,
+    with one printed line saying so.
+    """
+    assert vision_mod.vision_model_fits("gemini", "gemini-3.6-flash")
+    assert not vision_mod.vision_model_fits("gemini", "deepseek-chat")
+    assert not vision_mod.vision_model_fits("gemini", "gpt-4o-mini")
+    assert not vision_mod.vision_model_fits("openai", "gemini-3.1-flash-lite")
+    assert not vision_mod.vision_model_fits("openai", "claude-3-5-sonnet")
+    # an unknown local/proxy name is left alone: the endpoint may serve it
+    assert vision_mod.vision_model_fits("openai", "my-local-vlm-v2")
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        got = vision_mod.resolve_vision_model({"model": "deepseek-chat"}, "gemini")
+    assert got == vision_mod.DEFAULT_VISION_MODEL["gemini"], got
+    assert "not a gemini model" in buf.getvalue()
+    # ...and a matching name passes through untouched
+    assert vision_mod.resolve_vision_model(
+        {"model": "gemini-3.6-flash"}, "gemini") == "gemini-3.6-flash"
+    print("ok: cross-family vision model names are refused with a warning")
+
+
+def test_native_gemini_client_shapes() -> None:
+    """The native SDK facade exposes the same call the captioner makes.
+
+    With ``google-generativeai`` installed (and no custom base_url), Gemini is
+    reached through the native SDK. The facade has to present
+    ``client.chat.completions.create(...)`` so the caption call site is
+    identical for both transports, and it has to translate the OpenAI-style
+    content parts (text + data-URI images) into native parts.
+    """
+    assert hasattr(vision_mod, "_GeminiNativeClient")
+    assert hasattr(vision_mod, "gemini_native_available")
+    # without the SDK installed the OpenAI-compatible endpoint is used
+    if not vision_mod.gemini_native_available():
+        print("ok: native SDK not installed -> compatible endpoint (fallback)")
+        return
+    client = vision_mod._GeminiNativeClient("fake-key", "gemini-3.6-flash")
+    assert hasattr(client.chat, "completions")
+    assert callable(client.chat.completions.create)
+    print("ok: native Gemini facade exposes the OpenAI-shaped call")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_") and callable(fn):

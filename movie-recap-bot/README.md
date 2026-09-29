@@ -256,6 +256,23 @@ Three layers now work together to close the gap to channels like *Fantastic
 Recaps* — and each layer is independently tunable so you can hear/see what
 moves the needle.
 
+**0. The story writer (`story:` in `config.yaml`).** The beat path used to
+write one beat at a time with the instruction *"describe only what happens in
+this beat"* — so it described: a shot-by-shot caption track with no story.
+Now consecutive beats are grouped into **story units** (~45s of film) and one
+call writes a whole scene. Every unit is written with a rolling **story so
+far**, the cast already introduced and the previous unit's last line to
+continue from; every sentence is tagged with the beat whose dialogue/vision
+facts it narrates, and the sentence's film window is laid down in that beat's
+own film range, in strict film order. The system prompt
+(`narrative.STORY_RULES`) demands cause → effect, rising stakes, emotion
+through action and a short beat that lands, and bans scene/shot/camera talk
+outright — "a description of the frame is not a sentence in a story". A local
+description lint (`narrative.description_flags`) scores the finished script
+and rewrites flagged lines once (`story.repair`); the count is reported as
+`storytelling score 93% (7 line(s) still read as description, 5 rewritten)`.
+Set `story.enabled: false` to fall back to the old per-beat writer.
+
 **1. Narration that reads as speech, not generated text.** The English section
 writer now gets an in-prompt *voice exemplar* (an original passage written in
 the target rhythm: varied sentence openers, cause → effect chaining, short
@@ -870,10 +887,15 @@ After a run, inspect `output/_work/beats_<lang>.json`: every beat carries its
   gives the old even split.
 * `snap_to_scenes` / `snap_tolerance` — land cuts on the film's real shot
   changes (PySceneDetect, cached; `pip install scenedetect[opencv]`).
-* `min_speed` (default 0.6) — the slow-motion floor for dialogue-dense
-  sections. Lower (0.35/0.25) = tighter narration sync but heavier slow-mo;
-  higher (1.0) = never slow down (sections then run ahead of the narration
-  instead).
+* `min_speed` (default **0.85**) — the slow-motion floor for dialogue-dense
+  sections: at most a 15% slow-down. When a section's narration still
+  outlasts its own footage the timeline first spends the un-narrated film
+  between it and the next section as **B-roll** (that film has no narration
+  over it, so it is free and everything stays at 1x), then eases down to
+  this floor, then holds the final frame (`freeze_when_starved`, rendered by
+  `clip.py` with `tpad=stop_mode=clone`). Set `slow_mo_before_freeze: false`
+  to never slow the picture (1x + held frame only), or `min_speed: 1.0` to
+  disable slow motion entirely.
 * `max_shot_seconds` (default 7.0) — a single shot may never hold for more
   than this many seconds of screen time; sparse clause boundaries used to
   leave 10s+ final shots ("longest shot is 10.1s — one visual outlasting
@@ -884,6 +906,10 @@ After a run, inspect `output/_work/beats_<lang>.json`: every beat carries its
 * `max_lead_seconds` (default 3.0) — safety valve on how far the visuals may
   run ahead of the narrated moment.
 * No-replay playback is always on: cuts never re-show footage, so the montage
-  walks the film strictly forward.
+  walks the film strictly forward. Before the ffmpeg cut loop runs,
+  `timeline.cut_order_violations` audits the assembled cuts and
+  `timeline.repair_cut_order` pushes any cut that pointed at already-shown
+  film forward (`! N cut(s) pointed at film already shown; pushed M
+  forward`); `timeline_report` prints `chronological=yes/no` every run.
 * `semantic.clip.mode` — `reencode` (frame-exact, default) vs `copy` (fast
   preview; snaps to keyframes and reintroduces drift).

@@ -51,6 +51,159 @@ DEFAULT_VISION_MODEL = {
 }
 
 
+# Families that must never be handed to a provider that cannot serve them.
+_VISION_FAMILY_PREFIX = {
+    "gemini": ("gemini",),
+    "openai": ("gpt", "o1", "o3", "o4", "chatgpt", "gpt-4", "gpt-5"),
+    "groq": ("llama", "qwen", "mistral", "gemma", "phi", "kimi", "deepseek"),
+}
+# Families that no vision endpoint in this file serves: a name owning one of
+# these prefixes is a mismatch for every provider here.
+_FOREIGN_PREFIXES = ("claude", "deepseek")
+
+
+def vision_model_fits(provider: str, model: str) -> bool:
+    """Does ``model`` belong to ``provider``? Unknown names are allowed."""
+    name = (model or "").strip().lower()
+    if not name:
+        return False
+    fam = _VISION_FAMILY_PREFIX.get((provider or "").strip().lower())
+    if not fam:
+        return True
+    if any(name.startswith(p) for p in fam):
+        return True
+    if any(name.startswith(p) for p in _FOREIGN_PREFIXES):
+        return False
+    # a name from a KNOWN other family is a mismatch; an unknown local/proxy
+    # name is left alone (it may well be what the endpoint serves)
+    for other, prefixes in _VISION_FAMILY_PREFIX.items():
+        if other != provider and any(name.startswith(p) for p in prefixes):
+            return False
+    return True
+
+
+_MODEL_WARNED: set[tuple[str, str]] = set()
+
+
+def resolve_vision_model(cfg_vision: dict, provider: str) -> str:
+    """Vision model for ``provider`` — never a name another family owns.
+
+    The vision and text models are configured independently, and a leftover
+    ``VISION_MODEL``/``vision.model`` from another provider used to be sent
+    verbatim: the endpoint could only answer "the supported API model names
+    are ...". A mismatched name is replaced by the provider default and the
+    substitution is printed once.
+    """
+    raw = (
+        cfg_vision.get("model")
+        or (os.environ.get("VISION_MODEL") if provider == "gemini" else "")
+        or os.environ.get("VISION_MODEL", "")
+        or DEFAULT_VISION_MODEL.get(provider, "")
+    ).strip()
+    if vision_model_fits(provider, raw):
+        return raw or DEFAULT_VISION_MODEL.get(provider, "")
+    fallback = DEFAULT_VISION_MODEL.get(provider, "")
+    key = (provider, raw)
+    if key not in _MODEL_WARNED:
+        _MODEL_WARNED.add(key)
+        print(f"  * [vision] model {raw!r} is not a {provider} model — "
+              f"using {fallback!r} (set VISION_MODEL= to silence)",
+              flush=True)
+    return fallback
+
+
+class _GeminiChatCompletions:
+    """``client.chat.completions.create`` over the NATIVE Gemini SDK."""
+
+    def __init__(self, parent: "_GeminiNativeClient"):
+        self._p = parent
+
+    def create(self, *, model=None, messages=None, max_tokens=2048, **_kw):
+        import google.generativeai as genai  # type: ignore
+
+        system = ""
+        parts: list = []
+        for msg in (messages or []):
+            role = (msg.get("role") or "").lower()
+            content = msg.get("content")
+            if role == "system":
+                system = content if isinstance(content, str) else str(content)
+                continue
+            if isinstance(content, str):
+                parts.append(content)
+                continue
+            for item in (content or []):
+                if not isinstance(item, dict):
+                    continue
+                kind = item.get("type")
+                if kind == "text":
+                    parts.append(item.get("text") or "")
+                elif kind == "image_url":
+                    url = (item.get("image_url") or {}).get("url") or ""
+                    if ";base64," in url:
+                        head, b64 = url.split(";base64,", 1)
+                        mime = head.split("data:", 1)[-1] or "image/jpeg"
+                        parts.append({
+                            "mime_type": mime,
+                            "data": base64.b64decode(b64),
+                        })
+        genai.configure(api_key=self._p._api_key)
+        gm = genai.GenerativeModel(
+            model_name=model or self._p._model, system_instruction=system or None
+        )
+        resp = gm.generate_content(
+            parts,
+            generation_config={"max_output_tokens": int(max_tokens)},
+            request_options={"timeout": self._p._timeout},
+        )
+        text = getattr(resp, "text", "") or ""
+        if not text:
+            try:  # blocked/empty candidate: surface why instead of "" silently
+                text = "; ".join(
+                    str(getattr(c, "finish_reason", ""))
+                    for c in (getattr(resp, "candidates", None) or [])
+                )
+            except Exception:
+                text = ""
+        return _ChatResponse(text)
+
+
+class _ChatResponse:
+    def __init__(self, text: str):
+        msg = type("_Msg", (), {"content": text})()
+        choice = type("_Choice", (), {"message": msg})()
+        self.choices = [choice]
+
+
+class _GeminiCompletionsFacade:
+    def __init__(self, client: "_GeminiNativeClient"):
+        self.completions = _GeminiChatCompletions(client)
+
+
+class _GeminiNativeClient:
+    """OpenAI-shaped facade over ``google.generativeai`` (native SDK).
+
+    The caption call site (``client.chat.completions.create``) stays
+    untouched, so the native path and the OpenAI-compatible path are the same
+    code from the caller's point of view — one fewer dialect to get wrong.
+    """
+
+    def __init__(self, api_key: str, model: str, timeout: float = 180.0):
+        import google.generativeai as genai  # noqa: F401  (checked by caller)
+        self._api_key = api_key
+        self._model = model
+        self._timeout = float(timeout)
+        self.chat = _GeminiCompletionsFacade(self)
+
+
+def gemini_native_available() -> bool:
+    try:
+        import google.generativeai  # type: ignore  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 class VisionError(RuntimeError):
     """A captioning request failed (network, quota, model refused the image)."""
 
@@ -246,11 +399,13 @@ def extract_frames(
 
 
 def _client(cfg_vision: dict):
-    """OpenAI-compatible chat client for the configured vision provider.
+    """Chat client for the configured vision provider.
 
-    Gemini is reached through Google's OpenAI-compatible endpoint (same as the
-    text path in llm.py) so one free key drives vision too, with no new
-    dependency. Any provider on that endpoint (OpenAI, Groq, ...) works.
+    Gemini prefers the NATIVE ``google.generativeai`` SDK when it is installed
+    (a plain ``pip install google-generativeai``) and no custom ``base_url``
+    is configured — the OpenAI-compatible wrapper (``openai``) remains the
+    fallback, so nothing new is required. Any other provider goes through the
+    OpenAI-compatible endpoint as before.
     """
     import openai  # type: ignore
 
@@ -273,11 +428,17 @@ def _client(cfg_vision: dict):
         or os.environ.get("GEMINI_BASE_URL" if provider == "gemini" else "")
         or PROVIDER_BASE_DEFAULT.get(provider)
     )
-    model = (
-        cfg_vision.get("model")
-        or os.environ.get("VISION_MODEL")
-        or DEFAULT_VISION_MODEL[provider]
-    )
+    model = resolve_vision_model(cfg_vision, provider)
+    # NATIVE GEMINI: if the SDK is installed and the caller has not pointed
+    # Gemini at a custom (OpenAI-compatible) endpoint, talk to it natively.
+    if (
+        provider == "gemini"
+        and not cfg_vision.get("base_url")
+        and not os.environ.get("GEMINI_BASE_URL")
+        and bool(cfg_vision.get("native", True))
+        and gemini_native_available()
+    ):
+        return _GeminiNativeClient(api_key, model, timeout=180), model
     # 180s, not 600: a caption batch is a small request; a dead socket must
     # raise in minutes (the retry loop then handles it), never hang silently.
     client = openai.OpenAI(api_key=api_key, base_url=base, timeout=180)
@@ -316,9 +477,19 @@ def _fallback_client(cfg_vision: dict):
         or os.environ.get("VISION_FALLBACK_MODEL")
         or DEFAULT_VISION_MODEL.get(provider, "")
     )
+    model = resolve_vision_model({**cfg_vision, "model": model}, provider)
     if not model:
         return None, None
     try:
+        if provider == "gemini" and not base.startswith("http"):
+            pass
+        if (
+            provider == "gemini"
+            and not cfg_vision.get("fallback_base_url")
+            and bool(cfg_vision.get("native", True))
+            and gemini_native_available()
+        ):
+            return _GeminiNativeClient(api_key, model, timeout=180), model
         client = openai.OpenAI(api_key=api_key, base_url=base, timeout=180)
         return client, model
     except Exception:
@@ -448,7 +619,8 @@ def _caption_batch(
             retryable = any(k in msg for k in (
                 "429", "rate", "quota", "rpm", "too many", "resource exhausted",
                 "502", "503", "504", "500", "timeout", "timed out", "connection",
-                "high demand",
+                "high demand", "unavailable", "deadline", "overloaded",
+                "try again",
             ))
             if not retryable:
                 break

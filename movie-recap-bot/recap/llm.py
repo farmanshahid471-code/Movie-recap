@@ -11,6 +11,7 @@ free-tier OpenAI-compatible clouds Groq and Google Gemini (Flash).
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
 
@@ -76,6 +77,243 @@ DEFAULT_MODELS = {
 # not accept it reliably across versions, so we only ask where it is safe.
 _JSON_MODE_PROVIDERS = {"deepseek", "openai", "groq"}
 
+# Per-provider env var that names the model for THAT provider. `MODEL_NAME` is
+# the legacy global and is only honoured when it is actually a model of the
+# configured provider — this is the bug in the report:
+#   "The supported API model names are deepseek-flash, deepseek-v4-pro, but
+#    you passed gemini-3.1-flash-lite."
+# A .env that set MODEL_NAME for the vision pass was handed to DeepSeek, the
+# call failed 4 times with backoff, and the run died.
+_PROVIDER_MODEL_ENV = {
+    "openai": "OPENAI_MODEL",
+    "deepseek": "DEEPSEEK_MODEL",
+    "anthropic": "ANTHROPIC_MODEL",
+    "ollama": "OLLAMA_MODEL",
+    "groq": "GROQ_MODEL",
+    "gemini": "GEMINI_MODEL",
+}
+
+# Model strings that belong to another provider's family. Used to refuse a
+# cross-provider name instead of spending retries on a request the endpoint
+# can only answer with a 400.
+_FAMILIES = {
+    "gemini": ("gemini",),
+    "openai": ("gpt", "o1", "o3", "o4", "chatgpt"),
+    "anthropic": ("claude",),
+    "deepseek": ("deepseek",),
+    "groq": ("llama", "mixtral", "gemma", "qwen", "groq"),
+    "ollama": ("llama", "qwen", "mistral", "gemma", "phi", "deepseek"),
+}
+
+
+def _provider_of_model(name: str) -> str:
+    """Which provider a model string belongs to (``""`` when unknown)."""
+    low = (name or "").strip().lower()
+    if not low:
+        return ""
+    if "gemini" in low:
+        return "gemini"
+    if "claude" in low:
+        return "anthropic"
+    if "deepseek" in low:
+        # deepseek-v4-pro served by a generic OpenAI-compatible proxy still
+        # belongs to the deepseek family
+        return "deepseek"
+    if "gpt" in low or low.startswith(("o1", "o3", "o4")):
+        return "openai"
+    for prov, markers in _FAMILIES.items():
+        if any(m in low for m in markers):
+            return prov
+    return ""
+
+
+def _model_fits(provider: str, name: str) -> bool:
+    """True when ``name`` can plausibly be served by ``provider``."""
+    p = (provider or "").strip().lower()
+    fam = _provider_of_model(name)
+    if not name:
+        return False
+    if not fam:
+        return True                     # unknown family: let the endpoint judge
+    if p in ("", "none"):
+        return False
+    return fam == p or p in ("ollama", "groq", "openai")
+
+
+# Endpoints that already told us which model names they accept, keyed by the
+# base URL. Populated from the provider's error text ("The supported API model
+# names are X, Y") so we never waste the retry budget on a name we now know
+# the endpoint refuses.
+_ENDPOINT_MODELS: dict[str, list[str]] = {}
+_NOTED: set[str] = set()
+
+_SUPPORTED_RE = re.compile(
+    r"supported\s+(?:api\s+)?model\s*names?\s*(?:are|:)\s*([^\n.]+)", re.I)
+
+
+def parse_supported_models(message: str) -> list[str]:
+    """Model names a provider listed in its own error message.
+
+    Handles the reported wording ("The supported API model names are
+    deepseek-flash, deepseek-v4-pro, but you passed ...") as well as the
+    common "supported models: a, b" / "available models are ..." variants.
+    Returns [] when the message carries no such list.
+    """
+    try:
+        text = str(message or "")
+    except Exception:
+        return []
+    m = _SUPPORTED_RE.search(text)
+    if not m:
+        m = re.search(r"(?:available|valid|known)\s+models?\s*(?:are|:)\s*([^\n.]+)",
+                      text, re.I)
+    if not m:
+        return []
+    chunk = m.group(1)
+    # Trim the tail of the sentence ("..., but you passed ...")
+    chunk = re.split(r"\bbut\b|\bhowever\b|\byou passed\b", chunk, flags=re.I)[0]
+    names: list[str] = []
+    for piece in re.split(r"[,\s;|]+", chunk):
+        name = piece.strip().strip("'\"`().")
+        if not name or name.lower() in ("and", "or"):
+            continue
+        if re.fullmatch(r"[A-Za-z0-9._:/+-]{2,64}", name):
+            names.append(name)
+    return names
+
+
+def remember_endpoint_models(base_url: str | None, names: list[str]) -> None:
+    if base_url and names:
+        _ENDPOINT_MODELS[str(base_url).rstrip("/")] = list(names)
+
+
+def _endpoint_models(base_url: str | None) -> list[str]:
+    return list(_ENDPOINT_MODELS.get(str(base_url).rstrip("/"), [])) if base_url else []
+
+
+def endpoint_models(base_url: str | None, api_key: str | None,
+                    timeout: float = 10.0) -> list[str]:
+    """Ask an OpenAI-compatible endpoint which models it serves (best effort).
+
+    A custom ``base_url`` (a proxy, a self-hosted gateway, a regional router)
+    does not necessarily serve the model names this project ships as
+    defaults. Querying ``/models`` costs one cheap request and turns a run
+    that dies after four retries into a run that picks a name the endpoint
+    actually has. Failures are silent: the caller keeps the configured name.
+    """
+    import json
+    import urllib.request
+
+    url = (base_url or "").rstrip("/")
+    if not url:
+        return []
+    if url.endswith("/chat/completions"):
+        url = url[: -len("/chat/completions")]
+    if not url.endswith("/v1") and "/v1/" not in url:
+        url = f"{url}/v1"
+    url = f"{url}/models"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {(api_key or '').strip()}",
+        "User-Agent": "MovieRecap/1.0",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return []
+    rows = data.get("data") if isinstance(data, dict) else None
+    names: list[str] = []
+    for row in rows or []:
+        if isinstance(row, dict) and row.get("id"):
+            names.append(str(row["id"]))
+        elif isinstance(row, str):
+            names.append(row)
+    return names
+
+
+def resolve_model(provider: str, model: str, base_url: str | None = None,
+                  *, quiet: bool = False) -> str:
+    """Pick the model string that matches the provider that will serve it.
+
+    Precedence: the configured model if it fits the provider, else the
+    provider-specific env var (DEEPSEEK_MODEL, GEMINI_MODEL, ...), else the
+    legacy MODEL_NAME when it fits, else the provider default. A mismatched
+    name is never silently shipped to an endpoint that cannot serve it — the
+    substitution is printed once so the user can fix the config.
+    """
+    p = (provider or "").strip().lower()
+    chosen = ""
+    source = ""
+    candidates: list[tuple[str, str]] = []
+    if model:
+        candidates.append((str(model).strip(), "config"))
+    env_key = _PROVIDER_MODEL_ENV.get(p)
+    if env_key and os.environ.get(env_key):
+        candidates.append((os.environ[env_key].strip(), env_key))
+    if os.environ.get("MODEL_NAME"):
+        candidates.append((os.environ["MODEL_NAME"].strip(), "MODEL_NAME"))
+    default = DEFAULT_MODELS.get(p, "")
+    if default:
+        candidates.append((default, "provider default"))
+
+    for name, src in candidates:
+        if not name:
+            continue
+        if _model_fits(p, name):
+            chosen, source = name, src
+            break
+        if not quiet and f"mismatch:{p}:{name}" not in _NOTED:
+            _NOTED.add(f"mismatch:{p}:{name}")
+            print(f"  ! [llm] model {name!r} (from {src}) is not a {p} model "
+                  f"— ignoring it for provider {p!r}", flush=True)
+
+    if not chosen:
+        chosen = default or (model or "").strip()
+        source = source or "fallback"
+
+    # A custom endpoint decides for itself which names exist: prefer one it
+    # already told us it accepts, and remember the correction.
+    known = _endpoint_models(base_url)
+    fitted = [n for n in known if _model_fits(p, n)] or known
+    if chosen and known and chosen not in known and fitted:
+        replacement = _pick_endpoint_model(p, fitted, base_url)
+        if not quiet and f"endpoint:{base_url}" not in _NOTED:
+            _NOTED.add(f"endpoint:{base_url}")
+            print(f"  ! [llm] endpoint {base_url} does not list model "
+                  f"{chosen!r}; it supports {', '.join(fitted[:6])} — using "
+                  f"{replacement!r}. Make it permanent with llm.model: "
+                  f"{replacement} in config.yaml (or MODEL_NAME={replacement} "
+                  "in .env).", flush=True)
+        chosen = replacement
+    return chosen
+
+
+def _pick_endpoint_model(provider: str, names: list[str],
+                         base_url: str | None) -> str:
+    """Choose among the endpoint's own names (provider family first)."""
+    prefer = _FAMILIES.get((provider or "").strip().lower(), ())
+    for name in names:
+        low = name.lower()
+        if any(m in low for m in prefer):
+            return name
+    for name in names:
+        if "embed" not in name.lower():
+            return name
+    return names[0]
+
+
+def _model_error_model(exc: Exception) -> str | None:
+    """The replacement model an endpoint's rejection suggests, if any."""
+    msg = f"{type(exc).__name__}: {exc}"
+    low = msg.lower()
+    markers = ("supported api model names", "supported model names",
+               "model not found", "does not exist", "unknown model",
+               "invalid model", "not a valid model", "no such model")
+    if not any(m in low for m in markers):
+        return None
+    names = parse_supported_models(msg)
+    return names[0] if names else None
+
 
 def _client_from(provider: str, model: str, base_url: str | None = None):
     """Lazily build a client and return (client, model).
@@ -111,7 +349,7 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
             base_url=base_url or os.environ.get("OPENAI_BASE_URL") or None,
             timeout=timeout,
         )
-        model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["openai"]
+        model = resolve_model("openai", model, base_url)
         return client, model
 
     if provider == "deepseek":
@@ -124,9 +362,7 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
             or "https://api.deepseek.com",
             timeout=timeout,
         )
-        model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["deepseek"]
-        if model and ("gemini" in model.lower() or "gpt" in model.lower() or "claude" in model.lower() or "qwen" in model.lower() or "llama" in model.lower()):
-            model = DEFAULT_MODELS["deepseek"]
+        model = resolve_model("deepseek", model, base_url)
         return client, model
 
     if provider == "gemini":
@@ -139,9 +375,7 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
             or "https://generativelanguage.googleapis.com/v1beta/openai/",
             timeout=timeout,
         )
-        model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["gemini"]
-        if model and ("deepseek" in model.lower() or "gpt" in model.lower() or "claude" in model.lower() or "qwen" in model.lower() or "llama" in model.lower()):
-            model = DEFAULT_MODELS["gemini"]
+        model = resolve_model("gemini", model, base_url)
         return client, model
 
     if provider == "anthropic":
@@ -150,7 +384,7 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
         client = anthropic.Anthropic(
             api_key=os.environ.get("ANTHROPIC_API_KEY"), timeout=timeout
         )
-        model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["anthropic"]
+        model = resolve_model("anthropic", model, base_url)
         return client, model
 
     if provider == "ollama":
@@ -158,7 +392,7 @@ def _client_from(provider: str, model: str, base_url: str | None = None):
 
         base = base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
         client = openai.OpenAI(base_url=base, api_key="ollama", timeout=timeout)
-        model = model or os.environ.get("MODEL_NAME") or DEFAULT_MODELS["ollama"]
+        model = resolve_model("ollama", model, base_url)
         return client, model
 
     raise LLMError(f"Unknown LLM provider: {provider!r}")
@@ -349,6 +583,31 @@ def complete(
     p = (provider or "").strip().lower()
     client, resolved_model = _client_from(provider, model, base_url)
 
+    # Custom endpoint (proxy / self-hosted gateway / regional router)? Ask it
+    # ONCE which model names it serves. This is the difference between a 400
+    # that costs four retries and a run that quietly uses a name the endpoint
+    # actually has.
+    if base_url and p in (_JSON_MODE_PROVIDERS | {"gemini", "ollama"}):
+        if not _endpoint_models(base_url) and f"probe:{base_url}" not in _NOTED:
+            _NOTED.add(f"probe:{base_url}")
+            _names = endpoint_models(
+                base_url,
+                os.environ.get(f"{p.upper()}_API_KEY") or os.environ.get("LLM_API_KEY"),
+            )
+            if _names:
+                remember_endpoint_models(base_url, _names)
+                _resolved = resolve_model(p, resolved_model, base_url)
+                if _resolved and _resolved != resolved_model:
+                    resolved_model = _resolved
+                    print(f"  * [llm] endpoint {base_url} serves "
+                          f"{len(_names)} model(s); using {resolved_model!r}",
+                          flush=True)
+
+    if f"diag:{p}:{base_url}:{resolved_model}" not in _NOTED:
+        _NOTED.add(f"diag:{p}:{base_url}:{resolved_model}")
+        print(f"  * [llm] provider={p or '(none)'} model={resolved_model!r} "
+              f"base_url={base_url or '(provider default)'}", flush=True)
+
     try:
         timeout = float(os.environ.get("LLM_TIMEOUT", "180"))
     except ValueError:
@@ -403,6 +662,27 @@ def complete(
                     if text:
                         return text
                 except (TypeError, Exception) as inner_exc:
+                    # MODEL-NAME RECOVERY (the reported crash): the endpoint
+                    # answered "The supported API model names are X, Y, but you
+                    # passed Z". Instead of burning four retries and dying,
+                    # remember the names it does support and retry with one.
+                    _replacement = _model_error_model(inner_exc)
+                    if _replacement:
+                        _names = parse_supported_models(str(inner_exc)) or [_replacement]
+                        remember_endpoint_models(base_url, _names)
+                        _resolution = resolve_model(p, _replacement, base_url)
+                        if _resolution and _resolution != resolved_model:
+                            print(f"  ! [llm] {p} refused model {resolved_model!r} "
+                                  f"— {str(inner_exc)[:200]}", flush=True)
+                            print(f"  * [llm] the endpoint supports "
+                                  f"{', '.join(_names[:6])}; retrying with "
+                                  f"{_resolution!r}. Make it permanent: set "
+                                  f"llm.model: {_resolution} in config.yaml "
+                                  f"(or MODEL_NAME={_resolution} in .env).",
+                                  flush=True)
+                            resolved_model = _resolution
+                            kwargs["model"] = resolved_model
+                            continue
                     if isinstance(inner_exc, TypeError) or not _retryable(inner_exc):
                         print(f"  * Note: OpenAI SDK error ({type(inner_exc).__name__}: {inner_exc}); switching to direct HTTP request...", flush=True)
                         fallback_text = _direct_http_completion(
@@ -442,12 +722,17 @@ def complete(
                         "OLLAMA_BASE_URL points at it."
                     ) from exc
                 if p == "deepseek":
+                    _known = _endpoint_models(base_url)
+                    _hint = (f"  - the endpoint at {base_url or 'api.deepseek.com'} "
+                             f"lists: {', '.join(_known[:8])}\n" if _known else "")
                     raise LLMError(
                         f"DeepSeek request failed ({type(exc).__name__}: {exc}).\n"
                         "  - check DEEPSEEK_API_KEY is set and has credit "
                         "(platform.deepseek.com -> Usage)\n"
-                        f"  - model '{resolved_model}' should be deepseek-chat "
-                        "or deepseek-reasoner"
+                        f"  - model '{resolved_model}' should be one the "
+                        "endpoint actually serves (deepseek-chat / "
+                        "deepseek-reasoner on the official API; whatever the "
+                        "proxy lists on a custom base_url)\n" + _hint
                     ) from exc
                 raise
             wait = min(2.0 * (2 ** attempt), 30.0)

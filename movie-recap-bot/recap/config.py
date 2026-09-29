@@ -98,6 +98,23 @@ _DEFAULTS: dict[str, Any] = {
         "validate": True,          # run MATCH/PARTIAL/MISMATCH gate before encoding
         "validation_model": None,  # cheap model for the gate (defaults to llm.model)
     },
+    # Step B1 — the STORY WRITER (beat path, told as a story).
+    # Beats are grouped into story units (~45s of film) and ONE call writes a
+    # whole scene, with a rolling story-so-far and the previous line to
+    # continue from, so the narration chains cause into effect instead of
+    # describing one isolated shot after another. Every sentence is tagged
+    # with the beat whose facts it narrates, windows are laid down in strict
+    # film order, and a description lint triggers one targeted rewrite pass.
+    "story": {
+        "enabled": True,
+        "unit_seconds": 45.0,      # film covered by one story unit (one call)
+        "min_beats_per_unit": 2,
+        "max_beats_per_unit": 8,
+        "sentence_words": 16,      # planning size for the sentence count
+        "retry_overflow": True,    # one retry when a unit overruns its budget
+        "repair": True,            # rewrite sentences that only describe the frame
+        "repair_batch": 12,        # sentences per repair call
+    },
     # Step D — chronological timeline (replaces semantic vector matching).
     # Beats advance monotonically through the film and every beat's visual is
     # locked to its narration cue, so video length == audio length exactly.
@@ -119,15 +136,23 @@ _DEFAULTS: dict[str, Any] = {
         # How far the visuals may run AHEAD of the moment being narrated
         # (safety valve; group pacing keeps the typical lead near zero).
         "max_lead_seconds": 3.0,
-        # MOTION GUARANTEE: in dialogue-dense sections the narration can be
-        # longer than the footage behind it. Instead of freezing the picture
-        # or running ahead, the footage plays in slow motion down to this
-        # speed. With anchor-true re-windowing and the enforced section
-        # budgets, genuinely starved sections are RARE, so 0.6x (a mild,
-        # barely-perceptible slow-down) is the right floor: a starved
-        # section now reads as slightly slower footage instead of an
-        # obvious 0.35x crawl. 1.0 disables slow motion entirely.
-        "min_speed": 0.6,
+        # MOTION POLICY: in dialogue-dense sections the narration can be
+        # longer than the footage behind it. The timeline then, in order:
+        # (1) spends the un-narrated film between this section and the next
+        # one as B-roll (free: no other sentence plays over it), which costs
+        # nothing and keeps everything at 1x; (2) eases into ONE mild
+        # slow-down that never goes below this floor; (3) holds the shot's
+        # final frame (see freeze_when_starved). 0.85 = at most a 15%
+        # slow-down, well inside "invisible"; 1.0 disables slow motion.
+        "min_speed": 0.85,
+        # Below the floor, HOLD the shot's final frame for the remainder
+        # (clip.cut_segment renders it with tpad) instead of stretching the
+        # picture into a 0.3x crawl. False = the old behaviour (keep slowing
+        # and walking forward, never freeze mid-film).
+        "freeze_when_starved": True,
+        # ...and which comes first for a starved section: the mild slow-down
+        # down to min_speed (default), or straight to the held frame at 1x.
+        "slow_mo_before_freeze": True,
         # A cut must show at least this much NEW film, otherwise it continues
         # the current footage seamlessly (micro-jumps read as stutters).
         "min_new_footage": 0.8,
@@ -172,7 +197,10 @@ _DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "provider": "gemini",      # gemini (free, multimodal) | openai | groq
         "model": "gemini-3.6-flash",  # Gemini Flash models are multimodal
-        "base_url": None,          # None = provider default (Gemini OpenAI-compat)
+        "base_url": None,          # None = provider default (Gemini: native SDK
+                                   # when installed, else its OpenAI-compat path)
+        "native": True,            # Gemini: prefer google-generativeai when
+                                   # installed and no custom base_url is set
         "fallback_provider": "",   # e.g. "openai" — used when primary 503s persist
         "fallback_model": "",      # e.g. "gpt-4o-mini" (auto-picks if empty + key exists)
         "fallback_base_url": None,

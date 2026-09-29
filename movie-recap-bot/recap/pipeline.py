@@ -23,8 +23,9 @@ import hashlib
 import json
 from pathlib import Path
 
-from . import (align, beats, chunk, clip, dialogue, languages, llm, scenes, script,
-               subtitles, summarize, timeline, translate, tts, video, vision)
+from . import (align, beats, chunk, clip, dialogue, languages, llm, narrative,
+               scenes, script, story, subtitles, summarize, timeline, translate,
+               tts, video, vision)
 from .config import out_dir, work_dir
 from .dialogue import DialogueError
 from .util import count_words, probe_duration
@@ -870,10 +871,29 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         if beats_enabled and not _stubbed_for_test and llm.provider_configured(cfg.get("llm", {}).get("provider", "")):
             try:
                 b_wpm = int(beats_cfg.get("wpm", 175))
+                # Self-calibrating rate (same cache the chunk path uses): if a
+                # previous run measured this voice's REAL pace, budget the
+                # beats with it. Budgeting 45s of footage at a guessed 175wpm
+                # when the voice really runs at 150 is how a section that
+                # "fits" ends up slow-motioned on screen.
+                try:
+                    _nar = cfg.get("narration", {}) or {}
+                    _measured_b = measured_wpm_for(
+                        wd, _nar.get("tts_provider", "edge"),
+                        narration_voice(_nar, code), _nar.get("rate", "+0%"))
+                    if _measured_b and 60.0 <= _measured_b <= 400.0:
+                        b_wpm = int(round(_measured_b))
+                        print(f"  * [beats] using the MEASURED narration rate "
+                              f"for this voice ({b_wpm} wpm, cached) for every "
+                              "word budget", flush=True)
+                except Exception:
+                    pass
                 b_gap = float(beats_cfg.get("gap_threshold", 1.5))
                 b_min = float(beats_cfg.get("min_beat_seconds", 4.0))
                 b_borrow = float(beats_cfg.get("max_borrow_ratio", 0.3))
                 b_validate = bool(beats_cfg.get("validate", True))
+                story_cfg = cfg.get("story") or {}
+                story_enabled = bool(story_cfg.get("enabled", True))
                 beat_list = beats.detect_beats(
                     cues, visual_notes, snap_bounds_early, movie_dur,
                     gap_threshold=b_gap, min_beat_seconds=b_min,
@@ -895,7 +915,9 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
 
                 lang_name_beats = languages.name(code)
                 b_marker = tdir / f"script_{code}.marker.json"
-                b_sig = _sig(beat_list, b_wpm, b_target, bool(cfg.get("narration", {}).get("sign_off", True)), "beats-v2")
+                b_sig = _sig(beat_list, b_wpm, b_target, bool(cfg.get("narration", {}).get("sign_off", True)),
+                             "story-v1" if story_enabled else "beats-v2",
+                             {k: story_cfg.get(k) for k in sorted(story_cfg)})
                 seg_path = tdir / f"script_{code}.segments.json"
                 _segments = None
                 if _marker_ok(b_marker, b_sig) and seg_path.exists():
@@ -907,6 +929,50 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                         print(f"  * Reusing existing {lang_name_beats} beats script "
                               f"({len(_segments)} segments — matches this movie/target). Delete "
                               f"script_{code}.segments.json to force re-generate.", flush=True)
+
+                if _segments is None and story_enabled:
+                    # ---- STORY-FIRST WRITER ----------------------------------
+                    # Beats are grouped into ~45s story units and written as
+                    # ONE scene of the story (with a rolling story-so-far and
+                    # the previous line to continue from), instead of one
+                    # isolated description per beat.
+                    try:
+                        _units_total = len(story.group_into_units(
+                            beat_list, story_cfg, wpm=b_wpm))
+
+                        def _story_progress(_u, _n, _w, _t=_units_total):
+                            print(f"  * [story] {languages.name(code)}: unit "
+                                  f"{_u['index'] + 1}/{_t} "
+                                  f"({narrative.format_window(_u['start_ts'], _u['end_ts'])}) "
+                                  f"-> {_n} sentences, {_w} words", flush=True)
+
+                        _story = story.write_story_script(
+                            beat_list, cfg.get("llm", {}), wpm=b_wpm,
+                            movie_duration=movie_dur, cfg_story=story_cfg,
+                            total_target_words=b_target,
+                            lang_name=languages.name(code),
+                            progress=_story_progress,
+                        )
+                        _segments = _story["segments"]
+                        _story_report = _story["report"]
+                        story.write_report(_story_report, tdir / f"story_{code}.json")
+                        _d = _story_report["description"]
+                        print(f"  * [story] {languages.name(code)}: "
+                              f"{_story_report['units']} story units -> "
+                              f"{_story_report['sentences']} sentences, "
+                              f"{_story_report['words']} words "
+                              f"(budget {_story_report['budget_words']}); "
+                              f"storytelling score {_d['score']:.0%} "
+                              f"({_d['flagged']} line(s) still read as "
+                              f"description, {_story_report['repaired']} "
+                              "rewritten)", flush=True)
+                        if not _segments or len(_segments) < 3:
+                            raise story.StoryError("story writer produced too few segments")
+                    except Exception as exc_story:
+                        print(f"  ! [story] {languages.name(code)} story writer "
+                              f"failed ({type(exc_story).__name__}: {exc_story}) "
+                              "— falling back to the per-beat writer", flush=True)
+                        _segments = None
 
                 if _segments is None:
                     _narrs, _beats_adj = beats.generate_beat_script(
@@ -1049,7 +1115,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         b_marker = tdir / f"script_{code}.marker.json"
         b_sig = _sig(merged, cfg["llm"].get("provider"),
                      cfg["llm"].get("model"), target,
-                     bool(nar.get("sign_off", True)), "segmented-v15")
+                     bool(nar.get("sign_off", True)), "segmented-v16")
         seg_path = tdir / f"script_{code}.segments.json"
         segments = None
         if _marker_ok(b_marker, b_sig) and seg_path.exists():
@@ -1312,6 +1378,9 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
             tl_stats.get("snapped_cuts", 0),
             tl_stats.get("slowed_groups", 0),
             tl_stats.get("slowed_seconds", 0.0),
+            tl_stats.get("padded_shots", 0),
+            tl_stats.get("padded_seconds", 0.0),
+            tl_stats.get("borrowed_groups", 0),
         )
         print(f"  * [{code}] timeline: {_report}")
         _longest = max((d for b in tl_beats for _, d, _f, _v in (b.get("cuts") or [])),
@@ -1359,10 +1428,18 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         # genuinely longer than the film behind it (over-budget section or
         # a far slower voice than words_per_minute assumes).
         _slowed = tl_stats.get("slowed_groups", 0)
+        _padded = tl_stats.get("padded_shots", 0)
+        _borrowed = tl_stats.get("borrowed_groups", 0)
+        if _borrowed or _padded:
+            print(f"  * [{code}] pacing: {_borrowed} section(s) spent "
+                  f"un-narrated film as B-roll; {_padded} shot(s) held their "
+                  "final frame. Both are the timeline absorbing a section "
+                  "whose narration outlasts the footage it owns.")
         if _slowed:
-            print(f"  ! [{code}] {_slowed} section(s) still play below 1x: "
-                  "their measured narration is longer than the film zone "
-                  "behind them. If this is most of the video, lower "
+            print(f"  ! [{code}] {_slowed} section(s) still play below 1x "
+                  f"(floor {cfg.get('timeline', {}).get('min_speed', 0.85)}x, "
+                  "never deeper): their measured narration is longer than the "
+                  "film zone behind them. If this is most of the video, lower "
                   "narration.words_target (or raise words_per_minute to "
                   "match the voice's real rate).")
         # Measured narration rate vs configured -- and CACHED per voice so
@@ -1401,6 +1478,17 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
             continue
 
         cuts = timeline.flatten_cuts(tl_beats)
+        # PTS-ORDER GUARD (bug report, problem 2): every shot must show film
+        # at or after the end of the shot before it. The timeline makes this
+        # impossible by construction, so a violation here means some earlier
+        # stage handed us a shuffled plan -- repair it forward (NEVER sort the
+        # shots by PTS: the cut order IS the narration timeline) and say so.
+        _bad = timeline.cut_order_violations(cuts)
+        if _bad:
+            cuts, _fixed = timeline.repair_cut_order(cuts)
+            print(f"  ! [{code}] {len(_bad)} cut(s) pointed at film already "
+                  f"shown; pushed {_fixed} forward to keep the timeline "
+                  "strictly chronological", flush=True)
         print(f"  * [{code}] cutting {len(cuts)} shots from the film "
               f"(mode={clip_mode}) ...")
         visual = clip.build_locked_visual(

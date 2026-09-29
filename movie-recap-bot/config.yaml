@@ -185,7 +185,14 @@ vision:
   allow_incomplete: false   # set true (or VISION_ALLOW_INCOMPLETE=1) to bypass coverage gate (debug only)
   max_consecutive_failures: 3  # circuit breaker: after N failed batches, pause whole pass
   circuit_breaker_pause: 180   # seconds to cooldown when breaker trips (3-5 min)
-
+  native: true             # Gemini: use the native google-generativeai SDK when
+                           # installed (pip install google-generativeai) and no
+                           # custom base_url is set; falls back to the
+                           # OpenAI-compatible endpoint automatically. A model
+                           # name from another family (e.g. deepseek-chat) is
+                           # refused with a warning and the Gemini default is
+                           # used instead of a guaranteed 'supported API model
+                           # names are ...' error.
 # Step D — chronological timeline (recap line -> film moment, in order).
 # Beats advance monotonically through the film and each beat's visual length is
 # locked to its narration cue, so the video can never drift or be truncated.
@@ -208,14 +215,20 @@ timeline:
   max_lead_seconds: 3.0    # how far the visuals may run AHEAD of the moment
                            # being narrated (safety valve; pacing keeps the
                            # typical lead near zero)
-  min_speed: 0.6           # MOTION GUARANTEE: in dialogue-dense sections the
-                           # narration can outlast the footage behind it. The
-                           # picture then plays in SLOW MOTION (down to this
-                           # speed) instead of freezing or running ahead.
-                           # 0.6 = a mild, barely-perceptible slow-down
-                           # (starved sections are rare once budgets + the
-                           # anchor fix hold, so the floor rarely binds).
-                           # 1.0 disables slow motion.
+  min_speed: 0.85          # MOTION POLICY: a section whose narration outlasts
+                           # its own footage FIRST spends the un-narrated film
+                           # between it and the next section as B-roll (free,
+                           # nothing else narrates it), then eases into one
+                           # mild slow-down never below this floor. 0.85 = at
+                           # most a 15% slow-down. 1.0 disables slow motion.
+  freeze_when_starved: true  # ...and below the floor, HOLD the shot's final
+                           # frame (tpad clone) for the remainder instead of
+                           # crawling at 0.3x. A held frame reads as an edit;
+                           # a 0.3x crawl reads as a broken render.
+                           # false = old behaviour (keep slowing / walk on).
+  slow_mo_before_freeze: true  # a starved section eases down to min_speed
+                           # first, then holds the frame. false = 1x + held
+                           # frame only (a slow-down is never used).
   max_shot_seconds: 7.0    # a single shot may never hold for more than this
                            # many seconds of screen time (sparse clause
                            # boundaries used to leave 10s+ final shots --
@@ -235,6 +248,26 @@ timeline:
   # NO-REPLAY PLAYBACK (always on): every cut must show footage at or after
   # the end of the previous cut's footage, so the film never rewinds and no
   # moment is ever shown twice during the narration.
+
+# Step B1 — STORY WRITER (the beat path, told as a story).
+# The writer used to get ONE beat at a time and was asked to "describe what
+# happens in this beat" — which is what it did: a shot-by-shot description
+# with no story, no cause and effect and no continuity between beats.
+# Now consecutive beats are grouped into STORY UNITS (~45s of film) and one
+# call writes a whole scene: it receives the story so far, the cast already
+# introduced and the previous line to continue from, and every sentence is
+# tagged with the beat whose facts it narrates. A description lint then
+# reports the storytelling score and rewrites any line that only describes
+# the frame. Set story.enabled: false to fall back to the old per-beat writer.
+story:
+  enabled: true
+  unit_seconds: 45.0       # film covered by one story unit (one LLM call)
+  min_beats_per_unit: 2    # a unit is at least this many beats...
+  max_beats_per_unit: 8    # ...and at most this many
+  sentence_words: 16       # planning size for the sentence count per unit
+  retry_overflow: true     # one retry when a unit overruns its word budget
+  repair: true             # rewrite sentences that only describe the frame
+  repair_batch: 12         # sentences per repair call
 
 # (legacy) semantic vector matching — no longer used for beat selection.
 semantic:

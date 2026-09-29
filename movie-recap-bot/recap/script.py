@@ -15,7 +15,7 @@ import re
 
 from pathlib import Path
 
-from . import llm
+from . import llm, narrative
 from .util import count_words
 
 STYLE_PRESET = """Be this person: a veteran movie-recap narrator, the voice people binge for
@@ -218,6 +218,7 @@ MAKE IT SOUND LIKE A RECAP NARRATOR:
 - Let several moments flow through one sentence when they belong to one continuous action; cut a new sentence when the scene, location, or time shifts.
 
 KILL THE AI TELLS:
+- SHOT DESCRIPTION: a sentence that only says what the picture looks like ("A dark hallway.", "We see a table covered in papers.") is not narration. Turn it into story — give it a person, a want and a consequence — or fold it into the line before/after.
 - Monotone "Name does X. Name does Y." listing and uniform sentence length.
 - Em-dashes and semicolons (use commas and full stops).
 - "the movie", "the film", "the scene shows", "the camera" mid-story; "little did they know"; "unbeknownst"; rhetorical questions to the viewer; meta commentary.
@@ -435,13 +436,16 @@ def generate_script_json(
 #     makes the visual timeline strictly chronological (see recap/timeline.py).
 
 SYSTEM_RECAP_BEATS = NARRATOR_PERSONA + VOICE_GUIDE + (
-    "\n\nYour current job: narrate ONE SECTION of a full recap as a JSON "
+    "\n\n" + narrative.STORY_RULES_COMPACT +
+    "\nYour current job: narrate ONE SECTION of a full recap as a JSON "
     'object {"sentences": [...]} in strict story order. The ACTION BEATS in '
     "the user message are your factual record — the ground truth of what "
     "happens on screen in that stretch. Keep every character name and proper "
     "noun they contain, never invent events, never skip an entire scene, and "
     "hit the requested word budget."
 )
+
+STORY_BLOCK_SEGMENT = """\n\n""" + narrative.STORY_RULES_COMPACT
 
 PROMPT_SEGMENT_JSON = """You are writing ONE SECTION of a full movie recap narration — the voice the viewer hears over the film's footage.
 
@@ -467,7 +471,7 @@ COVERAGE RULES:
 - Cover the section evenly: the first sentences about the opening beats, the middle sentences about the middle beats, the last about the closing beats — so every scene gets narrated and no one moment hogs the section.
 - Where the budget cannot fit every minor beat, drop only the least visual sub-steps and keep one sentence per distinct scene, with the scene's key detail intact.
 
-FORBIDDEN (the tells of machine-written narration): uniform sentence length; "Name does X. Name does Y." listing; three sentences starting the same way; em-dashes; semicolons; rhetorical questions to the viewer; "the movie", "the film", "the scene shows", "the camera" mid-story; "little did they know"; "unbeknownst"; meta commentary, analysis, or review talk.
+FORBIDDEN (the tells of machine-written narration): uniform sentence length; "Name does X. Name does Y." listing; three sentences starting the same way; em-dashes; semicolons; rhetorical questions to the viewer; "the movie", "the film", "the scene shows", "the camera" mid-story; "little did they know"; "unbeknownst"; meta commentary, analysis, or review talk; SHOT DESCRIPTION — a sentence whose only job is to say what the picture looks like ("A dark hallway.", "We see a table covered in papers.") is not narration, it is a caption.
 - {continuity}
 
 Respond with ONLY a JSON object in this exact shape, no markdown fences:
@@ -2081,6 +2085,9 @@ def generate_segmented_script(
             continuity=continuity, beats=_fmt_beat_lines(c),
             names_block=names_block,
         )
+        # Storytelling rules ride in the USER message too: the system prompt is
+        # followed best when the same instruction also sits next to the beats.
+        user += STORY_BLOCK_SEGMENT
         if exemplar_block:
             user += exemplar_block
         if lang_instr:
