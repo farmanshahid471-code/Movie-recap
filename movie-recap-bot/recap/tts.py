@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Protocol
 
@@ -63,15 +64,66 @@ class TTSProvider(Protocol):
 # --------------------------------------------------------------------------
 # edge-tts
 # --------------------------------------------------------------------------
+# Recap pacing: the SSML prosody every narration line is spoken with,
+# i.e. <prosody rate="+12%" pitch="-2%">. Configurable via narration.rate /
+# narration.pitch in config.yaml.
+DEFAULT_RATE = "+12%"
+DEFAULT_PITCH = "-2%"
+# edge-tts only accepts pitch in Hz; a percentage is converted against a
+# typical narrator fundamental frequency.
+_BASE_F0_HZ = 120.0
+
+
+def normalize_rate(rate: str | None) -> str:
+    """-> an edge-tts/SSML rate string like "+12%"."""
+    r = str(rate or DEFAULT_RATE).strip()
+    m = re.fullmatch(r"([+-]?)(\d+(?:\.\d+)?)%", r)
+    if not m:
+        return DEFAULT_RATE
+    return f"{m.group(1) or '+'}{int(round(float(m.group(2))))}%"
+
+
+def normalize_pitch(pitch: str | None) -> str:
+    """-> an edge-tts pitch string ("-2Hz"). Accepts "-2%" or "-2Hz"."""
+    p = str(pitch or DEFAULT_PITCH).strip()
+    m = re.fullmatch(r"([+-]?)(\d+(?:\.\d+)?)(%|Hz|hz)", p)
+    if not m:
+        return "-0Hz"
+    sign = m.group(1) or "+"
+    val = float(m.group(2))
+    if m.group(3) == "%":
+        val = val / 100.0 * _BASE_F0_HZ
+    return f"{sign}{int(round(val))}Hz"
+
+
+def prosody_ssml(text: str, rate: str | None = None, pitch: str | None = None,
+                 voice: str | None = None) -> str:
+    """Wrap ``text`` in the recap-pacing SSML for SSML-capable engines.
+
+    edge-tts builds exactly this ``<prosody>`` element itself from its
+    ``rate``/``pitch`` arguments (it escapes user-supplied SSML), so EdgeTTS
+    passes the values through those arguments instead of raw markup.
+    """
+    from xml.sax.saxutils import escape
+
+    r = normalize_rate(rate)
+    ptxt = str(pitch or DEFAULT_PITCH).strip()
+    body = f'<prosody rate="{r}" pitch="{ptxt}">{escape(text)}</prosody>'
+    if voice:
+        body = f'<voice name="{voice}">{body}</voice>'
+    return ('<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+            f'xml:lang="en-US">{body}</speak>')
+
+
 class EdgeTTS:
     name = "edge"
 
-    def __init__(self, rate: str = "+0%", pitch: str = "-0Hz"):
+    def __init__(self, rate: str = DEFAULT_RATE, pitch: str = DEFAULT_PITCH):
         import edge_tts  # type: ignore
 
         self._edge = edge_tts
-        self.rate = rate
-        self.pitch = pitch
+        self.rate = normalize_rate(rate)
+        self.pitch = normalize_pitch(pitch)
 
     def synthesize_beats(self, sentences: list[str], voice: str, beats_dir: Path) -> tuple[list[TimedCue], list[Path]]:
         """Synthesize individual audio files per scene or beat (beat_001.mp3, beat_002.mp3, etc.)."""
@@ -84,7 +136,12 @@ class EdgeTTS:
         for i, sentence in enumerate(sentences):
             beat_path = beats_dir / f"beat_{i+1:03d}.mp3"
             words, dur = asyncio.run(self._sync_one_beat(sentence, voice, beat_path))
-            cue = TimedCue(sentence.strip(), cum_time, cum_time + dur, words=words)
+            words, dur = _finish_beat(beat_path, words)
+            # word boundaries are relative to THIS clip: make them absolute
+            # narration time (they were left clip-relative before, so every
+            # sentence after the first had its word cuts at the wrong time)
+            cue = TimedCue(sentence.strip(), cum_time, cum_time + dur,
+                           words=_shift_words(words, cum_time))
             cues.append(cue)
             beat_files.append(beat_path)
             cum_time += dur
@@ -237,14 +294,31 @@ def make_provider(name: str, cfg_narration: dict) -> TTSProvider:
     name = (name or "edge").strip().lower()
     if name == "edge":
         return EdgeTTS(
-            rate=cfg_narration.get("rate", "+0%"),
-            pitch=cfg_narration.get("pitch", "-0Hz"),
+            rate=cfg_narration.get("rate", DEFAULT_RATE),
+            pitch=cfg_narration.get("pitch", DEFAULT_PITCH),
         )
     if name == "elevenlabs":
         return _ElevenLabs(cfg_narration)
     if name == "openai":
         return _OpenAI(cfg_narration)
+    if name in ("xtts", "coqui", "xttsv2"):
+        return _XTTS(cfg_narration)
     raise TTSError(f"Unknown TTS provider: {name!r}")
+
+
+def _eleven_payload(text: str, cfg: dict) -> dict:
+    """ElevenLabs request: storytelling voice settings (lower stability +
+    some style = more emotive delivery). Tunable in config.yaml."""
+    return {
+        "text": text,
+        "model_id": cfg.get("elevenlabs_model") or "eleven_multilingual_v2",
+        "voice_settings": {
+            "stability": float(cfg.get("elevenlabs_stability", 0.35)),
+            "similarity_boost": float(cfg.get("elevenlabs_similarity", 0.8)),
+            "style": float(cfg.get("elevenlabs_style", 0.45)),
+            "use_speaker_boost": True,
+        },
+    }
 
 
 def _ElevenLabs(cfg: dict) -> TTSProvider:
@@ -273,12 +347,12 @@ def _ElevenLabs(cfg: dict) -> TTSProvider:
                 r = requests.post(
                     url,
                     headers={"xi-api-key": api_key, "Accept": "audio/mpeg"},
-                    json={"text": stmt, "model_id": "eleven_multilingual_v2"},
+                    json=_eleven_payload(stmt, cfg),
                     timeout=60,
                 )
                 r.raise_for_status()
                 p.write_bytes(r.content)
-                dur = probe_duration(p)
+                _w, dur = _finish_beat(p)
                 cues.append(TimedCue(stmt.strip(), cum, cum + dur))
                 cum += dur
                 files.append(p)
@@ -315,7 +389,7 @@ def _ElevenLabs(cfg: dict) -> TTSProvider:
                 r = requests.post(
                     url,
                     headers={"xi-api-key": api_key, "Accept": "audio/mpeg"},
-                    json={"text": stmt, "model_id": "eleven_multilingual_v2"},
+                    json=_eleven_payload(stmt, cfg),
                     timeout=60,
                 )
                 r.raise_for_status()
@@ -346,7 +420,7 @@ def _OpenAI(cfg: dict) -> TTSProvider:
                     model="tts-1", voice=voice or "alloy", input=stmt
                 )
                 resp.stream_to_file(str(p))
-                dur = probe_duration(p)
+                _w, dur = _finish_beat(p)
                 cues.append(TimedCue(stmt.strip(), cum, cum + dur))
                 cum += dur
                 files.append(p)
@@ -382,8 +456,174 @@ def _OpenAI(cfg: dict) -> TTSProvider:
     return _P()
 
 
+def _finish_beat(path: Path, words: list | None = None,
+                 strip: bool = True) -> tuple[list | None, float]:
+    """Strip the head/tail silence off one sentence clip (ffmpeg
+    silenceremove, see align.strip_silence) and shift its word timings by
+    the removed head. Returns ``(words, duration)`` of the finished clip."""
+    if strip and os.environ.get("RECAP_STRIP_SILENCE", "1") != "0":
+        from .align import strip_silence
+
+        res = strip_silence(path)
+        if res is not None:
+            head, dur = res
+            if words:
+                words = [(w, round(max(s - head, 0.0), 3),
+                          round(min(max(e - head, 0.0), dur), 3))
+                         for w, s, e in words]
+            return words, dur
+    return words, probe_duration(path)
+
+
+def _shift_words(words: list | None, offset: float) -> list | None:
+    """Per-sentence word timings -> absolute narration time."""
+    if not words:
+        return words
+    return [(w, round(s + offset, 3), round(e + offset, 3)) for w, s, e in words]
+
+
+def _XTTS(cfg: dict) -> TTSProvider:
+    """Coqui XTTS-v2 (https://github.com/coqui-ai/TTS): expressive, emotive
+    open-source narration with natural breaths and intonation.
+
+    Two ways to run it:
+      * local:  ``pip install TTS`` (needs a GPU for real-time speed). The
+                model ``tts_models/multilingual/multi-dataset/xtts_v2`` is
+                downloaded on first use.
+      * server: point ``narration.xtts_server_url`` (or XTTS_SERVER_URL) at
+                an xtts-api-server (``POST /tts_to_audio/``).
+    Voice: ``narration.xtts_speaker_wav`` (a 6-30s clean reference clip of the
+    narrator you want to clone) or ``narration.xtts_speaker`` (a built-in
+    XTTS speaker name, default "Damien Black").
+    Word timings come from the WhisperX alignment pass afterwards.
+    """
+    import os
+
+    server = (os.environ.get("XTTS_SERVER_URL") or cfg.get("xtts_server_url") or "").rstrip("/")
+    speaker_wav = os.environ.get("XTTS_SPEAKER_WAV") or cfg.get("xtts_speaker_wav") or ""
+    speaker = cfg.get("xtts_speaker") or "Damien Black"
+    model_name = cfg.get("xtts_model") or "tts_models/multilingual/multi-dataset/xtts_v2"
+    try:
+        speed = float(cfg.get("xtts_speed") or rate_speed_factor_local(cfg.get("rate")))
+    except (TypeError, ValueError):
+        speed = 1.0
+
+    class _P:
+        name = "xtts"
+        _model = None
+
+        def _local(self):
+            if _P._model is None:
+                try:
+                    from TTS.api import TTS as _CoquiTTS  # type: ignore
+                except Exception as exc:
+                    raise TTSError(
+                        "XTTS needs `pip install TTS` (coqui-ai/TTS) or "
+                        "narration.xtts_server_url pointing at an XTTS server."
+                    ) from exc
+                try:
+                    import torch  # type: ignore
+                    dev = "cuda" if torch.cuda.is_available() else "cpu"
+                except Exception:
+                    dev = "cpu"
+                _P._model = _CoquiTTS(model_name).to(dev)
+            return _P._model
+
+        def _one(self, text: str, lang: str, wav: Path) -> None:
+            if server:
+                import requests
+
+                payload = {"text": text, "language": lang,
+                           "speaker_wav": speaker_wav or speaker}
+                r = requests.post(f"{server}/tts_to_audio/", json=payload, timeout=300)
+                r.raise_for_status()
+                wav.write_bytes(r.content)
+                return
+            kw = {"text": text, "language": lang, "file_path": str(wav),
+                  "speed": speed}
+            if speaker_wav:
+                kw["speaker_wav"] = speaker_wav
+            else:
+                kw["speaker"] = speaker
+            self._local().tts_to_file(**kw)
+
+        def synthesize_beats(self, sentences, voice, beats_dir):
+            import subprocess
+
+            from .util import which_ffmpeg
+
+            lang = (cfg.get("xtts_language") or "en").split("-")[0]
+            beats_dir = Path(beats_dir)
+            beats_dir.mkdir(parents=True, exist_ok=True)
+            cues: list[TimedCue] = []
+            files: list[Path] = []
+            cum = 0.0
+            for i, stmt in enumerate(sentences):
+                wav = beats_dir / f"beat_{i+1:03d}.wav"
+                mp3 = beats_dir / f"beat_{i+1:03d}.mp3"
+                self._one(stmt, lang, wav)
+                subprocess.run([which_ffmpeg(), "-y", "-v", "error", "-i", str(wav),
+                                "-c:a", "libmp3lame", "-b:a", "192k", str(mp3)],
+                               check=True, capture_output=True)
+                try:
+                    wav.unlink()
+                except OSError:
+                    pass
+                _w, dur = _finish_beat(mp3)
+                cues.append(TimedCue(stmt.strip(), cum, cum + dur))
+                cum += dur
+                files.append(mp3)
+            return cues, files
+
+        def synthesize(self, sentences, voice, out_mp3):
+            cues, files = self.synthesize_beats(sentences, voice, out_mp3.parent / "beats")
+            _concat(files, out_mp3)
+            return cues
+
+    return _P()
+
+
+def rate_speed_factor_local(rate) -> float:
+    """'+12%' -> 1.12 (XTTS takes a speed multiplier, not an SSML rate)."""
+    try:
+        return 1.0 + float(str(rate or "+0%").strip().strip("%")) / 100.0
+    except ValueError:
+        return 1.0
+
+
 def _concat(files: list[Path], out: Path) -> None:
+    """Join sentence clips into one narration track.
+
+    Decoded and re-encoded through ffmpeg's concat demuxer: byte-joining
+    mp3s that carry their own Xing/LAME headers (every re-encoded clip does)
+    makes players and ffprobe report the FIRST clip's length for the whole
+    file and inserts encoder-delay gaps at every join. Byte concatenation
+    remains as the fallback (e.g. mock audio in tests)."""
     out.parent.mkdir(parents=True, exist_ok=True)
+    files = [Path(f) for f in files]
+    try:
+        import subprocess
+
+        from .util import which_ffmpeg
+
+        lst = out.with_suffix(".concat.txt")
+        lst.write_text("".join(
+            "file '" + str(f.resolve()).replace("'", "'\\''") + "'\n"
+            for f in files), encoding="utf-8")
+        tmp = out.with_suffix(".joining" + out.suffix)
+        subprocess.run(
+            [which_ffmpeg(), "-y", "-v", "error", "-f", "concat", "-safe", "0",
+             "-i", str(lst), "-c:a", "libmp3lame", "-b:a", "192k", str(tmp)],
+            check=True, capture_output=True)
+        if tmp.exists() and tmp.stat().st_size > 0:
+            tmp.replace(out)
+            try:
+                lst.unlink()
+            except OSError:
+                pass
+            return
+    except Exception:
+        pass
     with open(out, "wb") as o:
         for f in files:
             o.write(f.read_bytes())

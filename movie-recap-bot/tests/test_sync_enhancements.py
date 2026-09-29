@@ -79,6 +79,7 @@ def test_whisperx_word_structure_compatibility() -> None:
                 "model": "small",
                 "device": "auto",
                 "lang": "",
+                "align_model": align.DEFAULT_ALIGN_MODEL,
             },
             sort_keys=True,
         )

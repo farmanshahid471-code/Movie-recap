@@ -374,6 +374,15 @@ def build_timeline(
     # overrun, which is the closest thing to "cut, then pad the shot".
     slow_mo_before_freeze = bool(cfg.get("slow_mo_before_freeze", True))
     scene_bounds = sorted(scene_bounds or [])
+    # AUDIO-FIRST CUTTING (default): every sentence becomes ONE clip that
+    # starts at the sentence's film anchor and runs for EXACTLY the measured
+    # audio duration at 1x, playing straight through the film's own shot
+    # changes. No slow motion (setpts), no held frames (tpad), no B-roll
+    # borrowing: the picture is never stretched to fit the voice. The film
+    # playhead still never rewinds (strict monotonic progression); a held
+    # frame survives only at the very end of the movie, where no film is left.
+    audio_first = bool(cfg.get("audio_first", True))
+    broll = bool(cfg.get("broll", False)) and not audio_first
 
     n = min(len(sentences), len(durations))
     if n == 0:
@@ -465,7 +474,12 @@ def build_timeline(
         #    editing choice, a 0.3x crawl reads as a broken render.
         entry = max(f0, film_playhead)
         room = ceiling - entry
-        if ceiling > f1 + 1e-6 and total_nar > 0 and room > 0:
+        if not broll:
+            # B-ROLL DISABLED: a section may not wander into film nobody
+            # narrates to pad itself out.
+            ceiling = f1
+            room = ceiling - entry
+        if broll and ceiling > f1 + 1e-6 and total_nar > 0 and room > 0:
             # how much of the gap this section actually SPENT (own window
             # first, then the un-narrated film beyond it)
             _film_used = min(room, total_nar * min(1.0, max(room / total_nar, 0.0)))
@@ -478,8 +492,8 @@ def build_timeline(
             ideal = room / total_nar
         else:
             ideal = 0.0
-        starved = ideal < min_speed
-        if room <= 0 or ideal >= 1.0:
+        starved = ideal < min_speed and not audio_first
+        if audio_first or room <= 0 or ideal >= 1.0:
             grp_speed = 1.0
         elif starved and not slow_mo_before_freeze:
             grp_speed = 1.0        # freeze-only padding: never slow the picture
@@ -502,6 +516,65 @@ def build_timeline(
             film_pos = f0 + (acc / total_nar) * span
             film_span = (d / total_nar) * span
             film_pos = max(film_pos, playhead)
+
+            if audio_first:
+                # Start at the sentence's absolute anchor (the transcript
+                # timestamp the writer tagged it with), never before the
+                # film playhead; run exactly ``d`` seconds of film at 1x.
+                a = sentences[i].get("anchor")
+                if a is not None:
+                    desired = float(a) - pre_roll
+                else:
+                    desired = float(sentences[i].get("film_start", film_pos)
+                                    or film_pos)
+                zl = sentences[i].get("zone_lo")
+                if zl is not None:
+                    desired = max(desired, float(zl))
+                desired = max(desired, 0.0)
+                start = max(desired, film_playhead)
+                if start > desired + 1e-9:
+                    pushed += 1
+                if beats and 0.0 < start - film_playhead < min_new:
+                    start = film_playhead   # continue instead of a micro-jump
+                if scene_bounds:
+                    s2 = _snap_to_boundary(start, scene_bounds, snap_tol)
+                    if s2 != start and s2 >= film_playhead:
+                        start = s2
+                        snapped += 1
+                    else:
+                        # the START has no camera cut nearby: land the clip's
+                        # END on one instead (PySceneDetect boundary), so the
+                        # next sentence opens on a real shot change -- no
+                        # one-frame "flash" of the next shot. Duration stays
+                        # exactly the audio length; only the start slides.
+                        e2 = _snap_to_boundary(start + d, scene_bounds, snap_tol)
+                        s3 = e2 - d
+                        if e2 != start + d and s3 >= film_playhead - 1e-9 \
+                                and s3 >= 0.0:
+                            start = s3
+                            snapped += 1
+                moving = d
+                if movie_dur > 0:
+                    start = min(start, movie_dur)
+                    if start + moving > movie_dur:
+                        moving = max(movie_dur - start, 0.0)
+                freeze = max(d - moving, 0.0)
+                if freeze > 1e-6:
+                    held += 1         # end-of-film only
+                film_playhead = start + moving
+                beats.append(
+                    {
+                        "index": i,
+                        "sentence": sentences[i].get("sentence", ""),
+                        "film_start": round(start, 3),
+                        "film_end": round(start + moving, 3),
+                        "duration": round(d, 3),
+                        "cuts": [[start, d, freeze, 1.0]],
+                    }
+                )
+                acc += d
+                playhead = max(playhead, start)
+                continue
 
             # word-measured switch points inside this sentence (narration clock)
             fracs = None
@@ -951,3 +1024,75 @@ def timeline_report(beats: list[dict], audio_span: float,
         f"chronological={'yes' if monotone else 'NO'}, "
         f"film coverage {min(starts, default=0):.0f}s -> {max(starts, default=0):.0f}s"
     )
+
+
+# ---------------------------------------------------------------------------
+# Stand-alone audio-first assembly from a beats JSON
+# ---------------------------------------------------------------------------
+def load_beat_plan(beats_json_path) -> list[tuple[float, float]]:
+    """``[(visual_start, audio_duration), ...]`` from a beats JSON.
+
+    Accepts the pipeline's ``beats_<code>.json`` (``cuts`` per beat, written
+    after WhisperX alignment) and plain ``[{"film_start", "duration"}]``
+    lists. ``duration`` is the WhisperX-measured spoken length of the
+    sentence; ``film_start`` its anchor.
+    """
+    import json
+    from pathlib import Path
+
+    beats = json.loads(Path(beats_json_path).read_text(encoding="utf-8"))
+    plan: list[tuple[float, float]] = []
+    for b in beats or []:
+        cuts = b.get("cuts") if isinstance(b, dict) else None
+        if cuts:
+            for c in cuts:
+                plan.append((float(c[0]), float(c[1])))
+            continue
+        if isinstance(b, dict) and "duration" in b:
+            start = b.get("film_start", b.get("start", 0.0))
+            plan.append((float(start or 0.0), float(b["duration"])))
+    return plan
+
+
+def assemble_timeline(beats_json_path, source_video, output_dir,
+                      *, backend: str = "ffmpeg", fps: int = 30) -> list:
+    """Cut one clip per beat: ``-ss film_start -t audio_duration`` (exact).
+
+    ``backend="ffmpeg"`` re-encodes each clip with libx264 at exactly the
+    audio length (``clip.cut_segment``, frame-accurate). ``backend="moviepy"``
+    (``pip install moviepy``) builds the same clips with
+    ``VideoFileClip.subclip(start, start + duration)`` -- Zulko/moviepy does
+    the audio/video duration math. Returns the clip paths in play order.
+    """
+    from pathlib import Path
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plan = load_beat_plan(beats_json_path)
+    paths = []
+    if backend == "moviepy":
+        try:
+            from moviepy.editor import VideoFileClip  # type: ignore
+        except Exception:
+            from moviepy import VideoFileClip  # type: ignore  (moviepy 2.x)
+        src = VideoFileClip(str(source_video))
+        try:
+            for k, (start, dur) in enumerate(plan):
+                out = out_dir / f"clip_{k + 1:04d}.mp4"
+                end = min(start + dur, float(src.duration))
+                sub = (src.subclip(start, end) if hasattr(src, "subclip")
+                       else src.subclipped(start, end))
+                sub.write_videofile(str(out), codec="libx264", audio=False,
+                                    fps=fps, logger=None)
+                paths.append(out)
+        finally:
+            src.close()
+        return paths
+    from . import clip as _clip
+
+    for k, (start, dur) in enumerate(plan):
+        out = out_dir / f"clip_{k + 1:04d}.mp4"
+        _clip.cut_segment(Path(source_video), out, start, dur, {"fps": fps},
+                          mode="reencode", exact=True)
+        paths.append(out)
+    return paths

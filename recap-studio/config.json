@@ -8,7 +8,7 @@
   "scene_len": 6.0,
   "voice_en": "en-US-ChristopherNeural",
   "voice_zh": "zh-CN-YunjianNeural",
-  "rate": "-8%",
+  "rate": "+12%",
   "subtitle_lang_en": "en",
   "subtitle_lang_zh": "zh",
   "llm_provider": "deepseek",

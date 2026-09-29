@@ -33,9 +33,9 @@ _DEFAULTS: dict[str, Any] = {
                        "zh": "zh-CN-YunjianNeural",
                        "ar": "ar-SA-HamedNeural",    # Modern Standard Arabic
                        "es": "es-MX-JorgeNeural"},   # Latin American Spanish
-        "rate": "+0%",
+        "rate": "+12%",
         # edge-tts pitch shift in Hz ("-6Hz" deeper, "+6Hz" brighter; "-0Hz" = off)
-        "pitch": "-0Hz",
+        "pitch": "-2%",
         "tts_provider": "edge",
         # Re-run the GENERATED narration audio through faster-whisper and lock
         # every cue (and word) to what is actually spoken. Works with ANY TTS
@@ -166,8 +166,13 @@ _DEFAULTS: dict[str, Any] = {
         # - Audio stretching: speeds up TTS audio up to max_atempo (1.15x) via atempo
         # - Video freeze-framing: freezes final frame of video beat if narration overruns
         # - Silence padding: inserts silence at end of TTS file if video beat is longer
-        "dynamic_retiming": True,
+        "dynamic_retiming": False,
         "max_atempo": 1.15,
+        # AUDIO-FIRST cutting: each sentence = one 1x clip from its anchor
+        # timestamp lasting exactly its measured audio; no slow-mo/freeze.
+        "audio_first": True,
+        # B-roll borrowing of un-narrated film (legacy visual-first mode only).
+        "broll": False,
     },
     # Whisper ASR tuning (auto-recap from the movie's own audio).
     "dialogue": {
@@ -182,8 +187,8 @@ _DEFAULTS: dict[str, Any] = {
     # windows never overflow. Windows of `window_seconds` sliding by
     # `window_seconds - overlap_seconds`, each carrying 30s of context.
     "chunking": {
-        "window_seconds": 180.0,   # 3-minute blocks (maximum-precision mode)
-        "overlap_seconds": 30.0,   # overlap between adjacent blocks
+        "window_seconds": 1200.0,  # 20-minute blocks: full story-arc context
+        "overlap_seconds": 120.0,  # overlap between adjacent blocks
         "parallel": False,         # Ollama is single-user; keep serial by default
         "model": None,             # optional smaller/faster model for the
                                    # chunk-summary pass, e.g. "qwen2.5:3b"

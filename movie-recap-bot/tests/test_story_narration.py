@@ -66,18 +66,17 @@ def test_unit_prompt_asks_for_story_not_description() -> None:
         total_units=1, film_duration=600.0,
     )
     # the storytelling voice is present...
-    assert "not captioning the picture" in system
-    assert "CAUSE LEADS TO CONSEQUENCE" in system
-    assert "NEVER INVENT" in system
-    assert "A description of the frame is not a sentence in a story" in system.lower() or \
-           "A DESCRIPTION OF THE FRAME IS NOT A SENTENCE IN A STORY" in system
+    assert system.startswith("You are a master scriptwriter for a hit YouTube movie recap channel.")
+    assert "NO CAMERA WORDS" in system and '"we see"' in system
+    assert "third-person, present tense" in system
+    assert "JSON array of objects" in system and "`timestamp`" in system
     # ...and so is the anti-description contract in the user prompt
     assert "shot description" in user.lower()
     # the facts arrive labelled with their EXACT film ranges and budgets
     assert "[B1]" in user and "[B4]" in user
     assert narrative.format_window(units[0]["beats"][0]["start_ts"],
                                    units[0]["beats"][0]["end_ts"]) in user
-    assert "words max" in user
+    assert "about" in user and "words" in user  # per-beat word budget
     print("ok: unit prompt asks for a story, with labelled film ranges")
 
 
@@ -263,7 +262,7 @@ def test_write_story_script_end_to_end(monkeypatch) -> None:
 
     def fake_ask(cfg_llm, system, user, *, max_tokens, temperature=None):
         calls.append(user)
-        assert "CAUSE LEADS TO CONSEQUENCE" in system
+        assert "NO CAMERA WORDS" in system
         # answer in the documented shape, one beat per beat of the unit
         unit_beats = [b for b in user.split("[B") if b]
         n = len([ln for ln in user.splitlines() if ln.startswith("[B")])
@@ -287,9 +286,10 @@ def test_write_story_script_end_to_end(monkeypatch) -> None:
     assert result["report"]["description"]["flagged"] == 0
     assert result["report"]["chronology_moved"] == 0
     # the SECOND unit's prompt must carry the continuity ledger from the first
-    if len(calls) > 1:
-        assert "STORY SO FAR" in calls[1]
-        assert "Something changes in beat" in calls[1], \
+    unit2 = [c for c in calls if c.startswith("Write story unit 2 ")]
+    if unit2:
+        assert "STORY SO FAR" in unit2[0]
+        assert "Something changes in beat" in unit2[0], \
             "the previous unit's recap must reach the next unit"
     print(f"ok: story script {len(segs)} sentences, "
           f"{result['report']['words']} words, strictly chronological")
@@ -486,3 +486,18 @@ def test_story_segments_drive_a_1x_timeline(monkeypatch) -> None:
     assert timeline.cut_order_violations(timeline.flatten_cuts(btl)) == []
     print(f"ok: {len(segs)} story sentences -> timeline at 1x, "
           f"nothing frozen, no replays")
+
+
+def test_timestamp_array_contract_sets_anchors() -> None:
+    beats = _beats(3, dur=12.0, start=100.0)
+    units = story.group_into_units(beats, {"unit_seconds": 60.0}, wpm=175)
+    unit = units[0]
+    raw = ('[{"timestamp": 101.5, "sentence": "Buzz pushes through the jungle."},'
+           ' {"timestamp": 118.25, "sentence": "Three figures run."},'
+           ' {"timestamp": 110.0, "sentence": "Rewind is clamped."}]')
+    items, _ = story.parse_unit_reply(raw, len(unit["beats"]), unit["beats"])
+    assert [i["t"] for i in items] == [101.5, 118.25, 118.25]
+    assert [i["b"] for i in items] == [1, 2, 2]
+    segs = story.unit_to_segments(unit, items, prev_end=100.0, movie_duration=600.0)
+    assert abs(segs[0]["anchor"] - 101.5) < 1e-6
+    assert abs(segs[1]["anchor"] - 118.25) < 1e-6

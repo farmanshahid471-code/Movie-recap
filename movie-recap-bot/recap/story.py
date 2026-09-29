@@ -84,6 +84,9 @@ DEFAULT_CFG: dict = {
     # (and for sentences whose words appear nowhere in the beat they claim).
     "repair": True,
     "repair_batch": 12,
+    # A unit that returns less than this share of its word budget gets one
+    # "you are N words short" retry (short units = a short video).
+    "min_fill": 0.9,
 }
 
 
@@ -191,45 +194,79 @@ def group_into_units(
 # Prompt construction
 # ---------------------------------------------------------------------------
 
-STORY_SYSTEM = (
-    NARRATOR_PERSONA
-    + narrative.STORY_RULES
-    + narrative.STORY_RHYTHM
-    + """
-YOUR JOB RIGHT NOW
-You are writing one STORY UNIT of the recap — a stretch of the film of about
-a minute — which will be read aloud over exactly that footage. You are given
-the facts of the unit, labelled by the beat they belong to, each with the
-film range it covers.
+# The master system prompt (timestamped-array contract). Used verbatim; the
+# unit-specific facts, budget and continuity go in the user message.
+YOUTUBER_SYSTEM = """You are a master scriptwriter for a hit YouTube movie recap channel. Your job is to convert raw transcript dialogue and sparse visual notes into a fast-paced, continuous story.
 
-Output ONLY a JSON object, no prose before or after, in this exact shape:
+CRITICAL RULES:
+1. NO CAMERA WORDS: Never use "we see", "the camera shows", "the scene transitions", "is visible", or "appears".
+2. STORYTELLING ONLY: Write in third-person, present tense. Focus only on character actions and plot.
+3. PACING: Keep sentences short and punchy.
 
-{"beats": [{"b": 1, "sentences": ["First sentence.", "Second sentence."]},
-           {"b": 2, "sentences": ["..."]}],
- "recap": "One line: what changed in this stretch of the story."}
-
-Rules for the JSON:
-- "b" is the beat label number (1 = B1) and must never move backwards.
-- EVERY beat that holds a real event gets at least one sentence, and each
-  sentence is tagged with the beat whose facts it narrates — a sentence may
-  never narrate footage from another beat.
-- "recap" is one short line (max ~20 words) summarising what the viewer now
-  knows, used to keep the next unit's continuity. It is never read aloud.
+OUTPUT FORMAT:
+You MUST output a JSON array of objects. Each object must have a `timestamp` (the exact starting timestamp of the dialogue or action from the prompt) and a `sentence` (your rewritten story sentence).
+Example:
+[
+  {"timestamp": 137.125, "sentence": "Buzz pushes through the dense, green jungle."},
+  {"timestamp": 147.750, "sentence": "Three identical action figures run through the thick undergrowth."}
+]
 """
-)
+
+STORY_SYSTEM = YOUTUBER_SYSTEM
+
+
+# Source mix fed to the writer: ~80% transcript, ~20% vision. Vision notes
+# may take at most this share of a beat's fact text when there is dialogue;
+# a SILENT beat (no dialogue at all) gets its vision notes in full, since
+# that is exactly the gap vision exists to fill.
+VISION_SHARE = 0.20
+_SILENT_VISION_CHARS = 600
+
+
+def _fmt_ts(seconds) -> str:
+    """``[t=137.125 | 00:02:17] `` -- the exact seconds value the writer must
+    copy into ``timestamp``, plus a readable clock."""
+    try:
+        v = max(float(seconds), 0.0)
+    except (TypeError, ValueError):
+        return ""
+    t = int(v)
+    return f"[t={v:.3f} | {t // 3600:02d}:{(t % 3600) // 60:02d}:{t % 60:02d}] "
 
 
 def _format_facts(beat: dict) -> str:
-    """The dialogue + visual ground truth of one beat, as story material."""
-    lines: list[str] = []
+    """The dialogue + visual ground truth of one beat, as story material.
+
+    Transcript first and dominant (each line carries its exact Whisper
+    timestamp); vision captions are capped at ``VISION_SHARE`` of the text
+    and labelled as silent action.
+    """
+    said: list[str] = []
     for c in beat.get("transcript_lines") or []:
         text = (c.get("text") or "").strip()
         if text:
-            lines.append(f"    said: {text}")
+            said.append(f"    said {_fmt_ts(c.get('start'))}{text}".rstrip())
+    said_chars = sum(len(x) for x in said)
+    if said_chars:
+        budget = max(int(said_chars * VISION_SHARE / (1.0 - VISION_SHARE)), 60)
+    else:
+        budget = _SILENT_VISION_CHARS
+    seen: list[str] = []
+    used = 0
     for v in beat.get("vision_notes") or []:
         text = (v.get("text") or "").strip() if isinstance(v, dict) else str(v).strip()
-        if text:
-            lines.append(f"    seen: {text}")
+        if not text:
+            continue
+        room = budget - used
+        if room < 25:
+            break
+        if len(text) > room:
+            cut = text[:room].rsplit(" ", 1)[0].rstrip(",;: ")
+            text = cut + "..."
+        ts = _fmt_ts(v.get("t")) if isinstance(v, dict) else ""
+        seen.append(f"    silent action {ts}{text}".rstrip())
+        used += len(text)
+    lines = said + seen
     if not lines:
         return "    (no dialogue or visual caption for this beat)"
     return "\n".join(lines)
@@ -273,10 +310,11 @@ def build_unit_prompt(
         dur = max(hi - lo, 0.0)
         beat_lines.append(
             f"[{b['label']}] {narrative.format_window(lo, hi)} "
-            f"({dur:.0f}s of footage — at most {b['max_words']} words)\n"
+            f"({dur:.0f}s of footage — about {b['max_words']} words)\n"
             f"{_format_facts(b)}"
         )
-        budget_lines.append(f"  {b['label']}: {b['max_words']} words max")
+        budget_lines.append(f"  {b['label']} ({narrative.format_window(lo, hi)}): "
+                            f"about {b['max_words']} words")
 
     story_so_far = ledger.get("recaps") or []
     last_line = (ledger.get("last") or "").strip()
@@ -317,14 +355,19 @@ WHAT THIS PART OF THE STORY MUST DO:
 WHAT HAPPENS IN THIS STRETCH (your only source of facts):
 {chr(10).join(beat_lines)}
 
-WORD BUDGET (hard: the footage is this long and the voice reads ~175 words a minute):
+WORD BUDGET (the narration must FILL this footage; the video length depends on it):
 {chr(10).join(budget_lines)}
-  whole unit: {unit['budget_words']} words maximum, aim for about {aim} sentences.
+  whole unit: {unit['budget_words']} words -- write between {int(unit['budget_words'] * 0.92)} and {unit['budget_words']} words, about {aim} sentences.
+  Falling short makes the whole recap shorter than requested; going over breaks sync.
 
-Write it as the narrator TOLD us about this stretch of the film: cause and
-effect, people wanting things, a short beat where the moment lands. Not one single line of shot description.
+TIMESTAMPS: every fact above starts with [t=SECONDS | HH:MM:SS]. Each sentence's
+"timestamp" is the t= SECONDS value of the dialogue or action it narrates,
+copied exactly (a number, e.g. 137.125). Timestamps never go backwards and
+must lie inside this unit's film range. Cover every stretch in order.
 
-Respond with ONLY the JSON object.""" + _language_block(lang_name)
+No shot description: tell the story, never caption the picture.
+
+Respond with ONLY the JSON array.""" + _language_block(lang_name)
     return STORY_SYSTEM + _language_block(lang_name), user
 
 
@@ -388,7 +431,42 @@ def _label_of(item: dict, n: int) -> int | None:
     return None
 
 
-def parse_unit_reply(raw: str, n_beats: int) -> tuple[list[dict], str]:
+def _timestamp_of(item: dict) -> float | None:
+    """The writer's ``timestamp`` (seconds, or an HH:MM:SS / MM:SS string)."""
+    for key in ("timestamp", "t", "time", "start", "ts"):
+        if key not in item:
+            continue
+        raw = item[key]
+        try:
+            return max(float(raw), 0.0)
+        except (TypeError, ValueError):
+            pass
+        m = re.fullmatch(r"\s*\[?(?:t=)?(\d+):(\d{1,2})(?::(\d{1,2}(?:\.\d+)?))?\]?\s*",
+                         str(raw))
+        if m:
+            a, b, c = m.group(1), m.group(2), m.group(3)
+            if c is None:
+                return int(a) * 60 + float(b)
+            return int(a) * 3600 + int(b) * 60 + float(c)
+    return None
+
+
+def _beat_for_time(t: float, beats: list[dict]) -> int:
+    """1-based index of the beat whose film range holds ``t`` (nearest)."""
+    best, best_d = 1, float("inf")
+    for k, b in enumerate(beats, start=1):
+        lo = float(b.get("start_ts", 0.0) or 0.0)
+        hi = float(b.get("end_ts", lo) or lo)
+        if lo - 1e-6 <= t < hi + 1e-6:
+            return k
+        d = min(abs(t - lo), abs(t - hi))
+        if d < best_d:
+            best, best_d = k, d
+    return best
+
+
+def parse_unit_reply(raw: str, n_beats: int,
+                     beats: list[dict] | None = None) -> tuple[list[dict], str]:
     """Parse one unit reply into ``[{"b", "sentence"}, ...]`` in reading order.
 
     Accepts the documented shape (``{"beats": [{"b": 1, "sentences": [...]}]}``)
@@ -403,6 +481,45 @@ def parse_unit_reply(raw: str, n_beats: int) -> tuple[list[dict], str]:
     data = _loads(text)
     recap = ""
     items: list[tuple[int | None, str]] = []
+
+    # PRIMARY CONTRACT: [{"timestamp": 137.125, "sentence": "..."}, ...]
+    # (also accepted wrapped as {"sentences": [...]} / {"lines": [...]}).
+    arr = data
+    if isinstance(data, dict):
+        for key in ("sentences", "lines", "script", "narration", "items"):
+            if isinstance(data.get(key), list):
+                arr = data[key]
+                break
+    if isinstance(arr, list) and arr and all(isinstance(it, dict) for it in arr) \
+            and any(_timestamp_of(it) is not None for it in arr) \
+            and any(isinstance(it.get("sentence") or it.get("text"), str) for it in arr):
+        rec = data.get("recap") if isinstance(data, dict) else ""
+        out: list[dict] = []
+        running_t = None
+        running_b = 1
+        for it in arr:
+            sent = _clean_sentence(it.get("sentence") or it.get("text") or "")
+            if not sent or sent == ".":
+                continue
+            t = _timestamp_of(it)
+            if t is None:
+                t = running_t
+            if t is not None and running_t is not None and t < running_t:
+                t = running_t                 # CHRONOLOGY: never rewind
+            if t is not None:
+                running_t = t
+            if beats and t is not None:
+                lbl = _beat_for_time(t, beats)
+            else:
+                lbl = _label_of(it, max(n_beats, 1)) or running_b
+            lbl = min(max(int(lbl), running_b), max(n_beats, 1))
+            running_b = lbl
+            row = {"b": lbl, "sentence": sent}
+            if t is not None:
+                row["t"] = round(float(t), 3)
+            out.append(row)
+        if out:
+            return out, str(rec or "").strip()
 
     if isinstance(data, dict):
         recap = str(data.get("recap") or data.get("summary") or "").strip()
@@ -607,6 +724,7 @@ def unit_to_segments(
 
     segments: list[dict] = []
     cursor = float(prev_end)
+    last_anchor = float(prev_end)
     for lbl in order:
         items_here = grouped.get(lbl) or []
         if not items_here:
@@ -634,11 +752,18 @@ def unit_to_segments(
             s_hi = s_lo + share
             if s_hi <= s_lo:
                 s_hi = s_lo + 0.3
+            # The writer's exact timestamp is the ABSOLUTE anchor the clip is
+            # cut from (clamped into this beat's range, never rewinding).
+            anchor = (s_lo + s_hi) / 2.0
+            if it.get("t") is not None:
+                anchor = min(max(float(it["t"]), lo), hi)
+                anchor = max(anchor, last_anchor)
+            last_anchor = anchor
             segments.append({
                 "sentence": it["sentence"],
                 "film_start": round(s_lo, 3),
                 "film_end": round(s_hi, 3),
-                "anchor": round((s_lo + s_hi) / 2.0, 3),
+                "anchor": round(anchor, 3),
                 "zone_lo": round(lo, 3),
                 "zone_hi": round(hi, 3),
                 "beat": lbl,
@@ -745,14 +870,20 @@ def _ask(
     *,
     max_tokens: int,
     temperature: float | None = None,
+    json_mode: bool | None = None,
 ) -> str:
+    # The unit writer answers with a bare JSON ARRAY, which the provider's
+    # json_object response mode would reject; the repair pass returns an
+    # object and keeps json mode.
+    if json_mode is None:
+        json_mode = "JSON array" not in system
     return llm_mod.complete(
         cfg_llm.get("provider", ""),
         cfg_llm.get("model", ""),
         system,
         user,
         base_url=cfg_llm.get("base_url"),
-        json_mode=True,
+        json_mode=json_mode,
         max_tokens=max_tokens,
         temperature=temperature,
     )
@@ -813,16 +944,17 @@ def write_story_script(
         max_tokens = _out_tokens_for_words(max(unit["budget_words"], 60))
         budget = max(int(unit["budget_words"]), 8)
         raw = _ask(cfg_llm, system, user, max_tokens=max_tokens)
-        items, recap = parse_unit_reply(raw, len(unit["beats"]))
+        items, recap = parse_unit_reply(raw, len(unit["beats"]), unit["beats"])
         if not items:
             # one retry, told exactly what was wrong
             raw = _ask(
                 cfg_llm, system,
                 user + "\n\nYour previous answer was not usable JSON or had no "
-                       "sentences. Reply with ONLY the JSON object.",
+                       "sentences. Reply with ONLY the JSON array of "
+                       "{\"timestamp\", \"sentence\"} objects.",
                 max_tokens=max_tokens,
             )
-            items, recap = parse_unit_reply(raw, len(unit["beats"]))
+            items, recap = parse_unit_reply(raw, len(unit["beats"]), unit["beats"])
         if not items:
             raise StoryError(f"unit {unit['index'] + 1}: model returned no sentences")
 
@@ -834,9 +966,25 @@ def write_story_script(
             note += "story event:\n" + "\n".join(
                 f"  {lbl}: {wc} words, {mx} allowed" for lbl, wc, mx in over)
             raw = _ask(cfg_llm, system, user + note, max_tokens=max_tokens)
-            items2, recap2 = parse_unit_reply(raw, len(unit["beats"]))
+            items2, recap2 = parse_unit_reply(raw, len(unit["beats"]), unit["beats"])
             if items2 and len(items2) >= max(1, len(items) - 2):
                 items, recap = items2, recap2 or recap
+        # ---- LENGTH: an under-filled unit makes the whole video short ------
+        # (the reported "asked for 1500s, got 1300s"). One retry that states
+        # the exact shortfall; the longer answer wins if it stays in budget.
+        _got = sum(count_words(i["sentence"]) for i in items)
+        _fill = float(cfg.get("min_fill", 0.9))
+        if _got < budget * _fill and budget >= 20:
+            note = (f"\n\nYour previous answer was only {_got} words, but this "
+                    f"footage needs about {budget} words (at least "
+                    f"{int(budget * _fill)}). Rewrite it with more story "
+                    "detail -- motives, reactions, consequences -- covering "
+                    "every stretch in order. Same JSON array format.")
+            raw = _ask(cfg_llm, system, user + note, max_tokens=max_tokens)
+            items3, recap3 = parse_unit_reply(raw, len(unit["beats"]), unit["beats"])
+            _got3 = sum(count_words(i["sentence"]) for i in items3)
+            if items3 and _got3 > _got:
+                items, recap = items3, recap3 or recap
         tightened = 0
         if _over_budget_beats(unit, items):
             items, tightened = _tighten_items(unit, items)
@@ -848,6 +996,10 @@ def write_story_script(
         prev_end = max(prev_end, max(float(s["film_end"]) for s in segs))
         segments.extend(segs)
         sentences.extend(it["sentence"] for it in items)
+        if not recap and items:
+            # the array contract carries no recap line: keep continuity
+            # from the unit's closing sentence
+            recap = items[-1]["sentence"]
         _update_ledger(ledger, items, recap)
 
         if progress:
@@ -941,8 +1093,7 @@ def _tighten_items(unit: dict, items: list[dict]) -> tuple[list[dict], int]:
 # ---------------------------------------------------------------------------
 
 REPAIR_SYSTEM = (
-    NARRATOR_PERSONA
-    + narrative.STORY_RULES
+    YOUTUBER_SYSTEM
     + narrative.REWRITE_RULES
     + """
 Output ONLY a JSON object: {"sentences": [{"i": <index>, "text": "..."}]}

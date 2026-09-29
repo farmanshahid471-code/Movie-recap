@@ -72,7 +72,7 @@ DEFAULT_CONFIG = {
     "voice_zh": "zh-CN-YunjianNeural",
     "voice_ar": "ar-SA-HamedNeural",     # Modern Standard Arabic (male)
     "voice_es": "es-MX-JorgeNeural",     # Latin American Spanish (Mexico, male)
-    "rate": "-8%",                       # edge-tts pace: +X% faster, -X% slower
+    "rate": "+12%",                      # edge-tts pace: +X% faster, -X% slower
     "subtitle_lang_en": "en",
     "subtitle_lang_zh": "zh",
     "subtitle_lang_ar": "ar",
@@ -474,7 +474,7 @@ def _apply_common(rc: dict, cfg: dict, lang: str | None = None) -> None:
     # Pacing is user-tunable now ("-8%" = calm storyteller read). Scale the
     # word target by the pace factor so the finished mp3 still lands on the
     # requested duration instead of running ~8% long.
-    pace = str(cfg.get("rate") or "-8%").strip() or "+0%"
+    pace = str(cfg.get("rate") or "+12%").strip() or "+0%"
     if not pace.endswith("%"):
         pace += "%"
     rc["narration"]["rate"] = pace
@@ -495,6 +495,10 @@ def _apply_common(rc: dict, cfg: dict, lang: str | None = None) -> None:
         wpm = int(rc["narration"].get("words_per_minute", 150))
         words = max(int(round(secs / 60 * wpm * factor)), 120)
         rc["narration"]["words_target"] = words
+        # Seconds are the contract: the pipeline converts them with the
+        # voice's MEASURED rate and its learned length correction, so a
+        # 1500s request lands on ~1500s instead of ~1300s.
+        rc["narration"]["target_seconds"] = secs
         rc["narration"]["words_min"] = min(
             int(rc["narration"].get("words_min", 600)), words
         )

@@ -1197,3 +1197,35 @@ Also fixed at the edges:
 * a failed summary chunk names its index and the resume point;
 * replacement preference (`-v4-pro` over `-flash`) and never re-suggesting a
   known-broken name.
+
+---
+
+## Story flow, storytelling and audio-first sync (latest round)
+
+| Area | Change |
+|---|---|
+| Chronology | `match.map_beats` is time-gated: each search only considers cues with `start >= previous match end` (`match_cues(..., min_start_ms)` in `migrations/001_pgvector.sql`, **re-run it in Supabase**). A weak match falls back to the sentence's chronological timestamp, never a random similar clip. |
+| B-roll | `timeline.broll: false` — sections no longer borrow un-narrated film. |
+| Anchors | The section writer prefixes every sentence with the `[HH:MM:SS]` of the beat it narrates; `script.extract_timestamp_anchors` strips it and uses it as the absolute clip anchor. |
+| Truncation | DeepSeek calls always request `max_tokens=8192` (`DEEPSEEK_MAX_TOKENS` overrides). |
+| Storytelling | `story.py` uses the strict "YouTube recap scriptwriter" system prompt; writer facts are ~80% transcript (with timestamps) and ≤20% vision ("silent action"). |
+| Sync | `timeline.audio_first: true` — each sentence = one 1x clip from its anchor lasting exactly its audio. No `setpts` slow-mo, no `tpad` freeze (except when the film itself ends), no atempo retiming. Set `audio_first: false` for the old behaviour. |
+| Pacing | edge-tts prosody `rate="+12%" pitch="-2%"` (pitch converted to Hz for edge-tts). |
+| Dead air | After WhisperX alignment every line is cut to first-word-start → last-word-end on waveform zero crossings with a 3 ms fade (`narration.trim_dead_air`, `trim_gap_ms`). |
+| Alignment | WhisperX uses `WAV2VEC2_ASR_LARGE_LV60K_960H` for English (`RECAP_ALIGN_MODEL` overrides). |
+
+---
+
+## Round 3: uncapped DeepSeek, timestamped story contract, length lock
+
+| Area | Change |
+|---|---|
+| DeepSeek output | **Uncapped.** Every DeepSeek call asks for the model's full output window whatever the caller computed: `deepseek-chat` 8192, `deepseek-reasoner` 65536, other names (e.g. `deepseek-flash`) 65536 first. If the endpoint answers "valid range of max_tokens is [1, N]" the call is retried at N and N is remembered. `presence_penalty=0.5` (`LLM_PRESENCE_PENALTY`). |
+| Story prompt | `story.py` uses the "master scriptwriter" system prompt verbatim. The writer returns a JSON array of `{"timestamp": seconds, "sentence": ...}`; each timestamp becomes the sentence's absolute clip anchor (clamped to its beat, never rewinding). Facts carry `[t=SECONDS | HH:MM:SS]`. |
+| Visual floor | `match.find_best_visual_match(store, emb, min_timestamp)`: `min_timestamp` = previous clip's `film_end`. |
+| Cuts | Audio-first clips last exactly the WhisperX duration; if a clip's start has no camera cut nearby, its END is snapped to a PySceneDetect boundary (no flash frames). `timeline.assemble_timeline(beats_json, video, out_dir, backend="ffmpeg"/"moviepy")` cuts clips from a beats JSON. |
+| Silence | Every TTS sentence clip goes through ffmpeg `silenceremove` (head + reversed tail, -50 dB) before concatenation; then the WhisperX zero-crossing trim. Clips are joined with ffmpeg concat (not byte-joined). Edge word timings are now absolute (they were clip-relative). |
+| Chunks | 1200s windows, 120s overlap. |
+| Voices | `tts_provider: xtts` (Coqui XTTS-v2, local or server); ElevenLabs sends expressive voice settings. |
+| Music | `video.bgm` is mixed under the narration and ducked while the voice speaks (ffmpeg `sidechaincompress`). The old bed was muxed into a track the final file never used. |
+| **1500s → 1300s** | The pipeline now works from `narration.target_seconds` (set by the Studio and `--seconds`), converts with the measured rate (or config rate × voice pace), multiplies by a fill correction (default ×1.10, because writers land under their word ceiling), retries any story unit that fills < 90% of its budget, and after each render caches the real/requested ratio so the next run corrects itself (`_work/length_calibration.json`). The Studio also forced `-8%` pace over the config; its default is now `+12%`. |

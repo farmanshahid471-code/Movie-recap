@@ -126,6 +126,57 @@ def add_bgm_if_any(base: Path, bgm: str, volume: float, workdir: Path) -> Path:
     return out
 
 
+def mix_bgm_ducked(
+    narration: Path,
+    bgm: str,
+    out: Path,
+    *,
+    volume: float = 0.12,
+    duck_db: float = 12.0,
+    duration: float | None = None,
+) -> Path:
+    """Lay a looping music bed under the narration, DUCKED while the
+    narrator speaks and swelling back in the pauses (the YouTube-recap mix).
+
+    Uses ffmpeg ``sidechaincompress`` keyed by the narration itself, so the
+    ducking follows the real voice envelope sample-accurately (what a pydub
+    overlay + manual gain automation approximates). Returns ``narration``
+    untouched when there is no bed or the mix fails.
+
+    Previously the bed was muxed into the VIDEO stream's audio, which the
+    final mux never mapped -- the music was silently dropped.
+    """
+    if not bgm or not Path(bgm).exists():
+        return narration
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # ratio/threshold tuned so speech pulls the bed down ~duck_db dB
+    ratio = max(2.0, min(20.0, 1.0 + duck_db / 1.5))
+    graph = (
+        f"[1:a]aloop=loop=-1:size=2e9,volume={float(volume):.3f},"
+        "aformat=sample_rates=48000:channel_layouts=stereo[bed];"
+        "[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asplit=2[voice][key];"
+        f"[bed][key]sidechaincompress=threshold=0.02:ratio={ratio:.1f}:"
+        "attack=20:release=400:makeup=1[ducked];"
+        "[voice][ducked]amix=inputs=2:duration=first:dropout_transition=0:"
+        "normalize=0[mix]"
+    )
+    cmd = [which_ffmpeg(), "-y", "-i", str(narration), "-i", str(bgm),
+           "-filter_complex", graph, "-map", "[mix]"]
+    if duration:
+        cmd += ["-t", f"{float(duration):.3f}"]
+    cmd += ["-c:a", "libmp3lame", "-b:a", "192k", str(out)]
+    try:
+        run(cmd)
+    except Exception as exc:
+        print(f"  ! background-music mix failed ({exc}); narration only",
+              flush=True)
+        return narration
+    if not out.exists() or out.stat().st_size == 0:
+        return narration
+    return out
+
+
 def _filter_arg(name: str) -> str:
     """Escape a filename for use inside an ffmpeg filtergraph argument.
 

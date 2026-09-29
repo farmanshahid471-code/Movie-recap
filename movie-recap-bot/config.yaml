@@ -44,13 +44,26 @@ narration:
     zh: "zh-CN-YunjianNeural"         # Mandarin Chinese (male)
     ar: "ar-SA-HamedNeural"         # Arabic (Modern Standard, Saudi) — male
     es: "es-MX-JorgeNeural"         # Spanish (Mexico / Latin America) — male
-  tts_provider: "edge"     # edge | elevenlabs | openai
+  tts_provider: "edge"     # edge | elevenlabs | openai | xtts
+  # ElevenLabs (elevenlabs.io; ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID in .env):
+  # expressive settings for a storytelling read.
+  elevenlabs_model: "eleven_multilingual_v2"
+  elevenlabs_stability: 0.35
+  elevenlabs_similarity: 0.8
+  elevenlabs_style: 0.45
+  # Coqui XTTS-v2 (github.com/coqui-ai/TTS; `pip install TTS`, GPU advised),
+  # or an XTTS server (xtts_server_url). Clone a narrator from a clean 6-30s
+  # reference clip with xtts_speaker_wav, or use a built-in xtts_speaker.
+  xtts_server_url: ""
+  xtts_speaker_wav: ""
+  xtts_speaker: "Damien Black"
+  xtts_language: "en"
   # Slightly slower than natural for a calm storyteller read. Range +0%..-20%;
   # edge-tts "+X%" speeds up, "-X%" slows down. ElevenLabs/OpenAI ignore this.
-  rate: "-8%"
+  rate: "+12%"             # faster, intense recap pacing
   # edge-tts pitch shift in Hz: "-8Hz" adds depth/gravitas, "+6Hz" brightens.
   # Keep "-0Hz" (off) unless a voice sounds thin. ElevenLabs/OpenAI ignore.
-  pitch: "-0Hz"
+  pitch: "-2%"             # "-2%" is converted to Hz for edge-tts
   # Re-run the GENERATED narration audio through WhisperX forced alignment
   # and lock every cue/word to what is actually spoken using VAD and phoneme-level
   # alignment. Cached per audio content, so re-renders are free.
@@ -59,6 +72,13 @@ narration:
   # Segmented TTS Generation: generate individual audio files per scene or beat
   # (beat_001.mp3, beat_002.mp3, ...), snapping each directly to its video shot boundary.
   segmented_tts: true
+  # After WhisperX alignment, cut every sentence to its exact spoken span
+  # (first word start -> last word end, snapped to waveform zero crossings
+  # with a 3 ms anti-click fade): zero dead air at the head/tail of a line.
+  trim_dead_air: true
+  trim_gap_ms: 0           # silence between sentences after trimming
+  # Forced-alignment model: WAV2VEC2_ASR_LARGE_LV60K_960H (English) is used
+  # by default; override with RECAP_ALIGN_MODEL in .env.
   # Optional smaller/faster model just for that alignment pass (default:
   # dialogue.whisper_model, i.e. "small").
   whisper_align_model: null
@@ -128,10 +148,12 @@ dialogue:
 
 # Step A3 — contextual chunking (LLM context windows never overflow).
 chunking:
-  window_seconds: 180      # 3-minute blocks (maximum-precision mode: each
-                           # narration section covers ~3 min of film, so beat
-                           # anchors and visuals stay tight)
-  overlap_seconds: 30      # 30s of carry between blocks
+  window_seconds: 1200     # 20-minute blocks: the LLM sees the whole story
+                           # arc of each act instead of isolated 3-minute
+                           # islands (DeepSeek output is uncapped, so a big
+                           # block is summarised in full). Visual precision
+                           # comes from the per-sentence [HH:MM:SS] anchors.
+  overlap_seconds: 120     # 2 minutes of carry between blocks
   parallel: false          # true parallelizes chunk summaries (remote LLMs)
   # Optional: a smaller/faster model for the chunk-summary pass (the slowest
   # LLM step on CPU-only PCs). e.g. "qwen2.5:3b" ~4x faster than qwen2.5 7B.
@@ -236,7 +258,14 @@ timeline:
                            # extra mid-shot cut is forced when needed
 
   # Dynamic Audio & Video Retiming: fallback logic to achieve perfect frame-to-audio sync
-  dynamic_retiming: true   # handles overflow/underflow at timeline and rendering layers:
+  # AUDIO-FIRST CUTTING (new default): each sentence becomes ONE clip that
+  # starts at its [HH:MM:SS] anchor and lasts EXACTLY its measured audio
+  # duration at 1x, playing through the film's own shot changes. This
+  # replaces the slow-mo (setpts) / held-frame (tpad) fitting below, which
+  # only applies when audio_first is false.
+  audio_first: true
+  broll: false             # never pad a section with un-narrated film
+  dynamic_retiming: false  # handles overflow/underflow at timeline and rendering layers:
                            # - Audio stretching: speeds up TTS audio up to max_atempo (1.15x) via atempo
                            # - Video freeze-framing: freezes final frame of video beat if narration overruns
                            # - Silence padding: inserts silence at end of TTS file if video beat is longer
@@ -318,7 +347,8 @@ video:
   codec: "libx264"
   audio_codec: "aac"
   bgm: ""
-  bgm_volume: 0.12
+  bgm_volume: 0.12         # music-bed level (e.g. bgm: "D:\\music\\bed.mp3")
+  bgm_duck_db: 12          # how far the bed ducks while the narrator speaks
 
 llm:
   # DeepSeek: strong, cheap, reliable JSON mode, and fast enough that the
