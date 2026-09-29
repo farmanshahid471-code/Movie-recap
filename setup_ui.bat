@@ -115,6 +115,8 @@ set "MISSING="
 %PY% -c "import scenedetect"    >nul 2>&1 || set "MISSING=!MISSING! scenedetect[opencv]"
 %PY% -c "import faster_whisper" >nul 2>&1 || set "MISSING=!MISSING! faster-whisper"
 %PY% -c "import vastai"         >nul 2>&1 || set "MISSING=!MISSING! vastai"
+%PY% -c "import numpy"          >nul 2>&1 || set "MISSING=!MISSING! numpy"
+%PY% -c "import moviepy"        >nul 2>&1 || set "MISSING=!MISSING! moviepy"
 
 if defined MISSING (
     echo  Installing missing dependencies: !MISSING!
@@ -125,7 +127,7 @@ if defined MISSING (
         %PY% -m pip install --no-warn-script-location !MISSING!
     )
 ) else (
-    echo  [OK] Core dependencies installed: PyYAML, pysubs2, edge-tts, static-ffmpeg, openai, faster-whisper, scenedetect, vastai
+    echo  [OK] Core dependencies installed: PyYAML, pysubs2, edge-tts, static-ffmpeg, openai, faster-whisper, scenedetect, vastai, numpy, moviepy
 )
 echo.
 
@@ -141,6 +143,21 @@ if errorlevel 1 (
     )
 ) else (
     echo  [OK] whisperx ready.
+)
+echo.
+
+echo  Checking Coqui XTTS-v2 voice engine...
+%PY% -c "from TTS.api import TTS" >nul 2>&1
+if errorlevel 1 (
+    echo  Installing coqui-tts for XTTS-v2 narration - large download, please wait...
+    %PY% -m pip install coqui-tts
+    if errorlevel 1 (
+        echo  [NOTE] coqui-tts install had issues. Narration will keep using edge-tts.
+    ) else (
+        echo  [OK] coqui-tts installed. Set tts_provider: "xtts" in config.yaml to use it.
+    )
+) else (
+    echo  [OK] XTTS-v2 ready.
 )
 echo.
 

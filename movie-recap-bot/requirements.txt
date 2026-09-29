@@ -33,8 +33,8 @@ numpy>=1.24.0
 # ---- Optional: higher-quality TTS / forced alignment ----
 # elevenlabs>=1.0.0    # ElevenLabs (tts_provider: elevenlabs; the REST API is
 #                        called directly, so the SDK is optional)
-# TTS>=0.22.0          # Coqui XTTS-v2 (tts_provider: xtts), GPU recommended
-# moviepy>=1.0.3       # optional assembly backend (timeline.assemble_timeline)
+coqui-tts>=0.24.0      # Coqui XTTS-v2 (tts_provider: xtts); maintained fork of TTS, Python 3.10-3.13
+moviepy>=1.0.3         # assembly backend option (timeline.assemble_timeline)
 # WhisperX forced alignment engine (https://github.com/m-bain/whisperx):
 whisperx>=3.1.0        # Forced alignment with VAD & phoneme-level word timestamps
 

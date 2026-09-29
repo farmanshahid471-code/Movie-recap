@@ -518,7 +518,7 @@ def _XTTS(cfg: dict) -> TTSProvider:
                     from TTS.api import TTS as _CoquiTTS  # type: ignore
                 except Exception as exc:
                     raise TTSError(
-                        "XTTS needs `pip install TTS` (coqui-ai/TTS) or "
+                        "XTTS needs `pip install coqui-tts` or "
                         "narration.xtts_server_url pointing at an XTTS server."
                     ) from exc
                 try:
