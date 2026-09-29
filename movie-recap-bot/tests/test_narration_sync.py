@@ -133,7 +133,7 @@ def test_micro_cuts_land_on_word_boundaries() -> None:
     beats = timeline.build_timeline(
         sents, [dur], 600.0,
         {"micro_cut_seconds": 2.4, "max_cuts_per_beat": 4,
-         "min_cut_seconds": 1.2, "pre_roll": 0.4},
+         "min_cut_seconds": 1.2, "pre_roll": 0.4, "audio_first": False},
         [words], stats,
     )
     assert stats.get("word_locked_beats") == 1

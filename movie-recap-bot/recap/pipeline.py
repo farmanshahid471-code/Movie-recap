@@ -535,6 +535,25 @@ def _align_narration_for(
         language=code,
         enabled=bool(narr_cfg.get("whisper_align", True)),
     )
+    if aligned and narr_cfg.get("trim_dead_air", True):
+        # Cut every line to its exact WhisperX speech span (zero-crossing
+        # snapped) so no sentence carries dead air at its head or tail. The
+        # untrimmed take is kept next to it; the per-sentence beat files are
+        # re-cut from the trimmed track.
+        try:
+            import shutil
+            raw_mp3 = wd / f"{code}.untrimmed.mp3"
+            shutil.copyfile(mp3, raw_mp3)
+            trimmed = align.trim_dead_air(
+                raw_mp3, cues, mp3,
+                gap_ms=float(narr_cfg.get("trim_gap_ms", 0.0) or 0.0),
+            )
+            if trimmed:
+                cues = trimmed
+                tts.generate_beat_audio_files(mp3, cues, wd / "beats" / code)
+        except Exception as exc:
+            print(f"  ! [{code}] dead-air trim failed ({exc}); keeping the "
+                  "untrimmed narration", flush=True)
     if aligned:
         try:
             (wd / f"{code}.timing.json").write_text(
@@ -1355,7 +1374,12 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         )
 
         # Dynamic Audio Retiming: snap each beat audio directly to its video boundary
-        if beat_files and beat_audio_durs and len(beat_files) == len(tl_beats):
+        # Audio-first cutting already sizes every clip to its audio, so the
+        # audio is never stretched (atempo) or padded to fit the picture.
+        _audio_first = bool(tl_cfg.get("audio_first", True))
+        if (not _audio_first and tl_cfg.get("dynamic_retiming", True)
+                and beat_files and beat_audio_durs
+                and len(beat_files) == len(tl_beats)):
             try:
                 retimed_mp3 = wd / f"{code}_retimed.mp3"
                 target_durs = [float(b.get("duration", 0.0)) for b in tl_beats]

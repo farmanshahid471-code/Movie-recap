@@ -942,6 +942,16 @@ def complete(
     except ValueError:
         env_max = 0
     cap = max_tokens or env_max or 4096
+    # DeepSeek truncated mid-script (finish_reason=length) because callers
+    # passed small word-derived caps. Always request its full output window:
+    # length is controlled by the prompt's word budget, not by cutting the
+    # model off mid-sentence. Override with DEEPSEEK_MAX_TOKENS.
+    if p == "deepseek":
+        try:
+            ds_max = int(os.environ.get("DEEPSEEK_MAX_TOKENS", "8192") or "8192")
+        except ValueError:
+            ds_max = 8192
+        cap = max(int(cap), ds_max)
 
     try:
         temp = float(os.environ.get("LLM_TEMPERATURE", "0.7"))

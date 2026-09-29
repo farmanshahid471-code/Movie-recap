@@ -36,6 +36,35 @@ from .tts import TimedCue
 # voice instead of a hair after it.
 DEFAULT_AUDIO_PRE_ROLL = 0.1
 
+# Forced-alignment model. The whisperx default (WAV2VEC2_ASR_BASE_960H for
+# English) struggles with synthetic TTS voices; the large LV60K model keeps
+# the word locks tight. Override with RECAP_ALIGN_MODEL ("" = whisperx
+# default). Only used for English; other languages use whisperx's defaults.
+DEFAULT_ALIGN_MODEL = "WAV2VEC2_ASR_LARGE_LV60K_960H"
+
+
+def _align_model_name(lang: str) -> str | None:
+    import os
+    name = os.environ.get("RECAP_ALIGN_MODEL", DEFAULT_ALIGN_MODEL).strip()
+    if not name or not (lang or "en").lower().startswith("en"):
+        return None
+    return name
+
+
+def _load_align_model(whisperx, lang: str, dev: str):
+    """whisperx.load_align_model with the large wav2vec2 model, falling back
+    to whisperx's default model if it cannot be loaded."""
+    name = _align_model_name(lang)
+    if name:
+        try:
+            return whisperx.load_align_model(
+                language_code=lang, device=dev, model_name=name)
+        except Exception as exc:
+            print(f"  ! whisperx align model {name} unavailable ({exc}); "
+                  "using the whisperx default", flush=True)
+    return whisperx.load_align_model(language_code=lang, device=dev)
+
+
 _PUNCT_STRIP = re.compile(r"[^\w'\u4e00-\u9fff\u0600-\u06ff\u00c0-\u024f]+")
 # CJK punctuation that marks a clause boundary even without spaces.
 _CJK_BOUNDARY = "，。！？；：、）】」』"
@@ -105,9 +134,7 @@ def narration_words_whisperx(
         # 3. Phoneme-level forced alignment
         align_lang = result.get("language") or language or "en"
         try:
-            model_a, metadata = whisperx.load_align_model(
-                language_code=align_lang, device=dev
-            )
+            model_a, metadata = _load_align_model(whisperx, align_lang, dev)
             aligned = whisperx.align(
                 result.get("segments", []),
                 model_a,
@@ -210,7 +237,7 @@ def align_with_whisperx(
             model = whisperx.load_model(model_size, device=dev, compute_type="float32", language=language)
         result = model.transcribe(audio, batch_size=16, language=language)
         align_lang = result.get("language") or language or "en"
-        model_a, metadata = whisperx.load_align_model(language_code=align_lang, device=dev)
+        model_a, metadata = _load_align_model(whisperx, align_lang, dev)
         aligned = whisperx.align(result.get("segments", []), model_a, metadata, audio, dev, return_char_alignments=False)
         return aligned
     except Exception as e:
@@ -413,6 +440,7 @@ def align_narration(
             "model": model_size,
             "device": device or "auto",
             "lang": language or "",
+            "align_model": _align_model_name(language or "en") or "",
         },
         sort_keys=True,
     )
@@ -478,3 +506,153 @@ def align_narration(
     print(f"  * [{code}] cue times refined from "
           f"{len(words)} measured words.", flush=True)
     return refined, True
+
+
+# ---------------------------------------------------------------------------
+# Dead-air trimming — zero silence at the head/tail of every sentence
+# ---------------------------------------------------------------------------
+_TRIM_SR = 48000
+
+
+def _decode_pcm(path: Path, sr: int = _TRIM_SR):
+    """Decode any audio file to mono float32 PCM with ffmpeg."""
+    import subprocess
+
+    import numpy as np
+
+    from .util import which_ffmpeg
+
+    proc = subprocess.run(
+        [which_ffmpeg(), "-v", "error", "-i", str(path), "-ac", "1",
+         "-ar", str(sr), "-f", "s16le", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+    )
+    return np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+def _zero_crossing(x, idx: int, direction: int, max_search: int) -> int:
+    """Nearest zero crossing from ``idx`` moving ``direction`` (-1 = earlier,
+    +1 = later) within ``max_search`` samples. Searching OUTWARD from the
+    speech means a snap can only ever add a few samples of the waveform's
+    own lead-in/tail, never cut into a word -- and cutting on a zero
+    crossing is what prevents the click a mid-wave cut produces."""
+    n = len(x)
+    idx = min(max(idx, 0), n - 1) if n else 0
+    for k in range(max_search):
+        j = idx + direction * k
+        if j <= 0 or j >= n - 1:
+            return min(max(j, 0), n)
+        if x[j] == 0.0 or (x[j] > 0) != (x[j + 1] > 0):
+            return j + (1 if direction > 0 else 0)
+    return idx
+
+
+def speech_bounds(cue) -> tuple[float, float]:
+    """Exact spoken span of a cue: first word start -> last word end (from the
+    WhisperX word JSON); the cue's own start/end when it has no words."""
+    words = [w for w in (getattr(cue, "words", None) or [])
+             if len(w) >= 3 and float(w[2]) > float(w[1])]
+    if words:
+        return float(words[0][1]), float(words[-1][2])
+    return float(cue.start), float(cue.end)
+
+
+def trim_dead_air(
+    mp3: Path,
+    cues: list,
+    out_mp3: Path,
+    *,
+    gap_ms: float = 0.0,
+    fade_ms: float = 3.0,
+    zc_search_ms: float = 8.0,
+) -> list | None:
+    """Cut every sentence to its exact WhisperX speech span and butt them
+    together, so there is no dead air at the start or end of any line.
+
+    Each cut is snapped outward to the nearest waveform zero crossing and
+    gets a ``fade_ms`` micro-fade, so the joins never click. ``gap_ms`` of
+    silence may be placed between sentences (default 0 = none).
+
+    Returns the new cues (times and word times shifted onto the trimmed
+    track, contiguous from 0) or ``None`` when trimming is impossible
+    (numpy/ffmpeg missing, decode failed) -- the caller keeps the original.
+    """
+    try:
+        import subprocess
+
+        import numpy as np
+
+        from .util import which_ffmpeg
+
+        x = _decode_pcm(mp3)
+    except Exception as exc:
+        print(f"  ! dead-air trim skipped ({type(exc).__name__}: {exc})",
+              flush=True)
+        return None
+    if not len(x) or not cues:
+        return None
+    sr = _TRIM_SR
+    zc = max(int(sr * zc_search_ms / 1000.0), 1)
+    fade = max(int(sr * fade_ms / 1000.0), 0)
+    gap = np.zeros(int(sr * max(gap_ms, 0.0) / 1000.0), dtype=np.float32)
+
+    pieces = []
+    new_cues = []
+    t = 0.0
+    prev_end = 0
+    removed = 0.0
+    for i, c in enumerate(cues):
+        s0, e0 = speech_bounds(c)
+        a = _zero_crossing(x, int(s0 * sr), -1, zc)
+        b = _zero_crossing(x, int(round(e0 * sr)), +1, zc)
+        a = max(a, prev_end)              # never re-use audio (overlap)
+        if b <= a:
+            b = min(a + int(0.05 * sr), len(x))
+        seg = x[a:b].copy()
+        if fade and len(seg) > 2 * fade:
+            ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+            seg[:fade] *= ramp
+            seg[-fade:] *= ramp[::-1]
+        start = t
+        shift = start - a / sr
+        dur = len(seg) / sr
+        words = None
+        if getattr(c, "words", None):
+            words = [(w[0], round(max(float(w[1]) + shift, start), 3),
+                      round(min(float(w[2]) + shift, start + dur), 3))
+                     for w in c.words]
+        new_cues.append(TimedCue(c.text, round(start, 3),
+                                 round(start + dur, 3), words))
+        pieces.append(seg)
+        t += dur
+        if i < len(cues) - 1 and len(gap):
+            pieces.append(gap)
+            t += len(gap) / sr
+        removed += (b - a) / sr
+        prev_end = b
+    removed = len(x) / sr - removed
+
+    y = np.concatenate(pieces)
+    pcm = (np.clip(y, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
+    out_mp3 = Path(out_mp3)
+    tmp = out_mp3.with_suffix(".trim_tmp" + out_mp3.suffix)
+    try:
+        subprocess.run(
+            [which_ffmpeg(), "-y", "-v", "error", "-f", "s16le", "-ar",
+             str(sr), "-ac", "1", "-i", "-", "-c:a", "libmp3lame", "-b:a",
+             "192k", str(tmp)],
+            input=pcm, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=True,
+        )
+        tmp.replace(out_mp3)
+    except Exception as exc:
+        print(f"  ! dead-air trim encode failed ({exc})", flush=True)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return None
+    print(f"  * dead-air trim: {len(new_cues)} sentences cut to their exact "
+          f"spoken span on zero crossings ({removed:.1f}s of silence removed)",
+          flush=True)
+    return new_cues

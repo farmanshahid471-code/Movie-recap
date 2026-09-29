@@ -47,10 +47,10 @@ narration:
   tts_provider: "edge"     # edge | elevenlabs | openai
   # Slightly slower than natural for a calm storyteller read. Range +0%..-20%;
   # edge-tts "+X%" speeds up, "-X%" slows down. ElevenLabs/OpenAI ignore this.
-  rate: "-8%"
+  rate: "+12%"             # faster, intense recap pacing
   # edge-tts pitch shift in Hz: "-8Hz" adds depth/gravitas, "+6Hz" brightens.
   # Keep "-0Hz" (off) unless a voice sounds thin. ElevenLabs/OpenAI ignore.
-  pitch: "-0Hz"
+  pitch: "-2%"             # "-2%" is converted to Hz for edge-tts
   # Re-run the GENERATED narration audio through WhisperX forced alignment
   # and lock every cue/word to what is actually spoken using VAD and phoneme-level
   # alignment. Cached per audio content, so re-renders are free.
@@ -59,6 +59,13 @@ narration:
   # Segmented TTS Generation: generate individual audio files per scene or beat
   # (beat_001.mp3, beat_002.mp3, ...), snapping each directly to its video shot boundary.
   segmented_tts: true
+  # After WhisperX alignment, cut every sentence to its exact spoken span
+  # (first word start -> last word end, snapped to waveform zero crossings
+  # with a 3 ms anti-click fade): zero dead air at the head/tail of a line.
+  trim_dead_air: true
+  trim_gap_ms: 0           # silence between sentences after trimming
+  # Forced-alignment model: WAV2VEC2_ASR_LARGE_LV60K_960H (English) is used
+  # by default; override with RECAP_ALIGN_MODEL in .env.
   # Optional smaller/faster model just for that alignment pass (default:
   # dialogue.whisper_model, i.e. "small").
   whisper_align_model: null
@@ -236,7 +243,14 @@ timeline:
                            # extra mid-shot cut is forced when needed
 
   # Dynamic Audio & Video Retiming: fallback logic to achieve perfect frame-to-audio sync
-  dynamic_retiming: true   # handles overflow/underflow at timeline and rendering layers:
+  # AUDIO-FIRST CUTTING (new default): each sentence becomes ONE clip that
+  # starts at its [HH:MM:SS] anchor and lasts EXACTLY its measured audio
+  # duration at 1x, playing through the film's own shot changes. This
+  # replaces the slow-mo (setpts) / held-frame (tpad) fitting below, which
+  # only applies when audio_first is false.
+  audio_first: true
+  broll: false             # never pad a section with un-narrated film
+  dynamic_retiming: false  # handles overflow/underflow at timeline and rendering layers:
                            # - Audio stretching: speeds up TTS audio up to max_atempo (1.15x) via atempo
                            # - Video freeze-framing: freezes final frame of video beat if narration overruns
                            # - Silence padding: inserts silence at end of TTS file if video beat is longer

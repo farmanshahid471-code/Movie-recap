@@ -24,6 +24,9 @@ from recap.script import count_words  # noqa: E402
 from recap.tts import TimedCue  # noqa: E402
 
 CFG = {"micro_cut_seconds": 2.4, "max_cuts_per_beat": 4, "min_cut_seconds": 1.2}
+# The legacy visual-first motion policy (slow-mo / held frame / B-roll
+# borrowing), still available with audio_first: false.
+LEGACY = {**CFG, "audio_first": False, "broll": True}
 
 
 def _cuts_in_order(beats):
@@ -181,7 +184,7 @@ def test_visuals_never_run_ahead_of_the_narration() -> None:
               "film_start": 1000.0 + i * 2.4,
               "film_end": 1002.4 + i * 2.4}
              for i, c in enumerate(cues)]
-    cfg = dict(CFG)
+    cfg = dict(LEGACY)
     cfg["min_speed"] = 0.35
     stats: dict = {}
     beats = timeline.build_timeline(sents, durs, 6000.0, cfg, stats=stats)
@@ -456,7 +459,7 @@ def test_overdelivered_section_still_plays_at_1x() -> None:
     cues = [TimedCue(x, i * 5.2, i * 5.2 + 4.8) for i, x in enumerate(over)]
     stats: dict = {}
     raw_beats = timeline.build_timeline(
-        segs, timeline.lock_durations(cues, 20 * 5.2), 6000.0, dict(CFG),
+        segs, timeline.lock_durations(cues, 20 * 5.2), 6000.0, dict(LEGACY),
         stats=stats)
     # The over-budget section is over its OWN window, but the film between it
     # and the next section is un-narrated: the timeline spends that B-roll
@@ -784,7 +787,7 @@ def test_rewindow_to_speech_guarantees_1x() -> None:
     # sections (the beats select_beats_for_target skipped) as B-roll, which
     # costs nothing and keeps every cut at 1x.
     stats_bug: dict = {}
-    bug_beats = timeline.build_timeline(segs, durs, 6000.0, dict(CFG),
+    bug_beats = timeline.build_timeline(segs, durs, 6000.0, dict(LEGACY),
                                         stats=stats_bug)
     assert stats_bug.get("borrowed_groups", 0) >= 1, \
         "the un-narrated film between sections must be usable as B-roll"
@@ -807,7 +810,7 @@ def test_rewindow_to_speech_guarantees_1x() -> None:
     slow_cues = [TimedCue(s, i * 15.0, i * 15.0 + 14.4) for i in range(n)]
     slow_durs = timeline.lock_durations(slow_cues, (n - 1) * 15.0 + 14.4)
     stats_packed: dict = {}
-    cfg_packed = dict(CFG)
+    cfg_packed = dict(LEGACY)
     cfg_packed["min_speed"] = 0.85
     cfg_packed["micro_cut_seconds"] = 2.4
     packed_beats = timeline.build_timeline(packed, slow_durs, 6000.0,
@@ -1888,3 +1891,27 @@ if __name__ == "__main__":
     test_network_failure_never_stalls_for_hours()
     test_timeline_report_shows_longest_shot()
     print("\nALL VISUAL-FLOW TESTS PASSED")
+
+
+def test_audio_first_clips_match_audio_exactly() -> None:
+    """Audio-first: one 1x clip per sentence, exactly its audio duration,
+    starting at its anchor; no slow motion, no held frames, no B-roll, and
+    the film never rewinds even when the voice outruns a section."""
+    segs = []
+    for i in range(10):
+        a = i * 9.0
+        segs.append({"sentence": f"Line {i}.", "film_start": a,
+                     "film_end": a + 9.0, "anchor": a + 1.0,
+                     "zone_lo": a, "zone_hi": a + 9.0})
+    durs = [4.85, 14.4, 3.0, 12.0, 2.2, 5.0, 6.1, 11.0, 3.3, 4.0]
+    stats: dict = {}
+    beats = timeline.build_timeline(segs, durs, 6000.0,
+                                    {"pre_roll": 0.4}, stats=stats)
+    cuts = timeline.flatten_cuts(beats)
+    assert len(cuts) == len(durs)
+    for (s, d, f, v), want in zip(cuts, durs):
+        assert abs(d - want) < 1e-3 and f == 0.0 and v == 1.0
+    assert not timeline.cut_order_violations(cuts)
+    assert abs(cuts[0][0] - 0.6) < 1e-6, "first clip starts at its anchor"
+    assert stats["slowed_groups"] == 0 and stats["padded_shots"] == 0
+    assert stats["borrowed_groups"] == 0

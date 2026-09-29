@@ -35,11 +35,18 @@ create index on public.transcript_cues
     using hnsw (embedding vector_cosine_ops);
 
 -- Cosine-similarity search used by recap/match.py::SupabaseVectorStore.
+-- TIME-GATED: min_start_ms is the end of the previous matched clip, so the
+-- search can only move FORWARD through the film (strict monotonic timestamp
+-- progression; no jumping back in time):
+--   WHERE start_ms >= previous_matched_end_ms
+--   ORDER BY embedding <=> query_embedding LIMIT match_count
+drop function if exists public.match_cues(vector(384), int, float, text);
 create or replace function public.match_cues(
     query_embedding vector(384),
     match_count    int default 3,
     match_threshold float default 0.0,
-    session_name   text default 'default'
+    session_name   text default 'default',
+    min_start_ms   integer default 0
 )
 returns table (
     idx        integer,
@@ -58,10 +65,14 @@ as $$
         1 - (c.embedding <=> query_embedding) as similarity
     from public.transcript_cues c
     where c.session = session_name
+      and c.start_ms >= min_start_ms
       and 1 - (c.embedding <=> query_embedding) >= match_threshold
     order by c.embedding <=> query_embedding
     limit match_count;
 $$;
+
+create index if not exists transcript_cues_session_start_idx
+    on public.transcript_cues (session, start_ms);
 
 -- Row-level security: the pipeline calls with the service_role key, which
 -- bypasses RLS, but keep the policy sane for future anon access.
@@ -71,6 +82,6 @@ alter table public.transcript_cues enable row level security;
 -- debugging through the REST API if ever needed:
 -- grant select on public.transcript_cues to anon, authenticated;
 -- The RPC is called with the service key; grant execute to the roles you use:
--- grant execute on function public.match_cues(vector(384), int, float, text)
+-- grant execute on function public.match_cues(vector(384), int, float, text, integer)
 --     to anon, authenticated;
 

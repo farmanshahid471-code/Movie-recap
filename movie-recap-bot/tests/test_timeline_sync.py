@@ -109,7 +109,8 @@ def test_micro_cuts_break_up_long_beats() -> None:
     ]
     beats = timeline.build_timeline(
         sentences, durations, 2000.0,
-        {"micro_cut_seconds": 3.0, "max_cuts_per_beat": 3, "min_cut_seconds": 1.2},
+        {"micro_cut_seconds": 3.0, "max_cuts_per_beat": 3, "min_cut_seconds": 1.2,
+         "audio_first": False},  # legacy visual-first micro-cuts
     )
 
     multi = [b for b in beats if len(b["cuts"]) > 1]

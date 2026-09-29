@@ -66,11 +66,11 @@ def test_unit_prompt_asks_for_story_not_description() -> None:
         total_units=1, film_duration=600.0,
     )
     # the storytelling voice is present...
-    assert "not captioning the picture" in system
-    assert "CAUSE LEADS TO CONSEQUENCE" in system
-    assert "NEVER INVENT" in system
-    assert "A description of the frame is not a sentence in a story" in system.lower() or \
-           "A DESCRIPTION OF THE FRAME IS NOT A SENTENCE IN A STORY" in system
+    assert system.startswith("You are a professional YouTube movie recap scriptwriter.")
+    assert "NEVER use visual or camera descriptions" in system
+    assert "'We see'" in system and "'viewer'" in system
+    assert "present tense, third-person omniscient" in system
+    assert "never invent events" in system
     # ...and so is the anti-description contract in the user prompt
     assert "shot description" in user.lower()
     # the facts arrive labelled with their EXACT film ranges and budgets
@@ -263,7 +263,7 @@ def test_write_story_script_end_to_end(monkeypatch) -> None:
 
     def fake_ask(cfg_llm, system, user, *, max_tokens, temperature=None):
         calls.append(user)
-        assert "CAUSE LEADS TO CONSEQUENCE" in system
+        assert "NEVER use visual or camera descriptions" in system
         # answer in the documented shape, one beat per beat of the unit
         unit_beats = [b for b in user.split("[B") if b]
         n = len([ln for ln in user.splitlines() if ln.startswith("[B")])

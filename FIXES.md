@@ -1197,3 +1197,19 @@ Also fixed at the edges:
 * a failed summary chunk names its index and the resume point;
 * replacement preference (`-v4-pro` over `-flash`) and never re-suggesting a
   known-broken name.
+
+---
+
+## Story flow, storytelling and audio-first sync (latest round)
+
+| Area | Change |
+|---|---|
+| Chronology | `match.map_beats` is time-gated: each search only considers cues with `start >= previous match end` (`match_cues(..., min_start_ms)` in `migrations/001_pgvector.sql`, **re-run it in Supabase**). A weak match falls back to the sentence's chronological timestamp, never a random similar clip. |
+| B-roll | `timeline.broll: false` — sections no longer borrow un-narrated film. |
+| Anchors | The section writer prefixes every sentence with the `[HH:MM:SS]` of the beat it narrates; `script.extract_timestamp_anchors` strips it and uses it as the absolute clip anchor. |
+| Truncation | DeepSeek calls always request `max_tokens=8192` (`DEEPSEEK_MAX_TOKENS` overrides). |
+| Storytelling | `story.py` uses the strict "YouTube recap scriptwriter" system prompt; writer facts are ~80% transcript (with timestamps) and ≤20% vision ("silent action"). |
+| Sync | `timeline.audio_first: true` — each sentence = one 1x clip from its anchor lasting exactly its audio. No `setpts` slow-mo, no `tpad` freeze (except when the film itself ends), no atempo retiming. Set `audio_first: false` for the old behaviour. |
+| Pacing | edge-tts prosody `rate="+12%" pitch="-2%"` (pitch converted to Hz for edge-tts). |
+| Dead air | After WhisperX alignment every line is cut to first-word-start → last-word-end on waveform zero crossings with a 3 ms fade (`narration.trim_dead_air`, `trim_gap_ms`). |
+| Alignment | WhisperX uses `WAV2VEC2_ASR_LARGE_LV60K_960H` for English (`RECAP_ALIGN_MODEL` overrides). |

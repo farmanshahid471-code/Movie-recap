@@ -130,6 +130,7 @@ def test_empty_answer_escalates_the_output_budget(monkeypatch) -> None:
                          rt=kw["max_tokens"], reasoning="thinking " * 200)
         return _resp("The pilot wakes up and the forest is quiet.")
 
+    monkeypatch.setenv("DEEPSEEK_MAX_TOKENS", "0")  # test the escalation ladder
     client = _install(monkeypatch, handler)
     out = _call(max_tokens=512, json_mode=True)
     assert out.startswith("The pilot wakes up")
@@ -149,6 +150,7 @@ def test_reasoning_only_answer_is_treated_as_a_cut_off(monkeypatch) -> None:
             return _resp(finish="stop", ct=1200, rt=1200, reasoning="hmm " * 50)
         return _resp("She finds the letter.")
 
+    monkeypatch.setenv("DEEPSEEK_MAX_TOKENS", "0")  # test the escalation ladder
     client = _install(monkeypatch, handler)
     assert _call(max_tokens=1024) == "She finds the letter."
     assert len(client.calls) == 2

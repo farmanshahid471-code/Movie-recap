@@ -35,8 +35,7 @@ numpy>=1.24.0
 # WhisperX forced alignment engine (https://github.com/m-bain/whisperx):
 whisperx>=3.1.0        # Forced alignment with VAD & phoneme-level word timestamps
 
-# Optional (recommended): snap every visual cut onto the film's real
-# shot changes for a professional edit feel (timeline.snap_to_scenes):
-# PySceneDetect (https://github.com/Breakthrough-Open/PySceneDetect):
-# pip install scenedetect[opencv]
+# PySceneDetect ContentDetector for shot boundaries (the ffmpeg
+# select='gt(scene,0.35)' filter is only a last-resort fallback now):
+scenedetect[opencv]>=0.6.2
 

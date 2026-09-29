@@ -374,6 +374,15 @@ def build_timeline(
     # overrun, which is the closest thing to "cut, then pad the shot".
     slow_mo_before_freeze = bool(cfg.get("slow_mo_before_freeze", True))
     scene_bounds = sorted(scene_bounds or [])
+    # AUDIO-FIRST CUTTING (default): every sentence becomes ONE clip that
+    # starts at the sentence's film anchor and runs for EXACTLY the measured
+    # audio duration at 1x, playing straight through the film's own shot
+    # changes. No slow motion (setpts), no held frames (tpad), no B-roll
+    # borrowing: the picture is never stretched to fit the voice. The film
+    # playhead still never rewinds (strict monotonic progression); a held
+    # frame survives only at the very end of the movie, where no film is left.
+    audio_first = bool(cfg.get("audio_first", True))
+    broll = bool(cfg.get("broll", False)) and not audio_first
 
     n = min(len(sentences), len(durations))
     if n == 0:
@@ -465,7 +474,12 @@ def build_timeline(
         #    editing choice, a 0.3x crawl reads as a broken render.
         entry = max(f0, film_playhead)
         room = ceiling - entry
-        if ceiling > f1 + 1e-6 and total_nar > 0 and room > 0:
+        if not broll:
+            # B-ROLL DISABLED: a section may not wander into film nobody
+            # narrates to pad itself out.
+            ceiling = f1
+            room = ceiling - entry
+        if broll and ceiling > f1 + 1e-6 and total_nar > 0 and room > 0:
             # how much of the gap this section actually SPENT (own window
             # first, then the un-narrated film beyond it)
             _film_used = min(room, total_nar * min(1.0, max(room / total_nar, 0.0)))
@@ -478,8 +492,8 @@ def build_timeline(
             ideal = room / total_nar
         else:
             ideal = 0.0
-        starved = ideal < min_speed
-        if room <= 0 or ideal >= 1.0:
+        starved = ideal < min_speed and not audio_first
+        if audio_first or room <= 0 or ideal >= 1.0:
             grp_speed = 1.0
         elif starved and not slow_mo_before_freeze:
             grp_speed = 1.0        # freeze-only padding: never slow the picture
@@ -502,6 +516,53 @@ def build_timeline(
             film_pos = f0 + (acc / total_nar) * span
             film_span = (d / total_nar) * span
             film_pos = max(film_pos, playhead)
+
+            if audio_first:
+                # Start at the sentence's absolute anchor (the transcript
+                # timestamp the writer tagged it with), never before the
+                # film playhead; run exactly ``d`` seconds of film at 1x.
+                a = sentences[i].get("anchor")
+                if a is not None:
+                    desired = float(a) - pre_roll
+                else:
+                    desired = float(sentences[i].get("film_start", film_pos)
+                                    or film_pos)
+                zl = sentences[i].get("zone_lo")
+                if zl is not None:
+                    desired = max(desired, float(zl))
+                desired = max(desired, 0.0)
+                start = max(desired, film_playhead)
+                if start > desired + 1e-9:
+                    pushed += 1
+                if beats and 0.0 < start - film_playhead < min_new:
+                    start = film_playhead   # continue instead of a micro-jump
+                if scene_bounds:
+                    s2 = _snap_to_boundary(start, scene_bounds, snap_tol)
+                    if s2 != start and s2 >= film_playhead:
+                        start = s2
+                        snapped += 1
+                moving = d
+                if movie_dur > 0:
+                    start = min(start, movie_dur)
+                    if start + moving > movie_dur:
+                        moving = max(movie_dur - start, 0.0)
+                freeze = max(d - moving, 0.0)
+                if freeze > 1e-6:
+                    held += 1         # end-of-film only
+                film_playhead = start + moving
+                beats.append(
+                    {
+                        "index": i,
+                        "sentence": sentences[i].get("sentence", ""),
+                        "film_start": round(start, 3),
+                        "film_end": round(start + moving, 3),
+                        "duration": round(d, 3),
+                        "cuts": [[start, d, freeze, 1.0]],
+                    }
+                )
+                acc += d
+                playhead = max(playhead, start)
+                continue
 
             # word-measured switch points inside this sentence (narration clock)
             fracs = None

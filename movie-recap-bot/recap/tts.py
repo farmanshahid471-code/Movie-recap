@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Protocol
 
@@ -63,15 +64,66 @@ class TTSProvider(Protocol):
 # --------------------------------------------------------------------------
 # edge-tts
 # --------------------------------------------------------------------------
+# Recap pacing: the SSML prosody every narration line is spoken with,
+# i.e. <prosody rate="+12%" pitch="-2%">. Configurable via narration.rate /
+# narration.pitch in config.yaml.
+DEFAULT_RATE = "+12%"
+DEFAULT_PITCH = "-2%"
+# edge-tts only accepts pitch in Hz; a percentage is converted against a
+# typical narrator fundamental frequency.
+_BASE_F0_HZ = 120.0
+
+
+def normalize_rate(rate: str | None) -> str:
+    """-> an edge-tts/SSML rate string like "+12%"."""
+    r = str(rate or DEFAULT_RATE).strip()
+    m = re.fullmatch(r"([+-]?)(\d+(?:\.\d+)?)%", r)
+    if not m:
+        return DEFAULT_RATE
+    return f"{m.group(1) or '+'}{int(round(float(m.group(2))))}%"
+
+
+def normalize_pitch(pitch: str | None) -> str:
+    """-> an edge-tts pitch string ("-2Hz"). Accepts "-2%" or "-2Hz"."""
+    p = str(pitch or DEFAULT_PITCH).strip()
+    m = re.fullmatch(r"([+-]?)(\d+(?:\.\d+)?)(%|Hz|hz)", p)
+    if not m:
+        return "-0Hz"
+    sign = m.group(1) or "+"
+    val = float(m.group(2))
+    if m.group(3) == "%":
+        val = val / 100.0 * _BASE_F0_HZ
+    return f"{sign}{int(round(val))}Hz"
+
+
+def prosody_ssml(text: str, rate: str | None = None, pitch: str | None = None,
+                 voice: str | None = None) -> str:
+    """Wrap ``text`` in the recap-pacing SSML for SSML-capable engines.
+
+    edge-tts builds exactly this ``<prosody>`` element itself from its
+    ``rate``/``pitch`` arguments (it escapes user-supplied SSML), so EdgeTTS
+    passes the values through those arguments instead of raw markup.
+    """
+    from xml.sax.saxutils import escape
+
+    r = normalize_rate(rate)
+    ptxt = str(pitch or DEFAULT_PITCH).strip()
+    body = f'<prosody rate="{r}" pitch="{ptxt}">{escape(text)}</prosody>'
+    if voice:
+        body = f'<voice name="{voice}">{body}</voice>'
+    return ('<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+            f'xml:lang="en-US">{body}</speak>')
+
+
 class EdgeTTS:
     name = "edge"
 
-    def __init__(self, rate: str = "+0%", pitch: str = "-0Hz"):
+    def __init__(self, rate: str = DEFAULT_RATE, pitch: str = DEFAULT_PITCH):
         import edge_tts  # type: ignore
 
         self._edge = edge_tts
-        self.rate = rate
-        self.pitch = pitch
+        self.rate = normalize_rate(rate)
+        self.pitch = normalize_pitch(pitch)
 
     def synthesize_beats(self, sentences: list[str], voice: str, beats_dir: Path) -> tuple[list[TimedCue], list[Path]]:
         """Synthesize individual audio files per scene or beat (beat_001.mp3, beat_002.mp3, etc.)."""
@@ -237,8 +289,8 @@ def make_provider(name: str, cfg_narration: dict) -> TTSProvider:
     name = (name or "edge").strip().lower()
     if name == "edge":
         return EdgeTTS(
-            rate=cfg_narration.get("rate", "+0%"),
-            pitch=cfg_narration.get("pitch", "-0Hz"),
+            rate=cfg_narration.get("rate", DEFAULT_RATE),
+            pitch=cfg_narration.get("pitch", DEFAULT_PITCH),
         )
     if name == "elevenlabs":
         return _ElevenLabs(cfg_narration)

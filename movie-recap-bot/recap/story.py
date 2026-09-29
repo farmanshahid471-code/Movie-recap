@@ -191,14 +191,26 @@ def group_into_units(
 # Prompt construction
 # ---------------------------------------------------------------------------
 
+# The "YouTuber" system prompt: strict negative constraints, replacing the old
+# persona + rule-book stack (which still let "We see ..." captions through).
+YOUTUBER_SYSTEM = """You are a professional YouTube movie recap scriptwriter. Your goal is to write a high-paced, dramatic, and engaging story.
+CRITICAL RULES:
+
+NEVER use visual or camera descriptions. Words and phrases like 'We see', 'The camera pans', 'The scene shows', 'is shown', 'appears on screen', and 'viewer' are strictly forbidden.
+
+Write entirely in the present tense, third-person omniscient perspective. Focus purely on character actions, emotions, and plot progression (e.g., 'Dan wakes up in shock as he emerges naked from a snowdrift.').
+
+Do not over-explain. Maintain a fast, punchy rhythm.
+
+SOURCE PRIORITY: the dialogue ("said" lines, with their exact transcript timestamps) drives the story. The "silent action" notes only fill in stretches where nobody speaks; never turn them into picture descriptions. Use only the facts given; never invent events.
+"""
+
 STORY_SYSTEM = (
-    NARRATOR_PERSONA
-    + narrative.STORY_RULES
-    + narrative.STORY_RHYTHM
+    YOUTUBER_SYSTEM
     + """
 YOUR JOB RIGHT NOW
-You are writing one STORY UNIT of the recap — a stretch of the film of about
-a minute — which will be read aloud over exactly that footage. You are given
+You are writing one STORY UNIT of the recap, a stretch of the film of about
+a minute, which will be read aloud over exactly that footage. You are given
 the facts of the unit, labelled by the beat they belong to, each with the
 film range it covers.
 
@@ -211,25 +223,63 @@ Output ONLY a JSON object, no prose before or after, in this exact shape:
 Rules for the JSON:
 - "b" is the beat label number (1 = B1) and must never move backwards.
 - EVERY beat that holds a real event gets at least one sentence, and each
-  sentence is tagged with the beat whose facts it narrates — a sentence may
+  sentence is tagged with the beat whose facts it narrates. A sentence may
   never narrate footage from another beat.
-- "recap" is one short line (max ~20 words) summarising what the viewer now
-  knows, used to keep the next unit's continuity. It is never read aloud.
+- "recap" is one short line (max ~20 words) summarising what is now
+  known, used to keep the next unit's continuity. It is never read aloud.
 """
 )
 
 
+# Source mix fed to the writer: ~80% transcript, ~20% vision. Vision notes
+# may take at most this share of a beat's fact text when there is dialogue;
+# a SILENT beat (no dialogue at all) gets its vision notes in full, since
+# that is exactly the gap vision exists to fill.
+VISION_SHARE = 0.20
+_SILENT_VISION_CHARS = 600
+
+
+def _fmt_ts(seconds) -> str:
+    try:
+        t = max(int(float(seconds)), 0)
+    except (TypeError, ValueError):
+        return ""
+    return f"[{t // 3600:02d}:{(t % 3600) // 60:02d}:{t % 60:02d}] "
+
+
 def _format_facts(beat: dict) -> str:
-    """The dialogue + visual ground truth of one beat, as story material."""
-    lines: list[str] = []
+    """The dialogue + visual ground truth of one beat, as story material.
+
+    Transcript first and dominant (each line carries its exact Whisper
+    timestamp); vision captions are capped at ``VISION_SHARE`` of the text
+    and labelled as silent action.
+    """
+    said: list[str] = []
     for c in beat.get("transcript_lines") or []:
         text = (c.get("text") or "").strip()
         if text:
-            lines.append(f"    said: {text}")
+            said.append(f"    said {_fmt_ts(c.get('start'))}{text}".rstrip())
+    said_chars = sum(len(x) for x in said)
+    if said_chars:
+        budget = max(int(said_chars * VISION_SHARE / (1.0 - VISION_SHARE)), 60)
+    else:
+        budget = _SILENT_VISION_CHARS
+    seen: list[str] = []
+    used = 0
     for v in beat.get("vision_notes") or []:
         text = (v.get("text") or "").strip() if isinstance(v, dict) else str(v).strip()
-        if text:
-            lines.append(f"    seen: {text}")
+        if not text:
+            continue
+        room = budget - used
+        if room < 25:
+            break
+        if len(text) > room:
+            cut = text[:room].rsplit(" ", 1)[0].rstrip(",;: ")
+            text = cut + "..."
+        ts = _fmt_ts(v.get("t")) if isinstance(v, dict) else ""
+        seen.append(f"    silent action {ts}{text}".rstrip())
+        used += len(text)
+    lines = said + seen
     if not lines:
         return "    (no dialogue or visual caption for this beat)"
     return "\n".join(lines)
@@ -941,8 +991,7 @@ def _tighten_items(unit: dict, items: list[dict]) -> tuple[list[dict], int]:
 # ---------------------------------------------------------------------------
 
 REPAIR_SYSTEM = (
-    NARRATOR_PERSONA
-    + narrative.STORY_RULES
+    YOUTUBER_SYSTEM
     + narrative.REWRITE_RULES
     + """
 Output ONLY a JSON object: {"sentences": [{"i": <index>, "text": "..."}]}
