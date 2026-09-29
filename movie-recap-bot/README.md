@@ -277,6 +277,21 @@ and rewrites flagged lines once (`story.repair`); the count is reported as
 `storytelling score 93% (7 line(s) still read as description, 5 rewritten)`.
 Set `story.enabled: false` to fall back to the old per-beat writer.
 
+**0b. A model name the endpoint does not serve can no longer kill a run.**
+Every request must be answered by a model the endpoint actually has, and the
+wrapper now proves it before the long passes start. With `base_url` set (your
+own proxy, or the official API) it asks `GET /models` once and refuses a name
+that is not on the list — the stale `DEEPSEEK_MODEL=deepseek-flash` against
+`api.deepseek.com` is corrected to `deepseek-chat` with one printed line. If a
+request still comes back **HTTP 200 and empty** (billed, no content) the
+wrapper walks a recovery ladder: 4x the output budget for a reasoning model
+that ran out of room, then no `response_format`, then a streamed request, then
+the raw HTTP path, then another model on the same endpoint — remembering both
+the budget and the working model for the rest of the run, so the 36-chunk
+summarizer discovers a broken model once instead of 36 times. The final error
+names the model, the finish reason, the token usage and the next step.
+See `tests/test_llm_recovery.py`.
+
 **1. Narration that reads as speech, not generated text.** The English section
 writer now gets an in-prompt *voice exemplar* (an original passage written in
 the target rhythm: varied sentence openers, cause → effect chaining, short

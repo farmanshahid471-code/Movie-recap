@@ -390,7 +390,21 @@ def summarize_chunks(
                 f"({len(chunk.get('text', ''))} chars, {el / 60:.1f} min elapsed) ...",
                 flush=True,
             )
-            s = one(chunk)
+            try:
+                s = one(chunk)
+            except Exception as exc:
+                # Say WHERE the pass died and that the finished chunks are
+                # kept: re-running resumes from this chunk instead of re-billing
+                # the whole film (the partial file + signature are written
+                # below for exactly this reason).
+                done_now = sum(1 for r in results if r)
+                print(f"  ! summary chunk {idx + 1}/{n} failed "
+                      f"({type(exc).__name__}: {str(exc)[:300]})", flush=True)
+                if done_now:
+                    print(f"  * {done_now}/{n} chunks are already summarized"
+                          + (f" in {out_partial}" if out_partial else "")
+                          + " — re-run to resume from this chunk.", flush=True)
+                raise
             results[idx] = s
             if out_partial:
                 try:

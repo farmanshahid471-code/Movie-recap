@@ -1102,3 +1102,98 @@ vision tests, all green with the existing suite — **129 passed, 1 skipped**:
 over-delivered and estimate-sized sections now assert **B-roll borrowing keeps
 them at 1x**, and a packed section with no free film asserts a held frame with
 every speed at or above the floor — the deep crawl is gone by test.
+
+---
+
+## Round 8 (2026-09-29): "provider returned an empty message" killed every pass
+
+The log you sent:
+
+```
+  * [llm] provider=deepseek model='deepseek-flash' base_url=https://api.deepseek.com/v1
+  ! [story] English story writer failed (LLMError: provider returned an empty
+    message (tokens were billed but nothing came back)) — falling back to the per-beat writer
+  ! [beats] English beat generation failed (LLMError: ...) — falling back to chunk path
+  * Summarizing 36 English chunks via deepseek/deepseek-chat ...
+    ... chunk 1/36 ... ERROR: LLMError: provider returned an empty message ...
+  !!! run failed
+```
+
+### What actually happened
+
+Every request came back **HTTP 200, billed, and empty**. Three passes died in a
+row (story writer → beat writer → summarizer chunk 1/36) and the run produced
+nothing.
+
+The model was `deepseek-flash` — configured via a `.env` left over from an
+earlier proxy setup, while `base_url` points at the **official** DeepSeek
+endpoint, which serves `deepseek-chat` and `deepseek-reasoner`. The old wrapper
+treated an empty 200 as fatal-by-design ("do not burn tokens retrying") and
+raised the same message for every pass, so a single bad model name ended the
+whole run.
+
+### The fix — a recovery ladder instead of raise-on-first-empty
+
+An empty 200 has several very different causes and each has its own fix, so
+`llm.complete()` now walks a ladder and only fails when every rung does:
+
+1. **The endpoint's own model list, first.** With `base_url` set, the
+   `GET /models` probe now runs *before* the first call and `resolve_model`
+   refuses a name the endpoint does not list:
+   `! [llm] endpoint … does not list model 'deepseek-flash'; it supports
+   deepseek-chat, deepseek-reasoner — using 'deepseek-chat'`. Your log's first
+   line would have been this, and nothing else would have happened.
+2. **A reasoning model that ate its output budget** (`finish_reason=length`,
+   or `reasoning_content` with empty `content`, or completion_tokens ==
+   max_tokens) → retried with **4x the output budget** (capped at 16384), and
+   that budget is **remembered per model for the rest of the run**.
+3. **The gateway ignored `response_format=json_object`** → retried without it
+   (callers parse defensively anyway).
+4. **The gateway only fills `message.content` when streaming** → retried with
+   `stream=True` and the deltas are collected.
+5. **The SDK transport is at fault** → the raw HTTP path (requests/urllib).
+   Content returned as `[{type: text, ...}]` parts is now read instead of
+   counted as empty.
+6. **The model itself answers nothing on this endpoint** → switch to another
+   name the endpoint serves (a stronger sibling first: `-pro` > `-flash`/
+   `-mini`/`-lite`), print the substitution with the permanent fix
+   (`llm.model: …`), and **remember it**: `_BAD_MODELS` makes every later call
+   (summaries chunk 2..36, both writers) start on the working model, so the
+   discovery is paid for once.
+7. Still empty? A model with a **2-strike streak** is marked broken for the
+   run, and the error now names the model, `finish_reason`, token usage, the
+   endpoint's own list, and the next step (`llm.model: …`,
+   `LLM_MAX_TOKENS=8192`, credit check).
+
+Also fixed at the edges:
+
+* a model that rejects `max_tokens` (`Unsupported parameter … use
+  'max_completion_tokens'`) is retried with the new parameter name;
+* the summarizer prints **which chunk died** and **how many are already
+  saved**, so a failed pass resumes from that chunk instead of re-billing the
+  film (`summaries.txt` + signature already made that safe — now it says so);
+* `.env.example`, README and the config comments spell out that
+  `DEEPSEEK_MODEL`/`MODEL_NAME` must name a model the endpoint serves, and
+  that a stale name is corrected automatically with a one-line warning.
+
+### Verification
+
+`movie-recap-bot/tests/test_llm_recovery.py` (15 tests) — the suite is now
+**145 passed, 1 skipped**:
+
+* the reported run is **replayed**: `deepseek-flash` answers empty, `chat`
+  answers; the first call discovers it, calls 2..6 (beats + summary chunks) go
+  straight to the working model — asserted per call (`billed ==
+  ["deepseek-chat"] * 3` through the real `complete()` path);
+* escalation on a `finish_reason=length` reasoning answer raises `max_tokens`
+  512 → 2048+ and remembers it for later calls;
+* reasoning-only answers (empty content + `reasoning_content`) count as cut
+  off, not as stubs;
+* empty answers recovered by dropping `response_format`, by streaming, and by
+  the raw HTTP path;
+* an exhausted ladder raises an error naming the model, the finish reason, the
+  endpoint's list and `LLM_MAX_TOKENS`;
+* list-of-parts content is read; `max_tokens` → `max_completion_tokens`;
+* a failed summary chunk names its index and the resume point;
+* replacement preference (`-v4-pro` over `-flash`) and never re-suggesting a
+  known-broken name.

@@ -27,9 +27,10 @@ class LLMError(RuntimeError):
 def _retryable(exc: Exception) -> bool:
     """True for transient faults worth retrying (network, 429, 5xx).
 
-    ``empty message`` is deliberately NOT here: a provider that answered with
-    an empty completion spent the tokens already and will very likely answer
-    empty again — retrying it up to four times is pure token waste.
+    ``empty message`` is deliberately NOT here: retrying the SAME request
+    would spend the tokens again for the same nothing. Empty answers go
+    through the dedicated ladder in ``_chat_with_recovery`` instead, which
+    changes something real at every step.
     """
     s = f"{type(exc).__name__}: {exc}".lower()
     markers = (
@@ -547,6 +548,327 @@ def _direct_http_completion(
     return None
 
 
+# ---------------------------------------------------------------------------
+# EMPTY-ANSWER RECOVERY
+# ---------------------------------------------------------------------------
+# The reported run:
+#   * [llm] provider=deepseek model='deepseek-flash' base_url=https://api.deepseek.com/v1
+#   ! [story] ... (LLMError: provider returned an empty message (tokens were
+#     billed but nothing came back)) — falling back to the per-beat writer
+#   ! [beats] ... falling back to chunk path
+#   ... chunk 1/36 via deepseek-chat ... ERROR: LLMError: provider returned an
+#     empty message ...
+# Every request came back HTTP 200, billed, and EMPTY, so three passes died in
+# a row and the run ended with nothing. An empty 200 has several very different
+# causes and each has its own fix, so the wrapper walks a ladder instead of
+# raising on the first one:
+#   1. a REASONING model spent the whole output budget thinking
+#      (finish_reason=length / reasoning_tokens)      -> raise the budget, retry;
+#   2. the endpoint ignored response_format=json_object and answered empty
+#                                                     -> retry without it;
+#   3. the gateway only fills message.content when streaming
+#                                                     -> retry with stream=True;
+#   4. the SDK transport is at fault                   -> retry the raw HTTP path;
+#   5. the MODEL itself answers nothing on this endpoint -> switch to another
+#      name the endpoint lists, and remember the broken one for the rest of the
+#      run (so the next 36 chunks do not pay for the same discovery).
+# Only when all five fail does the error surface — and it now names the model,
+# the finish_reason, the token usage and the exact next step.
+_EMPTY_STREAK: dict[str, int] = {}
+_BAD_MODELS: set[str] = set()
+_CAP_FLOOR: dict[str, int] = {}
+_EMPTY_NOTED: set[str] = set()
+_EMPTY_STREAK_LIMIT = 2          # empties before a model is considered broken
+_MAX_OUTPUT_TOKENS = 16384       # ceiling for the escalated output budget
+
+
+def _get(obj, name: str, default=None):
+    """Attribute or key access — responses arrive as objects or plain dicts."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _call_key(provider: str, base_url: str | None, model: str) -> str:
+    return f"{provider}|{(base_url or '').rstrip('/')}|{model}"
+
+
+def _message_text(msg) -> str:
+    """Assistant text out of a message, whatever shape the gateway used."""
+    content = _get(msg, "content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, (list, tuple)):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+            else:
+                parts.append(str(_get(item, "text", "") or ""))
+        return "".join(parts).strip()
+    if content is None:
+        alt = _get(msg, "text")
+        if isinstance(alt, str):
+            return alt.strip()
+    return str(content or "").strip()
+
+
+def _message_reasoning(msg) -> str:
+    for attr in ("reasoning_content", "reasoning"):
+        val = _get(msg, attr)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
+
+def _response_facts(resp) -> dict:
+    """finish_reason + token usage of a response, extracted defensively."""
+    facts = {"finish_reason": "", "completion_tokens": 0, "reasoning_tokens": 0,
+             "content_chars": 0, "has_reasoning": False}
+    try:
+        choices = _get(resp, "choices") or []
+        if not choices:
+            return facts
+        ch = choices[0]
+        msg = _get(ch, "message")
+        facts["content_chars"] = len(_message_text(msg))
+        facts["has_reasoning"] = bool(_message_reasoning(msg))
+        facts["finish_reason"] = str(_get(ch, "finish_reason") or "")
+        usage = _get(resp, "usage")
+        if usage is not None:
+            facts["completion_tokens"] = int(_get(usage, "completion_tokens", 0) or 0)
+            details = _get(usage, "completion_tokens_details")
+            if details is not None:
+                facts["reasoning_tokens"] = int(
+                    _get(details, "reasoning_tokens", 0) or 0)
+    except Exception:
+        pass
+    return facts
+
+
+def _empty_note(key: str, message: str) -> None:
+    """Print a recovery note once per (kind, model)."""
+    if key in _EMPTY_NOTED:
+        return
+    _EMPTY_NOTED.add(key)
+    print(message, flush=True)
+
+
+def _try_chat(client, kwargs: dict, p: str, model: str) -> tuple[str, dict]:
+    resp = client.chat.completions.create(**kwargs)
+    _log_tokens(p, model, resp)
+    choices = _get(resp, "choices") or []
+    msg = _get(choices[0], "message") if choices else None
+    return _message_text(msg), _response_facts(resp)
+
+
+def _stream_text(client, kwargs: dict) -> str:
+    """Retry as a stream: some gateways only fill content in streaming mode."""
+    try:
+        stream = client.chat.completions.create(**{**kwargs, "stream": True})
+    except Exception:
+        return ""
+    parts: list[str] = []
+    try:
+        for chunk in stream:
+            for ch in (_get(chunk, "choices") or []):
+                piece = _get(_get(ch, "delta"), "content")
+                if isinstance(piece, str) and piece:
+                    parts.append(piece)
+    except Exception:
+        return "".join(parts).strip()
+    return "".join(parts).strip()
+
+
+def _next_model(provider: str, base_url: str | None, current: str) -> str:
+    """Another model name the SAME endpoint can serve, or ``""``."""
+    p = (provider or "").strip().lower()
+    key = os.environ.get(f"{p.upper()}_API_KEY") or os.environ.get("LLM_API_KEY")
+    known = [n for n in _endpoint_models(base_url) if n and n != current]
+    if not known and base_url:
+        # ask the endpoint once, best effort (it may list models even when its
+        # chat endpoint answers empty)
+        probed = [n for n in endpoint_models(base_url, key) if n and n != current]
+        if probed:
+            remember_endpoint_models(base_url, [current] + probed)
+            known = probed
+    if not known and p == "deepseek" and (not base_url or "deepseek.com" in base_url):
+        # official endpoint (or a probe that could not answer): the two models
+        # it documents, so a name it does not serve cannot end the run
+        known = [n for n in ("deepseek-chat", "deepseek-reasoner") if n != current]
+    usable = [n for n in known
+              if "embed" not in n.lower()
+              and _call_key(p, base_url, n) not in _BAD_MODELS]
+    if not usable:
+        return ""
+    # A model that just answered NOTHING is usually an over-loaded little
+    # variant ("-flash", "-mini", "-lite", 3B/7B): when a bigger sibling is on
+    # the endpoint, try that first.
+    weak = ("flash", "mini", "lite", "small", "turbo", "nano", "8b", "7b", "4b", "3b")
+
+    def _rank(name: str) -> int:
+        low = name.lower()
+        return 1 if any(w in low for w in weak) else 0
+
+    prefer = _FAMILIES.get(p, ())
+    family = [n for n in usable if any(m in n.lower() for m in prefer)]
+    ordered = sorted(family or usable, key=_rank)
+    return ordered[0] if ordered else ""
+
+
+def _chat_with_recovery(
+    client, kwargs: dict, *, p: str, base_url: str | None, api_key: str | None,
+    timeout: float, json_mode: bool, model: str, allow_switch: bool = True,
+) -> tuple[str, str, dict, int]:
+    """One completion plus the empty-answer ladder. -> (text, model, facts, cap).
+
+    ``text`` is ``""`` only when every rung failed; ``facts`` then describes the
+    last empty answer so the caller can raise an actionable error.
+    """
+    tried: list[str] = []
+    cap = int(kwargs.get("max_tokens") or 0)
+
+    text, facts = _try_chat(client, kwargs, p, model)
+    if text:
+        return text, model, facts, cap
+
+    fr = str(facts.get("finish_reason") or "")
+    comp = int(facts.get("completion_tokens") or 0)
+    reason = int(facts.get("reasoning_tokens") or 0)
+    cut_short = (
+        fr == "length"
+        or (cap and comp >= cap)
+        or (reason and reason >= max(cap - 32, 1))
+        or facts.get("has_reasoning")
+    )
+    if cut_short:
+        bigger = min(max(cap * 4, 2048), _MAX_OUTPUT_TOKENS)
+        if bigger > cap:
+            _empty_note(f"escalate:{model}:{cap}",
+                        f"  ! [llm] '{model}' came back empty after spending its "
+                        f"whole output budget (finish_reason={fr or 'length'}, "
+                        f"{reason or comp} tokens of {cap}"
+                        f"{', reasoning-only' if reason or facts.get('has_reasoning') else ''}"
+                        f") — retrying with max_tokens={bigger}")
+            kwargs = {**kwargs, "max_tokens": bigger}
+            cap = bigger
+            tried.append("a 4x bigger output budget")
+            text, facts = _try_chat(client, kwargs, p, model)
+            if text:
+                return text, model, facts, cap
+
+    if json_mode and "response_format" in kwargs:
+        _empty_note(f"nojson:{model}",
+                    f"  * [llm] '{model}' answered empty with "
+                    "response_format=json_object — retrying without it "
+                    "(the callers parse defensively)")
+        kwargs = {k: v for k, v in kwargs.items() if k != "response_format"}
+        tried.append("no response_format")
+        text, facts = _try_chat(client, kwargs, p, model)
+        if text:
+            return text, model, facts, cap
+
+    _empty_note(f"stream:{model}",
+                f"  * [llm] '{model}' answered empty — retrying as a stream")
+    tried.append("a streamed request")
+    streamed = _stream_text(client, kwargs)
+    if streamed:
+        return streamed, model, facts, cap
+
+    tried.append("the raw HTTP path")
+    raw = _direct_http_completion(
+        provider=p,
+        base_url=base_url or os.environ.get(f"{p.upper()}_BASE_URL"),
+        api_key=api_key,
+        model=model,
+        messages=kwargs.get("messages") or [],
+        temperature=kwargs.get("temperature"),
+        max_tokens=cap,
+        json_mode=False,
+        timeout=timeout,
+    )
+    if raw:
+        return raw, model, facts, cap
+
+    if allow_switch:
+        alt = _next_model(p, base_url, model)
+        if alt:
+            _empty_note(f"switch:{model}->{alt}",
+                        f"  ! [llm] model '{model}' answered NOTHING "
+                        f"(tried {', '.join(tried)}) — switching to {alt!r} for "
+                        "the rest of this run. Make it permanent: set "
+                        f"llm.model: {alt} in config.yaml "
+                        f"(or MODEL_NAME={alt} in .env).")
+            _BAD_MODELS.add(_call_key(p, base_url, model))
+            alt_kwargs = {**kwargs, "model": alt}
+            text2, facts2 = _try_chat(client, alt_kwargs, p, alt)
+            if not text2 and "response_format" in alt_kwargs:
+                text2, facts2 = _try_chat(
+                    client,
+                    {k: v for k, v in alt_kwargs.items() if k != "response_format"},
+                    p, alt)
+            if text2:
+                return text2, alt, facts2, cap
+    return "", model, facts, cap
+
+
+def _empty_strike(provider: str, base_url: str | None, model: str) -> int:
+    """Count consecutive empty answers for this model/endpoint pair."""
+    key = _call_key(provider, base_url, model)
+    n = _EMPTY_STREAK.get(key, 0) + 1
+    _EMPTY_STREAK[key] = n
+    if n >= _EMPTY_STREAK_LIMIT:
+        _BAD_MODELS.add(key)
+    return n
+
+
+def _empty_error(provider: str, base_url: str | None, model: str,
+                 facts: dict) -> str:
+    """The final, actionable error once every rung of the ladder failed."""
+    fr = str(facts.get("finish_reason") or "?")
+    comp = int(facts.get("completion_tokens") or 0)
+    reason = int(facts.get("reasoning_tokens") or 0)
+    known = _endpoint_models(base_url)
+    lines = [
+        f"provider returned an empty message for model '{model}' "
+        "(tokens were billed but nothing came back).",
+        f"  - last answer: finish_reason={fr}, completion_tokens={comp}"
+        + (f" ({reason} of them reasoning tokens)" if reason else ""),
+        "  - tried: a 4x bigger output budget, no response_format, a streamed "
+        "request, and the raw HTTP path",
+    ]
+    if known:
+        lines.append(f"  - this endpoint lists: {', '.join(known[:8])}")
+    alt = _next_model(provider, base_url, model)
+    if alt:
+        lines.append("  - next step: pin a model that answers — "
+                     f"llm.model: {alt} in config.yaml (or MODEL_NAME={alt} in "
+                     ".env)")
+    else:
+        lines.append("  - next step: try another model (llm.model: ...), a "
+                     "bigger LLM_MAX_TOKENS, or another provider")
+    lines.append("  - a reasoning-first model that runs out of output budget "
+                 "is the usual cause: LLM_MAX_TOKENS=8192 (or more) fixes it")
+    lines.append("  - an account out of credit can also answer 200 with no "
+                 "content: check the provider dashboard")
+    return "\n".join(lines)
+
+
+def _wants_max_completion_tokens(exc: Exception) -> bool:
+    """Some (reasoning) models reject ``max_tokens`` and want the newer name."""
+    low = f"{type(exc).__name__}: {exc}".lower()
+    if "max_completion_tokens" in low:
+        return True
+    if "max_tokens" not in low:
+        return False
+    return any(w in low for w in ("unsupported", "not supported", "unknown",
+                                  "invalid", "unrecognized"))
+
+
 def complete(
     provider: str,
     model: str,
@@ -571,8 +893,10 @@ def complete(
       * ``temperature`` defaults to env ``LLM_TEMPERATURE`` (0.7), overridable
         per call; deterministic JSON passes can drop it (e.g. 0.2) which makes
         the model hit the requested shape first try instead of retrying.
-      * An *empty* answer is never retried (the tokens were already spent and
-        the model will likely answer empty again).
+      * An *empty* answer walks the recovery ladder above (bigger budget,
+        no response_format, streaming, raw HTTP, another model on the same
+        endpoint) instead of being retried unchanged — see the EMPTY-ANSWER
+        RECOVERY block. Only when every rung fails is it fatal.
 
     Transient network / rate-limit failures are retried with backoff — a cloud
     provider hiccup two thirds of the way through a 20-section script pass
@@ -646,6 +970,26 @@ def complete(
     elif json_mode and p in _JSON_MODE_PROVIDERS:
         kwargs["response_format"] = {"type": "json_object"}
 
+    # A model this endpoint already answered NOTHING with (twice) is not worth
+    # another billed call: switch to another name the endpoint serves and say
+    # so once. This is what keeps the 36-chunk summarizer from re-discovering
+    # the same broken model on every chunk.
+    if _call_key(p, base_url, resolved_model) in _BAD_MODELS:
+        _alt = _next_model(p, base_url, resolved_model)
+        if _alt and _alt != resolved_model:
+            _empty_note(f"skipbad:{p}:{base_url}:{resolved_model}",
+                        f"  * [llm] skipping {resolved_model!r} (it returned "
+                        f"empty answers earlier on this endpoint) — using "
+                        f"{_alt!r} instead")
+            resolved_model = _alt
+            kwargs["model"] = resolved_model
+
+    # A model that needed a bigger output budget earlier in the run keeps it:
+    # re-learning that on every chunk would be a wasted (billed) call each time.
+    _floor = _CAP_FLOOR.get(_call_key(p, base_url, resolved_model), 0)
+    if _floor > int(kwargs.get("max_tokens") or 0):
+        kwargs["max_tokens"] = _floor
+
     try:
         attempts = int(os.environ.get("LLM_RETRIES", "4"))
     except ValueError:
@@ -656,11 +1000,13 @@ def complete(
         try:
             if has_chat:  # OpenAI-compatible (OpenAI / DeepSeek / Ollama / ...)
                 try:
-                    resp = client.chat.completions.create(**kwargs)
-                    _log_tokens(p, resolved_model, resp)
-                    text = (resp.choices[0].message.content or "").strip()
-                    if text:
-                        return text
+                    text, _used_model, _facts, _cap = _chat_with_recovery(
+                        client, kwargs, p=p, base_url=base_url,
+                        api_key=(os.environ.get(f"{p.upper()}_API_KEY")
+                                 or os.environ.get("LLM_API_KEY")),
+                        timeout=timeout, json_mode=json_mode,
+                        model=resolved_model,
+                    )
                 except (TypeError, Exception) as inner_exc:
                     # MODEL-NAME RECOVERY (the reported crash): the endpoint
                     # answered "The supported API model names are X, Y, but you
@@ -683,6 +1029,12 @@ def complete(
                             resolved_model = _resolution
                             kwargs["model"] = resolved_model
                             continue
+                    if _wants_max_completion_tokens(inner_exc) and "max_tokens" in kwargs:
+                        kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+                        print("  * [llm] this model wants "
+                              "'max_completion_tokens' instead of 'max_tokens' "
+                              "— retrying.", flush=True)
+                        continue
                     if isinstance(inner_exc, TypeError) or not _retryable(inner_exc):
                         print(f"  * Note: OpenAI SDK error ({type(inner_exc).__name__}: {inner_exc}); switching to direct HTTP request...", flush=True)
                         fallback_text = _direct_http_completion(
@@ -699,11 +1051,18 @@ def complete(
                         if fallback_text:
                             return fallback_text
                     raise inner_exc
-                raise LLMError(
-                    "provider returned an empty message (tokens were billed but "
-                    "nothing came back) — retry the run, or switch to a "
-                    "stronger model if this repeats"
-                )
+                if text:
+                    resolved_model = _used_model
+                    kwargs["model"] = resolved_model
+                    if _cap > int(kwargs.get("max_tokens") or 0):
+                        # remember the output budget this model needed
+                        kwargs["max_tokens"] = _cap
+                        _CAP_FLOOR[_call_key(p, base_url, resolved_model)] = _cap
+                    _EMPTY_STREAK.pop(_call_key(p, base_url, resolved_model), None)
+                    return text
+                # 200 with NO content, on every rung of the ladder
+                _empty_strike(p, base_url, resolved_model)
+                raise LLMError(_empty_error(p, base_url, resolved_model, _facts))
             if not has_messages:
                 raise LLMError(
                     "LLM client is neither OpenAI-compatible nor Anthropic — "
