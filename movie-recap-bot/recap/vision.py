@@ -481,8 +481,6 @@ def _fallback_client(cfg_vision: dict):
     if not model:
         return None, None
     try:
-        if provider == "gemini" and not base.startswith("http"):
-            pass
         if (
             provider == "gemini"
             and not cfg_vision.get("fallback_base_url")

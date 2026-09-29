@@ -861,7 +861,7 @@ the existing 92 — **99 tests passing**:
 
 ---
 
-## Round 5 (2026-09-29): "the narration is really bad — it's describing the scene"
+## Round 7 (2026-09-29): "the narration is really bad — it's describing the scene"
 
 You reported four problems and one verdict. The verdict is the root of the
 other four, so it comes first.
@@ -1072,8 +1072,8 @@ story writer sitting on top of them:
 
 ### Verification
 
-`movie-recap-bot/tests/test_story_narration.py` (17 new tests) plus two new
-vision tests, all green with the existing suite — **127 passed, 1 skipped**:
+`movie-recap-bot/tests/test_story_narration.py` (19 new tests) plus two new
+vision tests, all green with the existing suite — **129 passed, 1 skipped**:
 
 * the unit prompt asks for a story, carries the story-so-far, the cast and the
   previous line, and labels every beat with its exact film range + budget;

@@ -825,9 +825,10 @@ def rewindow_to_speech(
                 resized += 1
         else:
             # Genuinely over-budget section (measured narration longer than
-            # the film zone): the zone cannot hold the speech, so walk it
-            # contiguously at zone scale -- the timeline's slow-motion net
-            # then paces it (rare and honest, not the norm).
+            # the film zone): the zone cannot hold the speech, so walk the
+            # sentences contiguously through it at zone scale; the timeline
+            # then paces the section (B-roll borrowing first, then min_speed,
+            # then a held final frame -- rare and honest, not the norm).
             scale = zone / total
             walk = 0.0
             for rel in range(i, j):

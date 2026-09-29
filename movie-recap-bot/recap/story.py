@@ -1092,3 +1092,24 @@ def write_report(report: dict, path: Path | str) -> None:
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Empty-footage behaviour (what the writer can promise the timeline)
+# ---------------------------------------------------------------------------
+def describe_budget(
+    beats: list[dict], cfg_story: dict | None = None, *, wpm: int = _DEFAULT_WPM
+) -> str:
+    """One line describing what the story writer will be asked to deliver."""
+    units = group_into_units(beats, cfg_story, wpm=wpm)
+    if not units:
+        return "0 story units (no usable beats)"
+    words = sum(u["budget_words"] for u in units)
+    secs = sum(u["duration"] for u in units)
+    return (f"{len(units)} story units over {secs:.0f}s of film, "
+            f"{words} words ({words / max(wpm, 1) * 60:.0f}s of speech)")
+
+
+def unit_windows(units: list[dict]) -> list[tuple[float, float]]:
+    """The (start, end) film range of every unit, in order — for logging/tests."""
+    return [(float(u["start_ts"]), float(u["end_ts"])) for u in units]

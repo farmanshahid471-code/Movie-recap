@@ -35,10 +35,14 @@ movie.mp4
  ├─ A. ffmpeg audio -> faster-whisper/.srt -> timestamped transcript
  │      -> 5-min chunks w/ 30s overlap  -> per-chunk "action" summaries (LLM)
  ├─ B. summaries -> DeepSeek, section by section -> narration sentences, each
- │      tagged with the film window it describes + sized to hit the word target
+ │      tagged with the film window it narrates + sized to hit the word target
+ │      (the beat path instead groups beats into ~45s STORY UNITS and writes
+ │      each as a scene of a story — see "The story writer" below)
  ├─ C. sentences -> TTS (edge) -> en.mp3 + sentence (+word) timestamps
  ├─ D. chronological beat timeline: a monotonic playhead through the film,
- │      every beat's visual duration locked to its narration cue
+ │      every beat's visual duration locked to its narration cue; the
+ │      assembled cuts are audited once more before ffmpeg (a cut pointing at
+ │      already-shown film is pushed forward, never sorted)
  ├─ E. ffmpeg frame-exact cuts (re-encode) -> per-beat micro-shots
  └─ F. concat -> burn .ass subtitles -> mux narration at an explicit duration
         -> <name>_<lang>.mp4

@@ -319,6 +319,53 @@ def test_repair_pass_rewrites_description(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 6b. the pipeline's own progress callback contract + report file
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_progress_contract_and_report_file(monkeypatch, tmp_path) -> None:
+    """``story.write_report`` + the progress callback the pipeline passes."""
+    from recap import narrative as narrative_mod, pipeline, story as story_mod
+
+    beats = _beats(4, dur=12.0, start=0.0)
+    seen: list[str] = []
+
+    def fake_ask(cfg_llm, system, user, *, max_tokens, temperature=None):
+        n = len([ln for ln in user.splitlines() if ln.startswith("[B")])
+        rows = ",".join('{"b": %d, "sentences": ["Something happens here."]}'
+                        % (i + 1) for i in range(n))
+        return '{"beats": [%s], "recap": "It begins."}' % rows
+
+    monkeypatch.setattr(story_mod, "_ask", fake_ask)
+
+    # exactly the lambda pipeline.py passes to write_story_script
+    _units_total = len(story_mod.group_into_units(beats, None))
+
+    def _story_progress(_u, _n, _w, _t=_units_total):
+        seen.append(f"{_u['index'] + 1}/{_t} "
+                    f"{narrative_mod.format_window(_u['start_ts'], _u['end_ts'])} "
+                    f"-> {_n} sentences, {_w} words")
+
+    result = story_mod.write_story_script(
+        beats, {"provider": "deepseek", "model": "deepseek-chat"},
+        wpm=175, movie_duration=600.0, progress=_story_progress,
+    )
+    assert seen and seen[0].startswith("1/"), seen
+    out = tmp_path / "story_en.json"
+    story_mod.write_report(result["report"], out)
+    import json as _json
+    data = _json.loads(out.read_text(encoding="utf-8"))
+    assert data["units"] == len(seen) and data["words"] > 0
+    assert "description" in data and data["description"]["score"] <= 1.0
+    # the pipeline's story block wires this function
+    src = __import__("inspect").getsource(pipeline)
+    assert "story.write_story_script" in src
+    assert "story.write_report" in src
+    assert '"story-v1"' in src, "the cache tag must invalidate pre-story scripts"
+    print("ok: pipeline contract (progress shape + report json + cache tag)")
+
+
+# ---------------------------------------------------------------------------
 # 7. model-name recovery (the reported crash)
 # ---------------------------------------------------------------------------
 
@@ -360,6 +407,20 @@ def test_model_error_detection_only_fires_on_model_errors() -> None:
 # ---------------------------------------------------------------------------
 # 7b. the chunk path carries the same storytelling rules
 # ---------------------------------------------------------------------------
+
+
+def test_legacy_beat_prompt_also_tells_a_story() -> None:
+    """The per-beat FALLBACK writer must not go back to describing shots."""
+    from recap import beats as beats_mod
+
+    prompt = beats_mod.BEAT_SYSTEM_PROMPT
+    assert "Describe ONLY" not in prompt
+    assert "do not describe the picture" in prompt.lower()
+    assert "we see" in prompt.lower(), "the shot-description ban must be explicit"
+    # the hard budget contract stays (the timeline times every word to footage)
+    rendered = prompt.format(min_words=8, max_words=20, duration="7.0")
+    assert "8" in rendered and "20" in rendered and "7.0" in rendered
+    print("ok: fallback beat prompt tells the story, budget intact")
 
 
 def test_chunk_writer_carries_the_story_rules() -> None:
