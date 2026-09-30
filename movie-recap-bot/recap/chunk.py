@@ -21,8 +21,8 @@ from .dialogue import to_transcript_text
 
 def chunk_cues(
     cues: list[dict],
-    window_seconds: float = 300.0,
-    overlap_seconds: float = 30.0,
+    window_seconds: float = 1200.0,
+    overlap_seconds: float = 120.0,
 ) -> list[dict]:
     """Group timed cues into overlapping blocks of ``window_seconds``.
 

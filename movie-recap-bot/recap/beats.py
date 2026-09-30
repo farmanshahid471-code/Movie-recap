@@ -377,6 +377,41 @@ def required_time_for_words(words: int, wpm: int = _DEFAULT_WPM) -> float:
     return max(float(words), 0.0) / max(float(wpm), 1.0) * 60.0
 
 
+def select_key_beats(all_beats: list[dict], target_word_budget: int = 4500,
+                     target_beat_count: int = 66) -> list[dict]:
+    """Cluster detected beats into ~``target_beat_count`` narrative beats.
+
+    Unlike a plain stride (which would DISCARD the beats in between), every
+    run of ``step`` consecutive beats is MERGED into one beat spanning them,
+    so no part of the story is lost -- there are just fewer, longer visual
+    segments that can breathe across 2-4 narration sentences.
+    """
+    if not all_beats:
+        return []
+    step = max(1, len(all_beats) // max(int(target_beat_count), 1))
+    if step == 1:
+        return list(all_beats)
+    merged: list[dict] = []
+    for i in range(0, len(all_beats), step):
+        grp = all_beats[i:i + step]
+        m = dict(grp[0])
+        sk = "start_ts" if "start_ts" in m else "start"
+        ek = "end_ts" if "end_ts" in m else "end"
+        st = float(grp[0].get(sk, 0.0) or 0.0)
+        en = max(float(b.get(ek, st) or st) for b in grp)
+        m[sk], m[ek], m["duration"] = round(st, 3), round(en, 3), round(max(en - st, 0.0), 3)
+        for key in ("transcript_lines", "vision_notes"):
+            m[key] = [x for b in grp for x in (b.get(key) or [])]
+        if all("shot_count" in b for b in grp):
+            m["shot_count"] = sum(int(b["shot_count"]) for b in grp)
+        m["merged_from"] = len(grp)
+        merged.append(m)
+    for n, m in enumerate(merged):
+        if "index" in m:
+            m["index"] = n
+    return merged
+
+
 def select_beats_for_target(
     beats: list[dict],
     target_words: int,

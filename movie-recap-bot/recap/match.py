@@ -176,7 +176,11 @@ class LocalVectorStore:
             self._cache = (vecs, metas)
         return self._cache
 
-    def search(self, query_vector, k: int = 3, min_score: float = 0.0) -> list[dict]:
+    def search(self, query_vector, k: int = 3, min_score: float = 0.0,
+               min_start: float | None = None) -> list[dict]:
+        """Top-k cues by cosine similarity. ``min_start`` is the hard time
+        gate: only cues starting at/after it are eligible (monotonic
+        timestamp progression -- the search can never jump backwards)."""
         import numpy as np
 
         vecs, metas = self._load_all()
@@ -184,7 +188,11 @@ class LocalVectorStore:
             return []
         q = np.asarray(query_vector, dtype=np.float32).reshape(1, -1)
         scores = cosine_similarity_matrix(q, vecs)[0]
-        order = np.argsort(-scores)
+        if min_start is not None:
+            gate = np.array([float(m["start"]) >= float(min_start) - 1e-3
+                             for m in metas])
+            scores = np.where(gate, scores, -np.inf)
+        order = [int(p) for p in np.argsort(-scores) if np.isfinite(scores[p])]
         out = []
         for pos in order[:k]:
             sc = float(scores[pos])
@@ -298,16 +306,34 @@ class SupabaseVectorStore:
         if rows:
             self._rest("transcript_cues", payload=rows)
 
-    def search(self, query_vector, k: int = 3, min_score: float = 0.0) -> list[dict]:
+    def search(self, query_vector, k: int = 3, min_score: float = 0.0,
+               min_start: float | None = None) -> list[dict]:
+        """pgvector search, time-gated: ``WHERE start_ms >= min_start_ms``
+        (see migrations/001_pgvector.sql). Against an old ``match_cues``
+        without the ``min_start_ms`` argument, it over-fetches and applies
+        the same gate client-side."""
+        payload = {
+            "query_embedding": [float(x) for x in query_vector],
+            "match_count": int(k),
+            "match_threshold": float(min_score),
+        }
+        gated = min_start is not None
+        if gated:
+            payload["min_start_ms"] = int(max(float(min_start), 0.0) * 1000)
         try:
-            rows = self._rest(
-                "rpc/match_cues",
-                payload={
-                    "query_embedding": [float(x) for x in query_vector],
-                    "match_count": int(k),
-                    "match_threshold": float(min_score),
-                },
-            )
+            try:
+                rows = self._rest("rpc/match_cues", payload=payload)
+            except StoreError as exc:
+                if not gated or "min_start_ms" not in str(exc) and \
+                        "Could not find" not in str(exc):
+                    raise
+                legacy = {k2: v for k2, v in payload.items()
+                          if k2 != "min_start_ms"}
+                legacy["match_count"] = max(int(k) * 20, 100)
+                rows = self._rest("rpc/match_cues", payload=legacy)
+                floor = payload["min_start_ms"]
+                rows = [r for r in rows
+                        if int(r.get("start_ms", 0)) >= floor][: int(k)]
         except StoreError as exc:
             if "function match_cues" in str(exc) or "Could not find" in str(exc):
                 raise StoreError(
@@ -360,23 +386,32 @@ def map_beats(
     top_k: int = 3,
     min_score: float = 0.10,
     movie_duration: float | None = None,
+    anchors: list[float | None] | None = None,
+    confidence: float = 0.35,
 ) -> list[dict]:
-    """Map each narration sentence to the transcript moment it matches best.
+    """Map each narration sentence to its transcript moment, STRICTLY in order.
+
+    Time-gated vector search: the query for sentence *i* only considers cues
+    starting at or after the END of sentence *i-1*'s match::
+
+        SELECT ... FROM transcript_cues
+        WHERE start_ms >= previous_matched_end_ms
+        ORDER BY embedding <=> query_embedding LIMIT k;
+
+    so the visuals can never jump backwards in the film. There is NO B-roll /
+    "visually similar clip" fallback: a sentence without a confident match
+    falls back to its exact chronological transcript timestamp -- its
+    ``anchors[i]`` (the [HH:MM:SS] the writer tagged it with) when given,
+    else the next dialogue cue after the previous match.
 
     Returns beats::
 
         [{"index": 0, "sentence": "...", "cue_idx": 12,
           "start": 30.0, "end": 33.5, "score": 0.62, "source_text": "..."}]
-
-    Sentences with no acceptable match (or a movie with no dialogue at all)
-    fall back to evenly spaced anchors across the whole runtime, so the video
-    still covers the story.
     """
     if not sentences:
         return []
     if not cues:
-        # No transcript (e.g. subtitle-free, silent/ambient film): space beats
-        # evenly across the runtime.
         total = float(movie_duration or 0.0)
         return _even_fallback(sentences, total, cues)
 
@@ -384,64 +419,115 @@ def map_beats(
     cue_vectors = embedder.encode([(c.get("text") or "") for c in cues])
     store.add_cues(cues, cue_vectors)
 
-    print(f"  * Matching {len(sentences)} narration lines to the film ...")
+    print(f"  * Matching {len(sentences)} narration lines to the film "
+          "(time-gated, strictly chronological) ...")
     sent_vectors = embedder.encode(sentences)
-    import numpy as np
 
-    sims = cosine_similarity_matrix(sent_vectors, np.asarray(cue_vectors, dtype=np.float32))
-
-    used: set[int] = set()
+    by_idx = {int(c.get("idx", k)): k for k, c in enumerate(cues)}
+    starts = [float(c.get("start", 0.0)) for c in cues]
     beats: list[dict] = []
     fallback_count = 0
-    total_dur = float(movie_duration or (max((c.get("end", 0) for c in cues), default=0.0)))
+    prev_end = 0.0
+    total_dur = float(movie_duration or (max((c.get("end", 0) for c in cues),
+                                             default=0.0)))
     for i, sentence in enumerate(sentences):
-        order = [int(x) for x in np.argsort(-sims[i])]
-        best = None
-        for j in order[: top_k]:
-            score = float(sims[i][j])
-            if j in used:
-                continue
-            if score < min_score:
-                break
-            best = (j, score)
-            break
-        if best is not None:
-            j, score = best
-            used.add(j)
-            cue = cues[j]
-            beats.append(
-                {
-                    "index": i,
-                    "sentence": sentence,
-                    "cue_idx": int(j),
-                    "start": float(cue.get("start", 0.0)),
-                    "end": float(cue.get("end", 0.0)),
-                    "score": round(score, 4),
-                    "source_text": (cue.get("text") or "").strip(),
-                    "fallback": False,
-                }
-            )
+        hit = find_visual_match_with_fallback(
+            store, sent_vectors[i], prev_end, min_score=min_score,
+            confidence=confidence, k=top_k)
+        if hit is not None and not hit.get("fallback"):
+            j = by_idx.get(int(hit.get("idx", -1)))
+            st, en = float(hit["start"]), float(hit["end"])
+            beats.append({
+                "index": i, "sentence": sentence,
+                "cue_idx": j if j is not None else int(hit.get("idx", -1)),
+                "start": st, "end": max(en, st),
+                "score": round(float(hit.get("score", 0.0)), 4),
+                "source_text": (hit.get("text") or "").strip(),
+                "fallback": False,
+            })
+            prev_end = max(prev_end, en, st)
+            continue
+
+        # CHRONOLOGICAL FALLBACK (never a random similar clip)
+        fallback_count += 1
+        a = anchors[i] if anchors and i < len(anchors) else None
+        if a is not None:
+            st = max(float(a), prev_end)
+            j = None
         else:
-            # evenly spaced anchor along the film's timeline
-            fallback_count += 1
-            beats.append(
-                {
-                    "index": i,
-                    "sentence": sentence,
-                    "cue_idx": None,
-                    "start": None,
-                    "end": None,
-                    "score": 0.0,
-                    "source_text": "",
-                    "fallback": True,
-                }
-            )
+            j = next((k for k, t in enumerate(starts) if t >= prev_end - 1e-3),
+                     None)
+            st = starts[j] if j is not None else prev_end
+        if total_dur > 0:
+            st = min(st, total_dur)
+        en = float(cues[j].get("end", st + 4.0)) if j is not None else st + 4.0
+        if total_dur > 0:
+            en = min(en, total_dur)
+        beats.append({
+            "index": i, "sentence": sentence, "cue_idx": j,
+            "start": st, "end": max(en, st), "score": 0.0,
+            "source_text": (cues[j].get("text") or "").strip()
+            if j is not None else "",
+            "fallback": True, "fallback_cue": j is not None,
+        })
+        prev_end = max(prev_end, en)
 
     if fallback_count:
-        print(f"  * {fallback_count}/{len(sentences)} lines had no good dialogue "
-              f"match -> spaced evenly through the film.")
-    cue_times = [float(c.get("start", 0.0)) for c in cues]
-    return _fill_fallback_anchors(beats, cue_times, total_dur)
+        print(f"  * {fallback_count}/{len(sentences)} lines had no confident "
+              "match -> placed at their chronological transcript timestamp.")
+    return beats
+
+
+def find_best_visual_match(store, sentence_embedding, min_timestamp: float,
+                           *, min_score: float = 0.0, k: int = 1) -> dict | None:
+    """The best match for one sentence, strictly AFTER the previous clip.
+
+    ``min_timestamp`` must be the END time (``film_end``) of the previous
+    matched clip -- it is the absolute floor of the search, so the window
+    advances every sentence and one good match can never be stretched over
+    several sentences. Equivalent SQL (see migrations/001_pgvector.sql)::
+
+        SELECT idx, start_ms, end_ms FROM transcript_cues
+        WHERE start_ms >= :min_timestamp_ms
+        ORDER BY embedding <=> :sentence_embedding
+        LIMIT 1;
+    """
+    hits = store.search(sentence_embedding, k=max(int(k), 1),
+                        min_score=min_score, min_start=float(min_timestamp))
+    for h in hits:
+        if float(h.get("start", 0.0)) >= float(min_timestamp) - 1e-3 \
+                and float(h.get("score", 0.0)) >= min_score:
+            return h
+    return None
+
+
+def find_visual_match_with_fallback(store, sentence_embedding,
+                                    last_known_timestamp: float, *,
+                                    min_score: float = 0.10,
+                                    confidence: float = 0.35,
+                                    k: int = 1,
+                                    fallback_seconds: float = 5.0) -> dict:
+    """Time-gated pgvector match that can NEVER drop a scene.
+
+    Equivalent SQL::
+
+        SELECT start_ts, end_ts FROM visual_embeddings
+        WHERE start_ts >= :min_ts
+        ORDER BY embedding <-> :embedding LIMIT 1;
+
+    No hit, or similarity below ``confidence`` -> chronological fallback:
+    ``{"start": last_known_timestamp, "end": +fallback_seconds,
+    "fallback": True}`` (the film simply keeps progressing).
+    """
+    hit = find_best_visual_match(store, sentence_embedding,
+                                 last_known_timestamp,
+                                 min_score=min_score, k=k)
+    if hit is None or float(hit.get("score", 0.0)) < confidence:
+        t = float(last_known_timestamp)
+        return {"start": t, "end": t + float(fallback_seconds),
+                "score": float(hit.get("score", 0.0)) if hit else 0.0,
+                "fallback": True}
+    return hit
 
 
 def _fill_fallback_anchors(beats: list[dict], cue_times: list[float], duration: float):

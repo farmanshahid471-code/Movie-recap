@@ -171,7 +171,7 @@ Stored in `config.json` (next to the code). Key fields:
 | `output_dir` | folder for the rendered clips + the `_work` intermediates (default `D:\recap`; created on demand, falls back to `recap-studio/output` with a warning if it can't be written) |
 | `storyboard` | legacy engine only: use placeholder scenes when no movie is set |
 | `duration` | target recap length in seconds → word count is derived from it (default `900` ≈ 15 min full-length, adjusted for the pace below) |
-| `rate` | narration pace (edge-tts): `-12%` … `+0%`. Default `-8%` = calm storyteller read. The word target auto-scales so the video still lands on `duration` |
+| `rate` | narration pace (edge-tts): `-12%` … `+16%`. Default `+12%` = fast recap pacing. `duration` is passed to the pipeline as target seconds, converted with the measured voice rate and a learned length correction |
 | `auto` | legacy engine only: write the narration from the movie's dialogue |
 | `auto_subtitle` | optional explicit `.srt`/`.ass`/`.vtt`; blank = look next to the movie, else Whisper (both engines) |
 | `whisper_model` / `whisper_device` | Whisper model size + device used when no subtitle exists (default `small` / `auto`) |

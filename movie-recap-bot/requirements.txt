@@ -31,12 +31,14 @@ numpy>=1.24.0
 # psycopg2-binary>=2.9.0
 
 # ---- Optional: higher-quality TTS / forced alignment ----
-# elevenlabs>=1.0.0    # ElevenLabs multilingual TTS (best quality, paid)
+# elevenlabs>=1.0.0    # ElevenLabs (tts_provider: elevenlabs; the REST API is
+#                        called directly, so the SDK is optional)
+coqui-tts>=0.24.0      # Coqui XTTS-v2 (tts_provider: xtts); maintained fork of TTS, Python 3.10-3.13
+moviepy>=1.0.3         # assembly backend option (timeline.assemble_timeline)
 # WhisperX forced alignment engine (https://github.com/m-bain/whisperx):
 whisperx>=3.1.0        # Forced alignment with VAD & phoneme-level word timestamps
 
-# Optional (recommended): snap every visual cut onto the film's real
-# shot changes for a professional edit feel (timeline.snap_to_scenes):
-# PySceneDetect (https://github.com/Breakthrough-Open/PySceneDetect):
-# pip install scenedetect[opencv]
+# PySceneDetect ContentDetector for shot boundaries (the ffmpeg
+# select='gt(scene,0.35)' filter is only a last-resort fallback now):
+scenedetect[opencv]>=0.6.2
 

@@ -20,6 +20,7 @@ the expensive steps that already finished.
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 from pathlib import Path
 
@@ -28,7 +29,7 @@ from . import (align, beats, chunk, clip, dialogue, languages, llm, narrative,
                tts, video, vision)
 from .config import out_dir, work_dir
 from .dialogue import DialogueError
-from .util import count_words, probe_duration
+from .util import count_words, probe_duration, rate_speed_factor
 
 # Keep a reference to the original chunk script generator so tests that stub it
 # can be detected — the beat-first path should be skipped when the test has
@@ -535,6 +536,25 @@ def _align_narration_for(
         language=code,
         enabled=bool(narr_cfg.get("whisper_align", True)),
     )
+    if aligned and narr_cfg.get("trim_dead_air", True):
+        # Cut every line to its exact WhisperX speech span (zero-crossing
+        # snapped) so no sentence carries dead air at its head or tail. The
+        # untrimmed take is kept next to it; the per-sentence beat files are
+        # re-cut from the trimmed track.
+        try:
+            import shutil
+            raw_mp3 = wd / f"{code}.untrimmed.mp3"
+            shutil.copyfile(mp3, raw_mp3)
+            trimmed = align.trim_dead_air(
+                raw_mp3, cues, mp3,
+                gap_ms=float(narr_cfg.get("trim_gap_ms", 0.0) or 0.0),
+            )
+            if trimmed:
+                cues = trimmed
+                tts.generate_beat_audio_files(mp3, cues, wd / "beats" / code)
+        except Exception as exc:
+            print(f"  ! [{code}] dead-air trim failed ({exc}); keeping the "
+                  "untrimmed narration", flush=True)
     if aligned:
         try:
             (wd / f"{code}.timing.json").write_text(
@@ -545,6 +565,71 @@ def _align_narration_for(
         except OSError:
             pass
     return mp3, cues, aligned
+
+
+# ---------------------------------------------------------------------------
+# LENGTH LOCK: "I asked for 1500s and got 1300s"
+# ---------------------------------------------------------------------------
+# Three things shaved the video: (1) the writer is given a word CEILING per
+# beat and naturally lands ~10-15% under it, (2) the Studio converted seconds
+# to words with a guessed rate instead of the measured one, (3) silence
+# trimming / a faster voice shorten the audio further. The pipeline now works
+# from the requested SECONDS (narration.target_seconds), converts them with
+# the best known rate, and closes the loop: after every render the real
+# narration length is compared with the request and the correction factor
+# ("overshoot") is cached per voice+rate for the next run.
+LENGTH_CACHE_NAME = "length_calibration.json"
+_OVERSHOOT_DEFAULT = 1.10     # writers land ~10% under their word budget
+_OVERSHOOT_MIN, _OVERSHOOT_MAX = 0.85, 1.6
+
+
+def target_seconds(cfg: dict) -> float | None:
+    """The requested narration length in seconds, if one was given."""
+    try:
+        v = float((cfg.get("narration") or {}).get("target_seconds") or 0)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def length_overshoot(workdir: Path, provider: str, voice: str, rate: str) -> float:
+    """Word-budget multiplier learned from previous runs (default 1.10)."""
+    try:
+        data = json.loads((Path(workdir) / LENGTH_CACHE_NAME).read_text(encoding="utf-8"))
+        v = float((data.get(_rate_key(provider, voice, rate)) or {}).get("overshoot", 0))
+        if _OVERSHOOT_MIN <= v <= _OVERSHOOT_MAX:
+            return v
+    except Exception:
+        pass
+    try:
+        v = float(os.environ.get("RECAP_LENGTH_OVERSHOOT", "") or _OVERSHOOT_DEFAULT)
+    except ValueError:
+        v = _OVERSHOOT_DEFAULT
+    return min(max(v, _OVERSHOOT_MIN), _OVERSHOOT_MAX)
+
+
+def save_length_overshoot(workdir: Path, provider: str, voice: str, rate: str,
+                          used: float, requested_s: float, got_s: float) -> float | None:
+    """Correct the multiplier by how far the real narration missed the
+    request (damped: 80% of the correction) and cache it."""
+    if requested_s <= 0 or got_s <= 0:
+        return None
+    ratio = got_s / requested_s
+    new = used * (1.0 + 0.8 * (1.0 / ratio - 1.0))
+    new = round(min(max(new, _OVERSHOOT_MIN), _OVERSHOOT_MAX), 3)
+    path = Path(workdir) / LENGTH_CACHE_NAME
+    try:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        data[_rate_key(provider, voice, rate)] = {
+            "overshoot": new, "requested_s": round(requested_s, 1),
+            "got_s": round(got_s, 1), "ratio": round(ratio, 4)}
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+    return new
 
 
 def auto_recap(cfg: dict, movie: Path) -> list[Path]:
@@ -746,8 +831,8 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         raise DialogueError("No dialogue was extracted for any requested "
                             "language.")
     ck = cfg.setdefault("chunking", {})
-    window = float(ck.get("window_seconds", 300.0))
-    overlap = float(ck.get("overlap_seconds", 30.0))
+    window = float(ck.get("window_seconds", 1200.0))
+    overlap = float(ck.get("overlap_seconds", 120.0))
 
     # ------------------------------------------------- Step A (pass 1.5) vision
     # DeepSeek cannot see the film, so silent set-pieces would never be
@@ -863,6 +948,7 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
 
     # per-language chunked summaries + segmented scripts
     authored: dict[str, dict] = {}        # code -> {segments, sentences}
+    length_state: dict[str, dict] = {}    # code -> {overshoot, seconds}
     for code in native:
         cues = transcripts[code]
         # ---------------- BEAT-FIRST PATH (Steps 0-5) -----------------
@@ -886,6 +972,11 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                         print(f"  * [beats] using the MEASURED narration rate "
                               f"for this voice ({b_wpm} wpm, cached) for every "
                               "word budget", flush=True)
+                    else:
+                        # no measurement yet: scale the guess by the voice
+                        # pace ("+12%" reads 12% more words per minute)
+                        b_wpm = int(round(b_wpm * rate_speed_factor(
+                            _nar.get("rate", "+0%"))))
                 except Exception:
                     pass
                 b_gap = float(beats_cfg.get("gap_threshold", 1.5))
@@ -900,7 +991,26 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                 )
                 print(f"  * [beats] {languages.name(code)}: {len(beat_list)} beats from shot+vision+gap boundaries", flush=True)
 
+                _kc = int(beats_cfg.get("cluster_beats", 66) or 0)
+                if _kc > 0 and len(beat_list) > _kc * 2:
+                    _nb = len(beat_list)
+                    beat_list = beats.select_key_beats(beat_list, target_beat_count=_kc)
+                    print(f"  * [beats] clustered {_nb} raw beats into {len(beat_list)} narrative beats (nothing dropped)", flush=True)
+
                 b_target = int(cfg.get("narration", {}).get("words_target", 2000))
+                _nar_l = cfg.get("narration", {}) or {}
+                _secs_req = target_seconds(cfg)
+                if _secs_req:
+                    # seconds -> words with THIS pipeline's best rate
+                    b_target = int(round(_secs_req / 60.0 * b_wpm))
+                _over = length_overshoot(
+                    wd, _nar_l.get("tts_provider", "edge"),
+                    narration_voice(_nar_l, code), _nar_l.get("rate", "+0%"))
+                length_state[code] = {"overshoot": _over, "seconds": _secs_req}
+                b_target = int(round(b_target * _over))
+                print(f"  * [length] target {b_target} words "
+                      f"({'%.0fs requested, ' % _secs_req if _secs_req else ''}"
+                      f"{b_wpm} wpm, x{_over:.2f} fill correction)", flush=True)
                 if b_target > 0 and len(beat_list) > 5:
                     beat_list = beats.select_beats_for_target(beat_list, b_target, wpm=b_wpm)
                     print(f"  * [beats] Selected {len(beat_list)} key chronological beats matching target budget of {b_target} words (~{b_target / b_wpm * 60:.0f}s)", flush=True)
@@ -1084,6 +1194,16 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                   f"({_measured:.0f} wpm, cached from a previous run) "
                   f"instead of the configured {wpm} wpm")
             wpm = int(round(_measured))
+        else:
+            wpm = int(round(wpm * rate_speed_factor(nar.get("rate", "+0%"))))
+        _secs_req = target_seconds(cfg)
+        if _secs_req:
+            target = int(round(_secs_req / 60.0 * wpm))
+        _over = length_overshoot(
+            wd, nar.get("tts_provider", "edge"), narration_voice(nar, code),
+            nar.get("rate", "+0%"))
+        length_state[code] = {"overshoot": _over, "seconds": _secs_req}
+        target = int(round(target * _over))
         # VISUAL MATCH: never ask for more narration than the footage can
         # show at 1x. The footage a recap can actually DRAW on is the
         # transcript's own coverage (a partial subtitle covers less of the
@@ -1346,6 +1466,18 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         beat_files = tts.get_beat_files(wd, code)
         beat_audio_durs = [float(c.duration) for c in cues_t] if (beat_files and len(beat_files) == len(cues_t)) else None
 
+        if tl_cfg.get("cluster_sentences", True):
+            seg_for_lang = timeline.cluster_narrative_beats(
+                seg_for_lang, durations,
+                min_sentences=int(tl_cfg.get("cluster_min_sentences", 2)),
+                max_sentences=int(tl_cfg.get("cluster_max_sentences", 4)),
+                target_shot_seconds=float(tl_cfg.get("cluster_target_seconds", 9.0)),
+                max_shot_seconds=float(tl_cfg.get("cluster_max_seconds", 16.0)),
+                jump_seconds=float(tl_cfg.get("cluster_jump_seconds", 25.0)),
+            )
+            _ng = len({s.get("beat_group") for s in seg_for_lang})
+            print(f"  * [{code}] narrative beats: {len(seg_for_lang)} sentences -> "
+                  f"{_ng} visual segments (2-4 sentences share one shot)")
         tl_beats = timeline.build_timeline(
             seg_for_lang, durations, movie_dur, tl_cfg,
             word_times=[c.words for c in cues_t],
@@ -1355,7 +1487,12 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         )
 
         # Dynamic Audio Retiming: snap each beat audio directly to its video boundary
-        if beat_files and beat_audio_durs and len(beat_files) == len(tl_beats):
+        # Audio-first cutting already sizes every clip to its audio, so the
+        # audio is never stretched (atempo) or padded to fit the picture.
+        _audio_first = bool(tl_cfg.get("audio_first", True))
+        if (not _audio_first and tl_cfg.get("dynamic_retiming", True)
+                and beat_files and beat_audio_durs
+                and len(beat_files) == len(tl_beats)):
             try:
                 retimed_mp3 = wd / f"{code}_retimed.mp3"
                 target_durs = [float(b.get("duration", 0.0)) for b in tl_beats]
@@ -1460,6 +1597,26 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
                       f"{cfg['narration'].get('words_per_minute', 150)}")
         except Exception:
             pass
+        # LENGTH LOCK feedback: compare the real narration with the request
+        # and correct the word-budget multiplier for the next run.
+        try:
+            _ls = length_state.get(code) or {}
+            _req = _ls.get("seconds") or target_seconds(cfg)
+            if _req and audio_span > 0:
+                _new = save_length_overshoot(
+                    wd, cfg["narration"].get("tts_provider", "edge"),
+                    narration_voice(cfg["narration"], code),
+                    cfg["narration"].get("rate", "+0%"),
+                    float(_ls.get("overshoot") or _OVERSHOOT_DEFAULT),
+                    float(_req), float(audio_span))
+                _pct = audio_span / float(_req) * 100.0
+                print(f"  * [{code}] length: requested {float(_req):.0f}s, "
+                      f"narration {audio_span:.0f}s ({_pct:.0f}%)"
+                      + (f" -- next run's fill correction x{_new:.2f}"
+                         if _new and abs(_pct - 100.0) > 2.0 else ""),
+                      flush=True)
+        except Exception:
+            pass
 
         # Resume: if the final render already exists for these exact inputs
         # (narration + beats + movie + subtitle/assembly settings), skip the
@@ -1504,12 +1661,19 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         )
         subtitles.write_srt(subs, wd / f"{code}.srt")
         subtitles.write_ass(subs, wd / f"{code}.ass", sub_cfg)
-        base = video.add_bgm_if_any(
-            visual, str(vcfg.get("bgm", "")),
-            float(vcfg.get("bgm_volume", 0.12)), wd / "visual" / code,
+        # Music bed: ducked under the voice, swelling in the pauses. Mixed
+        # into the AUDIO track that is actually muxed (the old video-side
+        # bed was never mapped into the final file).
+        mix_audio = video.mix_bgm_ducked(
+            mp3, str(vcfg.get("bgm", "") or ""),
+            wd / "visual" / code / f"{code}_mix.mp3",
+            volume=float(vcfg.get("bgm_volume", 0.12)),
+            duck_db=float(vcfg.get("bgm_duck_db", 12.0)),
+            duration=audio_span,
         )
+        base = visual
         ass = wd / f"{code}.ass"
-        video.burn_and_mux_locked(base, mp3, ass, out_mp4, vcfg,
+        video.burn_and_mux_locked(base, mix_audio, ass, out_mp4, vcfg,
                                   duration=audio_span)
         _write_marker(ef_marker, ef_sig)
         results.append(out_mp4)

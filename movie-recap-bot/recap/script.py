@@ -474,8 +474,10 @@ COVERAGE RULES:
 FORBIDDEN (the tells of machine-written narration): uniform sentence length; "Name does X. Name does Y." listing; three sentences starting the same way; em-dashes; semicolons; rhetorical questions to the viewer; "the movie", "the film", "the scene shows", "the camera" mid-story; "little did they know"; "unbeknownst"; meta commentary, analysis, or review talk; SHOT DESCRIPTION — a sentence whose only job is to say what the picture looks like ("A dark hallway.", "We see a table covered in papers.") is not narration, it is a caption.
 - {continuity}
 
+TIMESTAMP ANCHORS (required): every beat below starts with its exact film time from the transcript, e.g. [00:15:30]. Begin EVERY sentence with the timestamp of the beat it narrates, copied exactly, e.g. "[00:15:30] Dan wakes up in the snow." Timestamps must never go backwards. They are stripped before the voice reads the line and used as the exact point the footage is cut from.
+
 Respond with ONLY a JSON object in this exact shape, no markdown fences:
-{{"sentences": ["First sentence.", "Second sentence."]}}
+{{"sentences": ["[00:15:30] First sentence.", "[00:15:42] Second sentence."]}}
 
 === ACTION BEATS FOR THIS SECTION ===
 {beats}
@@ -486,6 +488,54 @@ Respond with ONLY a JSON object in this exact shape, no markdown fences:
 def _fmt_clock(seconds: float) -> str:
     s = max(int(seconds), 0)
     return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+
+
+_TS_TAG_RE = re.compile(r"^\s*\[(\d{1,2}):(\d{2})(?::(\d{2}))?(?:[.,]\d+)?\]\s*")
+
+
+def extract_timestamp_anchors(
+    sents: list[str], lo: float | None = None, hi: float | None = None,
+) -> tuple[list[str], list[float] | None]:
+    """Strip ``[HH:MM:SS]`` anchor tags the writer prefixed to each sentence.
+
+    Returns ``(clean_sentences, anchors)``. ``anchors`` is one absolute film
+    time per sentence (untagged pieces inherit the previous tag, e.g. when a
+    tagged element was split into two sentences), made monotone
+    non-decreasing and clamped to ``[lo, hi]`` when given. It is ``None``
+    when fewer than half of the sentences carried a tag -- the writer
+    ignored the instruction and the caller falls back to its own anchoring.
+    """
+    clean: list[str] = []
+    raw: list[float | None] = []
+    tagged = 0
+    for s in sents or []:
+        m = _TS_TAG_RE.match(s or "")
+        if m:
+            a, b, c = m.group(1), m.group(2), m.group(3)
+            t = (int(a) * 3600 + int(b) * 60 + int(c)) if c is not None \
+                else (int(a) * 60 + int(b))
+            raw.append(float(t))
+            s = s[m.end():].strip()
+            tagged += 1
+        else:
+            raw.append(None)
+        clean.append(s)
+    if not clean or tagged * 2 < len(clean):
+        return clean, None
+    anchors: list[float] = []
+    prev = None
+    first = next((x for x in raw if x is not None), 0.0)
+    for x in raw:
+        v = x if x is not None else (prev if prev is not None else first)
+        if lo is not None:
+            v = max(v, float(lo))
+        if hi is not None:
+            v = min(v, float(hi))
+        if prev is not None and v < prev:
+            v = prev          # strict chronology: never rewind
+        anchors.append(v)
+        prev = v
+    return clean, anchors
 
 
 def _parse_segment(raw: str) -> list[str]:
@@ -2102,6 +2152,8 @@ def generate_segmented_script(
             max_tokens=_out_tokens_for_words(budget),
         )
         sents = _parse_segment(raw)
+        sents, _llm_anchors = extract_timestamp_anchors(sents, t0, t1)
+        _llm_sents = list(sents)
 
         # One retry if the model badly under-delivered on this section.
         got = count_words(" ".join(sents))
@@ -2119,9 +2171,11 @@ def generate_segmented_script(
                 json_mode=True,
                 max_tokens=_out_tokens_for_words(budget),
             )
-            retry = _parse_segment(more)
+            retry, _r_anchors = extract_timestamp_anchors(
+                _parse_segment(more), t0, t1)
             if count_words(" ".join(retry)) > got:
                 sents = retry
+                _llm_anchors, _llm_sents = _r_anchors, list(retry)
 
         # Names check: if the writer dropped most of the section's characters
         # ("she goes to help" instead of "Jessie rides Bullseye"), one retry
@@ -2143,9 +2197,11 @@ def generate_segmented_script(
                     json_mode=True,
                     max_tokens=_out_tokens_for_words(budget),
                 )
-                retry = _parse_segment(fixed)
+                retry, _r_anchors = extract_timestamp_anchors(
+                    _parse_segment(fixed), t0, t1)
                 if retry and len(retry) == len(sents) and \
                         len(_missing_names(names, " ".join(retry))) < len(missing):
+                    _llm_anchors, _llm_sents = _r_anchors, list(retry)
                     sents = retry
 
         # English-only punch-up pass: same sentence count, spoken style.
@@ -2206,7 +2262,9 @@ def generate_segmented_script(
                             json_mode=True,
                             max_tokens=_out_tokens_for_words(budget),
                         )
-                        _retry = _parse_segment(_regen)
+                        _retry, _r_anchors = extract_timestamp_anchors(
+                            _parse_segment(_regen), t0, t1)
+                        _regen_anchors = (_r_anchors, list(_retry))
                         if _retry and 2 < len(_retry) <= len(sents) and \
                                 count_words(" ".join(_retry)) <= _cap:
                             print(f"    ... section {pos + 1}/{len(usable)}: "
@@ -2215,6 +2273,7 @@ def generate_segmented_script(
                                   f"{count_words(' '.join(_retry))} words "
                                   "(full window covered, no sentences chopped)")
                             sents = _retry
+                            _llm_anchors, _llm_sents = _regen_anchors
                         else:
                             # Last resort: mechanical sentence deletion
                             _fitted = _fit_section_to_footage(sents, _cap, names)
@@ -2260,7 +2319,22 @@ def generate_segmented_script(
                 _tail = float(os.environ.get("RECAP_ANCHOR_TAIL", "6.0"))
             except (TypeError, ValueError):
                 _tail = 6.0
-            anchors = _sentence_anchor_values(sents, beats) if is_en else None
+            # WRITER TIMESTAMP ANCHORS win: the writer tagged each sentence
+            # with the exact transcript time of the beat it narrates
+            # ([00:15:30] ...). They are only trusted while the sentence list
+            # is still the one the tags came with (polish/condense passes
+            # keep the count; a changed list falls back to embeddings).
+            anchors = None
+            _writer_anchored = False
+            if _llm_anchors and len(_llm_anchors) == len(sents) \
+                    and len(_llm_sents) == len(sents):
+                anchors = list(_llm_anchors)
+                _writer_anchored = True
+                print(f"    ... section {pos + 1}/{len(usable)}: "
+                      f"{len(anchors)} sentences anchored to the writer's "
+                      "[HH:MM:SS] transcript timestamps", flush=True)
+            if anchors is None and is_en:
+                anchors = _sentence_anchor_values(sents, beats)
             if anchors is None:
                 times = sorted(
                     float(b["t"]) for b in (beats or [])
@@ -2278,7 +2352,7 @@ def generate_segmented_script(
                         t0 + (k + 0.5) * max(t1 - t0, 1.0) / max(n_s, 1)
                         for k in range(n_s)
                     ]
-            if visual_match and anchors:
+            if visual_match and anchors and not _writer_anchored:
                 anchors = _paced_anchors(
                     anchors, sents, t0, min(t1, zone_hi[pos]),
                     words_per_minute, lead=_lead,

@@ -138,6 +138,9 @@ def cmd_auto(args: argparse.Namespace) -> None:
         # Raise the ceiling to whatever was asked for: silently clamping the
         # target to words_max is how a 900s request became a short video.
         nar["words_target"] = words
+        # the pipeline re-derives words from SECONDS with its measured rate
+        # and length calibration (see pipeline.target_seconds)
+        nar["target_seconds"] = secs
         nar["words_min"] = min(int(nar.get("words_min", 600)), words)
         nar["words_max"] = max(int(nar.get("words_max", 4200)), int(words * 1.6))
         print(f"  * Target narration: {secs}s (~{secs / 60:.1f} min) "

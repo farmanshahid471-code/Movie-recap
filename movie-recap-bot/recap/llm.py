@@ -579,7 +579,61 @@ _BAD_MODELS: set[str] = set()
 _CAP_FLOOR: dict[str, int] = {}
 _EMPTY_NOTED: set[str] = set()
 _EMPTY_STREAK_LIMIT = 2          # empties before a model is considered broken
-_MAX_OUTPUT_TOKENS = 16384       # ceiling for the escalated output budget
+_MAX_OUTPUT_TOKENS = 65536       # ceiling for the escalated output budget
+
+# ---------------------------------------------------------------------------
+# DeepSeek: NO output cap. Every DeepSeek call asks for the model's FULL
+# output window, whatever budget the caller computed (the callers' word-
+# derived caps are what produced finish_reason=length truncations). Length
+# is controlled by the prompt's word budget, never by cutting the model off.
+#   deepseek-chat      -> 8192   (the endpoint's hard maximum)
+#   deepseek-reasoner  -> 65536
+#   anything else (deepseek-flash, proxies) -> 65536 first; if the endpoint
+#       answers "valid range of max_tokens is [1, N]" the call is retried at
+#       N and N is remembered for the rest of the run.
+# DEEPSEEK_MAX_TOKENS=<n> forces a value; DEEPSEEK_MAX_TOKENS=0 restores the
+# caller's own budget (tests / debugging).
+# ---------------------------------------------------------------------------
+_DS_LIMIT: dict[str, int] = {}
+_DS_KNOWN_MAX = {"deepseek-chat": 8192, "deepseek-reasoner": 65536}
+_DS_DEFAULT_MAX = 65536
+_RANGE_RE = re.compile(
+    r"max_tokens[^\n]*?\[\s*\d+\s*,\s*(\d+)\s*\]", re.IGNORECASE)
+
+
+def deepseek_output_cap(model: str, requested: int) -> int:
+    """The max_tokens a DeepSeek call is sent with (see the note above)."""
+    raw = os.environ.get("DEEPSEEK_MAX_TOKENS")
+    if raw is not None and raw.strip() != "":
+        try:
+            forced = int(raw)
+        except ValueError:
+            forced = -1
+        if forced == 0:
+            return int(requested)
+        if forced > 0:
+            return forced
+    name = (model or "").strip().lower()
+    if name in _DS_LIMIT:
+        return _DS_LIMIT[name]
+    for key, val in _DS_KNOWN_MAX.items():
+        if name == key:
+            return val
+    if "reasoner" in name:
+        return 65536
+    return _DS_DEFAULT_MAX
+
+
+def _max_tokens_limit_from_error(exc: Exception) -> int | None:
+    """N from 'Invalid max_tokens value, the valid range of max_tokens is
+    [1, N]' (DeepSeek / OpenAI-compatible wording)."""
+    m = _RANGE_RE.search(str(exc))
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    return None
 
 
 def _get(obj, name: str, default=None):
@@ -747,6 +801,10 @@ def _chat_with_recovery(
     )
     if cut_short:
         bigger = min(max(cap * 4, 2048), _MAX_OUTPUT_TOKENS)
+        _known = _DS_LIMIT.get((model or "").strip().lower()) or \
+            _DS_KNOWN_MAX.get((model or "").strip().lower())
+        if p == "deepseek" and _known:
+            bigger = min(bigger, _known)
         if bigger > cap:
             _empty_note(f"escalate:{model}:{cap}",
                         f"  ! [llm] '{model}' came back empty after spending its "
@@ -942,6 +1000,9 @@ def complete(
     except ValueError:
         env_max = 0
     cap = max_tokens or env_max or 4096
+    # DeepSeek is UNCAPPED: the full output window of the model, always.
+    if p == "deepseek":
+        cap = max(int(cap), deepseek_output_cap(resolved_model, int(cap)))
 
     try:
         temp = float(os.environ.get("LLM_TEMPERATURE", "0.7"))
@@ -964,6 +1025,16 @@ def complete(
         "temperature": temp,
         "max_tokens": int(cap),
     }
+    # Storytelling: a mild presence penalty keeps DeepSeek moving the story
+    # forward instead of repeating itself (LLM_PRESENCE_PENALTY overrides;
+    # 0 disables).
+    if p == "deepseek" and "reasoner" not in (resolved_model or ""):
+        try:
+            _pp = float(os.environ.get("LLM_PRESENCE_PENALTY", "0.5"))
+        except ValueError:
+            _pp = 0.5
+        if _pp:
+            kwargs["presence_penalty"] = _pp
     # deepseek-reasoner rejects temperature; keep the call bare.
     if "reasoner" in (resolved_model or ""):
         kwargs.pop("temperature", None)
@@ -1029,6 +1100,18 @@ def complete(
                             resolved_model = _resolution
                             kwargs["model"] = resolved_model
                             continue
+                    _lim = _max_tokens_limit_from_error(inner_exc)
+                    if _lim and int(kwargs.get("max_tokens") or 0) > _lim:
+                        # the endpoint told us its real output ceiling:
+                        # use ALL of it, and remember it for the run
+                        _DS_LIMIT[(resolved_model or "").strip().lower()] = _lim
+                        _CAP_FLOOR.pop(_call_key(p, base_url, resolved_model), None)
+                        kwargs["max_tokens"] = _lim
+                        cap = _lim
+                        print(f"  * [llm] {resolved_model!r} allows at most "
+                              f"{_lim} output tokens -- using the full {_lim}",
+                              flush=True)
+                        continue
                     if _wants_max_completion_tokens(inner_exc) and "max_tokens" in kwargs:
                         kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
                         print("  * [llm] this model wants "

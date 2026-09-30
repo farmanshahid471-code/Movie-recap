@@ -82,11 +82,12 @@ class _Client:
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
-    for name in ("_EMPTY_STREAK", "_BAD_MODELS", "_CAP_FLOOR", "_EMPTY_NOTED",
+    for name in ("_EMPTY_STREAK", "_BAD_MODELS", "_CAP_FLOOR", "_EMPTY_NOTED", "_DS_LIMIT",
                  "_ENDPOINT_MODELS", "_NOTED"):
         getattr(llm, name).clear()
     monkeypatch.delenv("RECAP_TOKEN_LOG", raising=False)
     monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("DEEPSEEK_MAX_TOKENS", raising=False)
     yield
 
 
@@ -130,6 +131,7 @@ def test_empty_answer_escalates_the_output_budget(monkeypatch) -> None:
                          rt=kw["max_tokens"], reasoning="thinking " * 200)
         return _resp("The pilot wakes up and the forest is quiet.")
 
+    monkeypatch.setenv("DEEPSEEK_MAX_TOKENS", "0")  # test the escalation ladder
     client = _install(monkeypatch, handler)
     out = _call(max_tokens=512, json_mode=True)
     assert out.startswith("The pilot wakes up")
@@ -149,6 +151,7 @@ def test_reasoning_only_answer_is_treated_as_a_cut_off(monkeypatch) -> None:
             return _resp(finish="stop", ct=1200, rt=1200, reasoning="hmm " * 50)
         return _resp("She finds the letter.")
 
+    monkeypatch.setenv("DEEPSEEK_MAX_TOKENS", "0")  # test the escalation ladder
     client = _install(monkeypatch, handler)
     assert _call(max_tokens=1024) == "She finds the letter."
     assert len(client.calls) == 2
@@ -446,3 +449,32 @@ if __name__ == "__main__":
             failed += 1
             traceback.print_exc()
     print("\nall llm recovery tests passed" if not failed else f"\n{failed} failed")
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek is uncapped: the model's full output window, always
+# ---------------------------------------------------------------------------
+
+def test_deepseek_chat_always_gets_its_full_8192(monkeypatch) -> None:
+    client = _install(monkeypatch, lambda kw: _resp("ok."), model="deepseek-chat")
+    _call(model="deepseek-chat", max_tokens=300)
+    assert client.calls[0]["max_tokens"] == 8192
+    assert client.calls[0]["presence_penalty"] == 0.5
+
+
+def test_unknown_deepseek_model_learns_the_endpoint_ceiling(monkeypatch) -> None:
+    class _RangeErr(Exception):
+        pass
+
+    def handler(kw):
+        if int(kw["max_tokens"]) > 16384:
+            raise _RangeErr("Error code: 400 - Invalid max_tokens value, the "
+                            "valid range of max_tokens is [1, 16384]")
+        return _resp("Story.")
+
+    client = _install(monkeypatch, handler)          # deepseek-flash
+    assert _call(max_tokens=200) == "Story."
+    assert [c["max_tokens"] for c in client.calls] == [65536, 16384]
+    client.calls.clear()
+    _call(max_tokens=200)
+    assert client.calls[0]["max_tokens"] == 16384, "ceiling remembered"
