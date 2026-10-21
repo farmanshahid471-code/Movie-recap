@@ -119,7 +119,13 @@ _DEFAULTS: dict[str, Any] = {
     # Beats advance monotonically through the film and every beat's visual is
     # locked to its narration cue, so video length == audio length exactly.
     "timeline": {
-        "micro_cut_seconds": 3.0,  # aim for a new shot roughly every 3s
+        # SYNC MODEL: "clip_plan" (default, ported from AI-Movie-Shorts) =
+        # one narration sentence -> one clip whose OWN film window is
+        # time-fitted to the measured narration (centre-trim above
+        # max_video_speedup). "legacy" = clustered/micro-cut timeline.
+        "sync_mode": "clip_plan",
+        "max_video_speedup": 1.75,  # reference MAX_VIDEO_SPEEDUP
+        "micro_cut_seconds": 3.0,  # aim for a new shot roughly every 3s (legacy)
         "max_cuts_per_beat": 3,    # a long sentence becomes up to 3 micro-shots
         "min_cut_seconds": 1.2,    # never flash a shot shorter than this
         "pre_roll": 0.4,           # start each shot slightly before its moment

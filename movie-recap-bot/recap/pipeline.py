@@ -1466,31 +1466,51 @@ def auto_recap(cfg: dict, movie: Path) -> list[Path]:
         beat_files = tts.get_beat_files(wd, code)
         beat_audio_durs = [float(c.duration) for c in cues_t] if (beat_files and len(beat_files) == len(cues_t)) else None
 
-        if tl_cfg.get("cluster_sentences", True):
-            seg_for_lang = timeline.cluster_narrative_beats(
-                seg_for_lang, durations,
-                min_sentences=int(tl_cfg.get("cluster_min_sentences", 2)),
-                max_sentences=int(tl_cfg.get("cluster_max_sentences", 4)),
-                target_shot_seconds=float(tl_cfg.get("cluster_target_seconds", 9.0)),
-                max_shot_seconds=float(tl_cfg.get("cluster_max_seconds", 16.0)),
-                jump_seconds=float(tl_cfg.get("cluster_jump_seconds", 25.0)),
+        # SYNC MODEL (ported from keithhb33/AI-Movie-Shorts): default is the
+        # atomic clip-plan fit in recap/clipplan.py -- one sentence = one
+        # clip, its OWN film window time-fitted (setpts, centre-trimmed
+        # above 1.75x) to its measured narration duration. The legacy path
+        # clustered 2-4 sentences under one shot and let a global film
+        # playhead push clips into the next scene, which is how the
+        # picture drifted off the narration. Set timeline.sync_mode:
+        # legacy to restore it.
+        _sync_mode = str(tl_cfg.get("sync_mode", "clip_plan")).strip().lower()
+        if _sync_mode in ("clip_plan", "atomic", "reference"):
+            tl_beats = clipplan.build_sync_beats(
+                seg_for_lang, durations, movie_dur, tl_cfg, stats=tl_stats,
             )
-            _ng = len({s.get("beat_group") for s in seg_for_lang})
-            print(f"  * [{code}] narrative beats: {len(seg_for_lang)} sentences -> "
-                  f"{_ng} visual segments (2-4 sentences share one shot)")
-        tl_beats = timeline.build_timeline(
-            seg_for_lang, durations, movie_dur, tl_cfg,
-            word_times=[c.words for c in cues_t],
-            stats=tl_stats,
-            scene_bounds=snap_bounds,
-            audio_durations=beat_audio_durs,
-        )
+            print(f"  * [{code}] clip-plan sync: {len(tl_beats)} sentences -> "
+                  f"{len(tl_beats)} clips (one clip per sentence, each "
+                  f"window fitted to its measured narration; "
+                  f"{tl_stats.get('clip_plan_trimmed', 0)} centre-trimmed, "
+                  f"{tl_stats.get('clip_plan_sped_up', 0)} sped up, "
+                  f"{tl_stats.get('slowed_groups', 0)} slowed)")
+        else:
+            if tl_cfg.get("cluster_sentences", True):
+                seg_for_lang = timeline.cluster_narrative_beats(
+                    seg_for_lang, durations,
+                    min_sentences=int(tl_cfg.get("cluster_min_sentences", 2)),
+                    max_sentences=int(tl_cfg.get("cluster_max_sentences", 4)),
+                    target_shot_seconds=float(tl_cfg.get("cluster_target_seconds", 9.0)),
+                    max_shot_seconds=float(tl_cfg.get("cluster_max_seconds", 16.0)),
+                    jump_seconds=float(tl_cfg.get("cluster_jump_seconds", 25.0)),
+                )
+                _ng = len({s.get("beat_group") for s in seg_for_lang})
+                print(f"  * [{code}] narrative beats: {len(seg_for_lang)} sentences -> "
+                      f"{_ng} visual segments (2-4 sentences share one shot)")
+            tl_beats = timeline.build_timeline(
+                seg_for_lang, durations, movie_dur, tl_cfg,
+                word_times=[c.words for c in cues_t],
+                stats=tl_stats,
+                scene_bounds=snap_bounds,
+                audio_durations=beat_audio_durs,
+            )
 
         # Dynamic Audio Retiming: snap each beat audio directly to its video boundary
         # Audio-first cutting already sizes every clip to its audio, so the
         # audio is never stretched (atempo) or padded to fit the picture.
         _audio_first = bool(tl_cfg.get("audio_first", True))
-        if (not _audio_first and tl_cfg.get("dynamic_retiming", True)
+        if (_sync_mode in ("legacy",) and not _audio_first and tl_cfg.get("dynamic_retiming", True)
                 and beat_files and beat_audio_durs
                 and len(beat_files) == len(tl_beats)):
             try:

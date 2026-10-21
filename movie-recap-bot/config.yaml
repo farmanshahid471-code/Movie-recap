@@ -219,6 +219,13 @@ vision:
 # Beats advance monotonically through the film and each beat's visual length is
 # locked to its narration cue, so the video can never drift or be truncated.
 timeline:
+  # SYNC MODEL ported from AI-Movie-Shorts: "clip_plan" = one sentence ->
+  # one clip, its own film window time-fitted (setpts=PTS/speed) to the
+  # measured narration, centre-trimmed if it would exceed 1.75x. This is
+  # what keeps narration and visuals on the same moment. "legacy" restores
+  # the clustered micro-cut timeline (cluster_* below only apply there).
+  sync_mode: clip_plan
+  max_video_speedup: 1.75  # reference MAX_VIDEO_SPEEDUP
   micro_cut_seconds: 2.4   # aim for a new shot roughly every ~2.4s (recap pace)
   # Narrative beat clustering: 2-4 sentences share ONE continuous shot
   cluster_sentences: true
