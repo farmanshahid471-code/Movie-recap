@@ -24,9 +24,9 @@ import os
 import json
 from pathlib import Path
 
-from . import (align, beats, chunk, clip, dialogue, languages, llm, narrative,
-               scenes, script, story, subtitles, summarize, timeline, translate,
-               tts, video, vision)
+from . import (align, beats, chunk, clip, clipplan, dialogue, languages, llm,
+               narrative, scenes, script, story, subtitles, summarize, timeline,
+               translate, tts, video, vision)
 from .config import out_dir, work_dir
 from .dialogue import DialogueError
 from .util import count_words, probe_duration, rate_speed_factor
