@@ -46,6 +46,7 @@ if not defined PY (
 :: 2. Run Python Uploader
 :: ---------------------------------------------------------
 set "PYTHONPATH=%ROOT%\movie-recap-bot;%PYTHONPATH%"
+if exist "F:\recap-data\venv\Scripts\python.exe" set "PY=F:\recap-data\venv\Scripts\python.exe"
 %PY% -m recap.vast_upload %*
 
 echo.

@@ -55,6 +55,7 @@ if errorlevel 1 (
 :: 3. Run Vast setup helper
 :: ---------------------------------------------------------
 set "PYTHONPATH=%ROOT%\movie-recap-bot;%PYTHONPATH%"
+if exist "F:\recap-data\venv\Scripts\python.exe" set "PY=F:\recap-data\venv\Scripts\python.exe"
 %PY% -m recap.vast %*
 
 echo.

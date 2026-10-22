@@ -32,6 +32,7 @@ if not defined PY (
     goto :end
 )
 
+if exist "F:\recap-data\venv\Scripts\python.exe" set "PY=F:\recap-data\venv\Scripts\python.exe"
 %PY% recap-studio\tools\portcheck.py %PORT% >nul 2>&1
 if errorlevel 1 (
     echo  [i] Nothing is listening on port %PORT% - Recap Studio is not running.

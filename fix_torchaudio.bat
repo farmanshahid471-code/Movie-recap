@@ -21,6 +21,13 @@ if not defined PY (
     exit /b 1
 )
 
+:: Prefer the F: drive venv created by setup_ui.bat, so the repair
+:: touches the packages the app actually uses (on F:, not C:).
+if exist "F:\recap-data\venv\Scripts\python.exe" (
+    set "PY=F:\recap-data\venv\Scripts\python.exe"
+    echo  Using F: venv Python: %PY%
+)
+
 echo.
 echo  [1] Reinstall a matched torch 2.8.0 + torchaudio 2.8.0 pair (CPU)
 echo  [2] Remove torch/torchaudio/whisperx/coqui-tts entirely (fastest;

@@ -4,10 +4,8 @@ project:
   # Where final videos + _work intermediates go. Absolute paths are fine and
   # recommended so nothing is written to the C: drive, e.g. "D:\\recap\\output"
   # (a relative path resolves against this bot folder). Env override: OUTPUT_DIR
-  output_dir: "output"
-  # Where model weights / ffmpeg binaries / scratch go. Leave "" (default) and
-  # the cache lives next to output_dir (same drive). Env override: CACHE_DIR
-  cache_dir: ""
+  output_dir: "F:\\recap"
+  cache_dir: "F:\\recap-data\\cache"  # model weights / ffmpeg / scratch, all on F: (env override: CACHE_DIR)
 
 language:
   # Clips to render for each movie. Codes: en (English), zh (Simplified

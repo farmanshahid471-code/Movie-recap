@@ -20,24 +20,32 @@ echo  ==========================================
 echo.
 
 :: ---------------------------------------------------------
-:: 0. Storage drive configuration -- use F: drive if available
+:: 0. Storage: EVERYTHING lives on the F: drive (no C: space)
+::    data + caches + temp + venv -> F:\recap-data
+::    rendered videos + _work     -> F:\recap
+::    F: is REQUIRED: setup refuses to silently fall back to
+::    another drive (the old D:/project fallback could land
+::    on C:). Override only via RECAP_DRIVE, e.g. RECAP_DRIVE=E:
 :: ---------------------------------------------------------
-set "TARGET_DRIVE="
-if exist "F:\" (
-    set "TARGET_DRIVE=F:"
-) else if exist "D:\" (
-    set "TARGET_DRIVE=D:"
-) else (
-    set "TARGET_DRIVE=%ROOT%"
+if not defined RECAP_DRIVE set "RECAP_DRIVE=F:"
+if not exist "%RECAP_DRIVE%\" (
+    echo  [X] Drive %RECAP_DRIVE% not found. This setup keeps EVERYTHING
+    echo      off the C: drive, on %RECAP_DRIVE% -- plug it in / create it,
+    echo      or set RECAP_DRIVE to another big drive and re-run.
+    pause
+    exit /b 1
+)
+set "RECAP_DATA=%RECAP_DRIVE%\recap-data"
+if /i "%ROOT:~0,2%"=="C:" (
+    echo  [!] NOTE: this project folder itself is on C: : %ROOT%
+    echo      Only the small code files live there -- packages, models,
+    echo      caches and videos all go to %RECAP_DRIVE% below. To move
+    echo      even the code, copy this whole folder to %RECAP_DRIVE% and
+    echo      run setup_ui.bat from there.
+    echo.
 )
 
-if "%TARGET_DRIVE%"=="%ROOT%" (
-    set "RECAP_DATA=%ROOT%\.recap-data"
-    set "RECAP_OUTPUT=%ROOT%\output"
-) else (
-    set "RECAP_DATA=%TARGET_DRIVE%\recap-data"
-    set "RECAP_OUTPUT=%TARGET_DRIVE%\recap"
-)
+set "RECAP_OUTPUT=%RECAP_DRIVE%\recap"
 
 mkdir "%RECAP_DATA%" 2>nul
 mkdir "%RECAP_DATA%\cache" 2>nul
@@ -54,10 +62,14 @@ set "HF_HOME=%RECAP_DATA%\cache\huggingface"
 set "WHISPER_CACHE_DIR=%RECAP_DATA%\cache\whisper"
 set "RECAP_LOG_DIR=%RECAP_DATA%"
 set "OUTPUT_DIR=%RECAP_OUTPUT%"
+set "XDG_CACHE_HOME=%RECAP_DATA%\cache\xdg"
+set "TORCH_HOME=%RECAP_DATA%\cache\torch"
+set "PYTHONPYCACHEPREFIX=%RECAP_DATA%\cache\pycache"
+set "PIP_DISABLE_PIP_VERSION_CHECK=1"
 
 echo  Data Directory   : %RECAP_DATA%
 echo  Output Directory : %RECAP_OUTPUT%
-echo  (All caches, temporary files, and video outputs stay off the C: drive)
+echo  (Packages, caches, temp, models and videos ALL stay on %RECAP_DRIVE% -- nothing is written to C:)
 echo.
 
 :: ---------------------------------------------------------
@@ -102,6 +114,27 @@ if errorlevel 1 (
 echo.
 
 :: ---------------------------------------------------------
+:: 1b. Virtualenv ON F: -- the base Python install stays where
+::     Windows put it (its .exe is small), but EVERY installed
+::     package (faster-whisper, torch, ... gigabytes) goes into
+::     this venv on F:, never into C:\...\Lib\site-packages.
+:: ---------------------------------------------------------
+set "VENV=%RECAP_DATA%\venv"
+if not exist "%VENV%\Scripts\python.exe" (
+    echo  Creating virtual environment on %RECAP_DRIVE% : %VENV%
+    %PY% -m venv "%VENV%"
+    if errorlevel 1 (
+        echo  [X] Could not create the virtual environment on %RECAP_DRIVE%
+        pause
+        exit /b 1
+    )
+    "%VENV%\Scripts\python.exe" -m pip install --upgrade pip >nul 2>&1
+)
+set "PY=%VENV%\Scripts\python.exe"
+echo  [OK] Using venv Python (ALL packages install on %RECAP_DRIVE%): %PY%
+
+
+:: ---------------------------------------------------------
 :: 2. Check and install core dependencies
 :: ---------------------------------------------------------
 echo  Checking Python dependencies...
@@ -120,7 +153,6 @@ set "MISSING="
 
 if defined MISSING (
     echo  Installing missing dependencies: !MISSING!
-    %PY% -m pip install --upgrade pip >nul 2>&1
     %PY% -m pip install !MISSING!
     if errorlevel 1 (
         echo  Retrying installation with --no-warn-script-location...
