@@ -115,15 +115,59 @@ def prosody_ssml(text: str, rate: str | None = None, pitch: str | None = None,
             f'xml:lang="en-US">{body}</speak>')
 
 
+def _parse_version(text) -> tuple[int, ...] | None:
+    try:
+        parts = [int(p) for p in re.findall(r"\d+", str(text or ""))[:3]]
+    except ValueError:
+        return None
+    return tuple(parts) if parts else None
+
+
+#: First edge-tts line whose Sec-MS-GEC handshake Microsoft still accepts.
+#: Older clients get ``403 Invalid response status`` from
+#: speech.platform.bing.com no matter how often they retry.
+MIN_EDGE_TTS_VERSION = (7, 2, 0)
+
+
+def _edge_proxy() -> str | None:
+    """Proxy for the Edge websocket, if the user configured one.
+
+    A 403 that survives an up-to-date edge-tts is usually the egress IP
+    (VPN / datacenter) being rejected; EDGE_TTS_PROXY lets the user route
+    around it without touching code.
+    """
+    for var in ("EDGE_TTS_PROXY", "HTTPS_PROXY", "https_proxy",
+                "HTTP_PROXY", "http_proxy"):
+        val = (os.environ.get(var) or "").strip()
+        if val:
+            return val
+    return None
+
+
 class EdgeTTS:
     name = "edge"
 
     def __init__(self, rate: str = DEFAULT_RATE, pitch: str = DEFAULT_PITCH):
         import edge_tts  # type: ignore
 
+        version = _parse_version(getattr(edge_tts, "__version__", None))
+        if version is not None and version < MIN_EDGE_TTS_VERSION:
+            raise TTSError(
+                "edge-tts " + ".".join(map(str, version)) + " is too old: "
+                "Microsoft now rejects it with '403 Invalid response "
+                "status'. Upgrade and re-run (all earlier steps resume):\n"
+                '  pip install -U "edge-tts>=7.2.0"'
+            )
         self._edge = edge_tts
         self.rate = normalize_rate(rate)
         self.pitch = normalize_pitch(pitch)
+
+    def _communicate(self, text: str, voice: str):
+        kwargs = {"rate": self.rate, "pitch": self.pitch}
+        proxy = _edge_proxy()
+        if proxy:
+            kwargs["proxy"] = proxy
+        return self._edge.Communicate(text, voice, **kwargs)
 
     def synthesize_beats(self, sentences: list[str], voice: str, beats_dir: Path) -> tuple[list[TimedCue], list[Path]]:
         """Synthesize individual audio files per scene or beat (beat_001.mp3, beat_002.mp3, etc.)."""
@@ -133,8 +177,37 @@ class EdgeTTS:
         cues: list[TimedCue] = []
         cum_time = 0.0
 
+        # Fingerprint guard: resumed beats are only valid for the SAME
+        # sentences/voice/rate/pitch that produced them. A changed script
+        # (pipeline re-runs TTS after regenerating lines) must never inherit
+        # the previous script's audio under its new sentences.
+        import hashlib
+
+        sig = hashlib.sha256(json.dumps(
+            [sentences, voice, self.rate, self.pitch],
+            ensure_ascii=False).encode("utf-8")).hexdigest()
+        sig_path = beats_dir / ".beats_sig"
+        if sig_path.exists() and sig_path.read_text(encoding="utf-8").strip() != sig:
+            for stale in beats_dir.glob("beat_*.mp3"):
+                stale.unlink(missing_ok=True)
+        sig_path.write_text(sig, encoding="utf-8")
+
+        reused = 0
         for i, sentence in enumerate(sentences):
             beat_path = beats_dir / f"beat_{i+1:03d}.mp3"
+            # RESUME: a run that died at line 200 of 225 (the reported 403)
+            # must not re-buy the 199 lines already spoken. A finished beat
+            # file on disk is reused as-is; word timings for it are absent
+            # here but the Whisper alignment pass re-derives them later.
+            if beat_path.exists() and beat_path.stat().st_size > 0:
+                _w, existing_dur = _finish_beat(beat_path)
+                if existing_dur > 0.05:
+                    reused += 1
+                    cues.append(TimedCue(sentence.strip(), cum_time,
+                                         cum_time + existing_dur))
+                    beat_files.append(beat_path)
+                    cum_time += existing_dur
+                    continue
             words, dur = asyncio.run(self._sync_one_beat(sentence, voice, beat_path))
             words, dur = _finish_beat(beat_path, words)
             # word boundaries are relative to THIS clip: make them absolute
@@ -146,24 +219,59 @@ class EdgeTTS:
             beat_files.append(beat_path)
             cum_time += dur
 
+        if reused:
+            print(f"  * edge TTS: reused {reused} beat file(s) already "
+                  f"synthesized — only the missing lines will be spoken",
+                  flush=True)
         return cues, beat_files
 
     async def _sync_one_beat(self, sentence: str, voice: str, out_beat: Path) -> tuple[list[tuple[str, float, float]], float]:
-        communicate = self._edge.Communicate(
-            sentence, voice, rate=self.rate, pitch=self.pitch
-        )
-        words: list[tuple[str, float, float]] = []
-        audio = bytearray()
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio.extend(chunk["data"])
-            elif chunk["type"] == "WordBoundary":
-                offset = chunk["offset"] / 10_000_000.0
-                duration = chunk["duration"] / 10_000_000.0
-                words.append(((chunk["text"] or "").strip(), offset, offset + duration))
-        out_beat.write_bytes(bytes(audio))
-        dur = probe_duration(out_beat)
-        return words, dur
+        """Speak one sentence, retrying transient Microsoft rejections.
+
+        A fresh ``Communicate`` is created per attempt (a rejected
+        websocket cannot be reused), with exponential backoff. The 403 in
+        the bug report is in the retryable set: it is often a transient
+        handshake/rate rejection, and only a *persistent* 403 means the
+        client version or the egress IP is blocked (see _edge_friendly).
+        """
+        attempts = max(1, int(os.environ.get("TTS_RETRIES", "4")))
+        last: Exception | None = None
+        for attempt in range(attempts):
+            words: list[tuple[str, float, float]] = []
+            audio = bytearray()
+            try:
+                communicate = self._communicate(sentence, voice)
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        audio.extend(chunk["data"])
+                    elif chunk["type"] == "WordBoundary":
+                        offset = chunk["offset"] / 10_000_000.0
+                        duration = chunk["duration"] / 10_000_000.0
+                        words.append(((chunk["text"] or "").strip(), offset, offset + duration))
+                if not audio:
+                    raise RuntimeError("edge TTS returned no audio (empty stream)")
+                out_beat.write_bytes(bytes(audio))
+                try:
+                    return words, probe_duration(out_beat)
+                except Exception:
+                    return words, 0.0  # no ffprobe here; caller re-measures
+            except Exception as exc:
+                last = exc
+                # Never leave a partial/empty file behind: the resume
+                # check above would mistake it for a finished beat.
+                try:
+                    if out_beat.exists() and out_beat.stat().st_size == 0:
+                        out_beat.unlink()
+                except OSError:
+                    pass
+                if not _edge_retryable(exc) or attempt >= attempts - 1:
+                    break
+                wait = min(2.0 * (2 ** attempt), 30.0)
+                print(f"  * edge TTS beat failed ({type(exc).__name__}: "
+                      f"{str(exc)[:120]}) — retry {attempt + 2}/{attempts} "
+                      f"in {wait:.0f}s ...", flush=True)
+                await asyncio.sleep(wait)
+        raise TTSError(_edge_friendly(str(last or "unknown error")))
 
     def synthesize(self, sentences: list[str], voice: str, out_mp3: Path) -> list[TimedCue]:
         """Synthesize with a few automatic retries for transient network faults.
@@ -232,19 +340,44 @@ class EdgeTTS:
 
 
 def _edge_retryable(exc: Exception) -> bool:
-    """True when an edge-tts error is a transient network/DNS problem worth retrying."""
+    """True when an edge-tts error may clear on a fresh websocket attempt.
+
+    Includes HTTP 403/429/5xx (``Invalid response status``): Microsoft
+    returns those transiently for handshake/rate rejections, which is why
+    the reported failure is retried with backoff before it is surfaced.
+    """
     s = str(exc)
     markers = (
         "getaddrinfo", "Cannot connect", "ClientConnector", "Connection reset",
         "Connection aborted", "Timeout", "timed out", "Name or service not known",
         "Temporary failure in name resolution", "OSError", "Server disconnected",
         "EOF occurred in violation",
+        "Invalid response status", "WSServerHandshake", "no audio",
+        "403", "429", "500", "502", "503", "504",
     )
     return any(m.lower() in s.lower() for m in markers)
 
 
 def _edge_friendly(msg: str) -> str:
     """Turn a raw edge-tts error into an actionable message."""
+    low = msg.lower()
+    if "403" in low or "invalid response status" in low:
+        return (
+            "edge TTS failed: Microsoft rejected the connection (403). "
+            "This is NOT your script or movie — it is the free Edge voice "
+            "service refusing this client/IP. In order:\n"
+            "  1. Upgrade the client (old versions are rejected outright):\n"
+            '       pip install -U "edge-tts>=7.2.0"   then re-run.\n'
+            "  2. If it persists, the egress IP is likely blocked: turn "
+            "OFF any VPN (or try another network / mobile hotspot), or "
+            "set EDGE_TTS_PROXY=http://host:port and re-run.\n"
+            "  3. Or switch voice provider in config.yaml: "
+            "narration.tts_provider: openai (OPENAI_API_KEY) or elevenlabs "
+            "(ELEVENLABS_API_KEY) — both bypass Microsoft entirely.\n"
+            "  Re-running is cheap: finished beats and all earlier steps "
+            "resume, only missing lines are re-spoken.\n  Raw error: "
+            + msg[:300]
+        )
     if any(k in msg.lower() for k in ("getaddrinfo", "name or service not known",
                                        "temporary failure in name resolution",
                                        "cannot connect to host")):

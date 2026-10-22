@@ -3,7 +3,10 @@ PyYAML>=6.0
 pysubs2>=1.6.0
 
 # Free text-to-speech (English + Chinese, used by default)
-edge-tts>=6.1.0
+# >=7.2 is REQUIRED: Microsoft added/rotated the Sec-MS-GEC handshake token
+# on speech.platform.bing.com and pre-7.2 clients are rejected with
+# "403 Invalid response status" (the exact failure in the run log).
+edge-tts>=7.2.0
 
 # ffmpeg / ffprobe static binaries (bundled via pip; also works if you
 # already have ffmpeg on PATH). Used for video assembly + subtitle burning.
