@@ -36,10 +36,18 @@ numpy>=1.24.0
 # ---- Optional: higher-quality TTS / forced alignment ----
 # elevenlabs>=1.0.0    # ElevenLabs (tts_provider: elevenlabs; the REST API is
 #                        called directly, so the SDK is optional)
-coqui-tts>=0.24.0      # Coqui XTTS-v2 (tts_provider: xtts); maintained fork of TTS, Python 3.10-3.13
 moviepy>=1.0.3         # assembly backend option (timeline.assemble_timeline)
-# WhisperX forced alignment engine (https://github.com/m-bain/whisperx):
-whisperx>=3.1.0        # Forced alignment with VAD & phoneme-level word timestamps
+# --- OPTIONAL torch engines: do NOT uncomment/install these separately! ---
+# whisperx and coqui-tts both pin their own torch release; installing them
+# one after another leaves torch and torchaudio at DIFFERENT versions,
+# which crashes python.exe with "Entry Point Not Found" in
+# libtorchaudio.pyd (an uncatchable Windows DLL loader error). The app
+# therefore guards every whisperx/TTS import with recap/torch_compat.py
+# and skips them when the pair mismatches. To enable them, install ONE
+# matched pair first (or just double-click fix_torchaudio.bat):
+#   pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+#   pip install "whisperx>=3.8"        # forced alignment (tts_provider n/a)
+#   pip install "coqui-tts>=0.24"      # XTTS-v2 voice (tts_provider: xtts)
 
 # PySceneDetect ContentDetector for shot boundaries (the ffmpeg
 # select='gt(scene,0.35)' filter is only a last-resort fallback now):

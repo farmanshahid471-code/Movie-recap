@@ -131,34 +131,20 @@ if defined MISSING (
 )
 echo.
 
-echo  Checking forced alignment engine - WhisperX...
-%PY% -c "import whisperx" >nul 2>&1
+:: WhisperX / Coqui XTTS are OPTIONAL (alignment + an alternate voice).
+:: They are NOT auto-installed or imported here any more: both drag in
+:: torch/torchaudio, and a version-mismatched pair crashes python.exe
+:: with "Entry Point Not Found (libtorchaudio.pyd)" -- an OS loader
+:: error that happens *during import*, so even this check used to kill
+:: the setup. The default pipeline (edge-tts + faster-whisper) needs
+:: neither. We only read version metadata (loads no DLLs) and warn.
+echo  Checking torch stack (WhisperX / XTTS are optional)...
+%PY% recap-studio\tools\torch_check.py
 if errorlevel 1 (
-    echo  Installing whisperx for frame-accurate phoneme alignment...
-    %PY% -m pip install whisperx>=3.1.0
-    if errorlevel 1 (
-        echo  [NOTE] whisperx install had issues. The pipeline will automatically use faster-whisper fallback.
-    ) else (
-        echo  [OK] whisperx installed successfully.
-    )
-) else (
-    echo  [OK] whisperx ready.
+    echo  [!] The optional WhisperX/XTTS engines are disabled until this
+    echo      is fixed -- run fix_torchaudio.bat. Everything else works.
 )
-echo.
-
-echo  Checking Coqui XTTS-v2 voice engine...
-%PY% -c "from TTS.api import TTS" >nul 2>&1
-if errorlevel 1 (
-    echo  Installing coqui-tts for XTTS-v2 narration - large download, please wait...
-    %PY% -m pip install coqui-tts
-    if errorlevel 1 (
-        echo  [NOTE] coqui-tts install had issues. Narration will keep using edge-tts.
-    ) else (
-        echo  [OK] coqui-tts installed. Set tts_provider: "xtts" in config.yaml to use it.
-    )
-) else (
-    echo  [OK] XTTS-v2 ready.
-)
+echo  [NOTE] To enable WhisperX alignment later: fix_torchaudio.bat (option 1).
 echo.
 
 :: ---------------------------------------------------------

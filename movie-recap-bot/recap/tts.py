@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .util import probe_duration
+from . import torch_compat
 
 
 class TTSError(RuntimeError):
@@ -647,6 +648,11 @@ def _XTTS(cfg: dict) -> TTSProvider:
 
         def _local(self):
             if _P._model is None:
+                if not torch_compat.torch_stack_ok():
+                    raise TTSError(
+                        "XTTS cannot load: "
+                        + (torch_compat.torch_stack_problem() or "")
+                        + "\n" + torch_compat.FIX_INSTRUCTIONS)
                 try:
                     from TTS.api import TTS as _CoquiTTS  # type: ignore
                 except Exception as exc:

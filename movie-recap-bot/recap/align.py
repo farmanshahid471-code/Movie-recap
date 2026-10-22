@@ -28,6 +28,7 @@ import json
 import re
 from pathlib import Path
 
+from . import torch_compat
 from .tts import TimedCue
 
 # Word a narrator naturally has before a clause word where a cut feels good.
@@ -96,6 +97,8 @@ def narration_words_whisperx(
     Utilizes Voice Activity Detection (VAD) and phoneme-level alignment
     to guarantee highly accurate word timestamps, eliminating drift.
     """
+    if not torch_compat.guard("whisperx forced alignment"):
+        return None
     try:
         import whisperx  # type: ignore
         import torch  # type: ignore
@@ -221,6 +224,8 @@ def align_with_whisperx(
 
     Returns the aligned dictionary structure with segments and word timestamps.
     """
+    if not torch_compat.guard("whisperx forced alignment"):
+        return None
     try:
         import whisperx  # type: ignore
         import torch  # type: ignore
